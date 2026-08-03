@@ -39,24 +39,8 @@ impl Default for GlobalSettings {
             port: 8000,
             priv_key: None,
             ssl_cert: None,
-            cache_dir: {
-                cfg_if::cfg_if! {
-                    if #[cfg(target_family = "unix")] {
-                        "/tmp/streaming_cache".into()
-                    } else {
-                        "./streaming_cache".into()
-                    }
-                }
-            },
-            metadata_dir: {
-                cfg_if::cfg_if! {
-                    if #[cfg(target_family = "unix")] {
-                        "/opt/dim/metadata".into()
-                    } else {
-                        "./metadata".into()
-                    }
-                }
-            },
+            cache_dir: "streaming_cache".into(),
+            metadata_dir: "metadata".into(),
             quiet_boot: false,
             disable_auth: false,
             verbose: false,

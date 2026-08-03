@@ -1,7 +1,7 @@
-FROM node:18-bullseye AS web
+FROM node:24-bookworm AS web
 WORKDIR /ui
-COPY ui/package*.json ./
-RUN yarn install
+COPY ui/package.json ui/yarn.lock ./
+RUN corepack enable && yarn install --frozen-lockfile --ignore-scripts --non-interactive
 COPY ui ./
 ENV NODE_OPTIONS=--openssl-legacy-provider
 RUN yarn run build

@@ -1,5 +1,11 @@
 {
   "name": "dim",
+  "private": true,
+  "packageManager": "yarn@1.22.22",
+  "engines": {
+    "node": ">=24 <25",
+    "yarn": "1.22.22"
+  },
   "dependencies": {
     "@reduxjs/toolkit": "^1.7.1",
     "@types/react-collapse": "^5.0.1",

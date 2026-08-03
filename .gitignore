@@ -22,7 +22,6 @@ benches/bench_1.txt
 node_modules
 ui/coverage
 ui/build
-ui/yarn.lock
 
 npm-debug.log*
 yarn-debug.log*

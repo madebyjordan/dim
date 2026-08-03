@@ -14,6 +14,23 @@ explicitly state otherwise, any contribution intentionally submitted for
 inclusion in dim by you shall be licensed under the AGPLv3 License 
 without any additional terms or conditions.
 
+### Local development
+
+Follow the source prerequisites in [README.md](README.md), then bootstrap a development build with:
+
+```sh
+./scripts/bootstrap.sh
+./scripts/run.sh
+```
+
+Before submitting a change, run:
+
+```sh
+cargo fmt --all --check
+cargo test --workspace --tests --locked
+cd ui && corepack yarn prettier --check src && corepack yarn eslint --ext .js,.jsx,.ts,.tsx src
+```
+
 ## Contributors
 Valerian G. (Lead Developer and maintainer) \
 [Valerian G.](https://github.com/vgarleanu)
