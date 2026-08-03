@@ -57,6 +57,9 @@ jobs:
           chmod +x release/utils/ffmpeg
           chmod +x release/utils/ffprobe
 
+      - name: Create Cargo target directory
+        run: mkdir -p target
+
       - name: Test Dim
         uses: actions-rs/cargo@v1
         with:
