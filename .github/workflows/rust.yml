@@ -4,7 +4,7 @@ on: [push, pull_request, workflow_dispatch]
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: target
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
   DATABASE_URL: "sqlite://./dim_dev.db"
 
 jobs:
@@ -58,7 +58,7 @@ jobs:
           chmod +x release/utils/ffprobe
 
       - name: Create Cargo target directory
-        run: mkdir -p target dim-database/target
+        run: mkdir -p target
 
       - name: Test Dim
         uses: actions-rs/cargo@v1
