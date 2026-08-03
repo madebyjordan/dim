@@ -517,9 +517,8 @@ pub async fn return_manifest(
 
 /// Repeatedly invoke a nightfall routine until a timeout occurs waiting for a chunk to be "ready".
 ///
-/// `tick_dur` will the the duration amount that gets passed into `std::thread::sleep` and it will
-/// block for AT MOST `tick_limit` ticks. When a the tick limit has been hit `None` is returned
-/// otherwise `Some(Result<T, NightfallError>)` is returned.
+/// `tick_dur` is the delay between attempts. At most `tick_limit` attempts are made before a
+/// `ChunkNotDone` error is returned. Terminal Nightfall errors return immediately.
 ///
 async fn timeout_segment<F, T>(
     f: impl Fn() -> F,
@@ -547,6 +546,22 @@ where
     }
 }
 
+async fn stop_failed_transcode(state: &StateManager, id: &str, error: &NightfallError) {
+    if matches!(error, NightfallError::SessionDoesntExist) {
+        tracing::debug!(stream_id = id, "Stream was already stopped");
+        return;
+    }
+
+    let stderr = state.get_stderr(id.to_owned()).await.unwrap_or_default();
+    tracing::error!(
+        stream_id = id,
+        error = %error,
+        ffmpeg_stderr = %stderr,
+        "FFmpeg stream failed"
+    );
+    let _ = state.die(id.to_owned()).await;
+}
+
 #[derive(Deserialize)]
 pub struct InitParams {
     start_num: Option<u32>,
@@ -561,12 +576,19 @@ pub async fn get_init(
     Path(id): Path<String>,
     Query(params): Query<InitParams>,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
-    let path: String = timeout_segment(
+    let path: String = match timeout_segment(
         || state.chunk_init_request(id.clone(), params.start_num.unwrap_or(0)),
         Duration::from_millis(100),
         100,
     )
-    .await?;
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => {
+            stop_failed_transcode(&state, &id, &error).await;
+            return Err(error.into());
+        }
+    };
 
     Ok(reply_with_file(path, ("Content-Type", "video/mp4")).await)
 }
@@ -598,12 +620,19 @@ pub async fn get_chunk(
         .parse::<u32>()
         .unwrap_or(0);
 
-    let path: String = timeout_segment(
+    let path: String = match timeout_segment(
         || state.chunk_request(id.clone(), chunk_num),
         Duration::from_millis(100),
         100,
     )
-    .await?;
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => {
+            stop_failed_transcode(&state, &id, &error).await;
+            return Err(error.into());
+        }
+    };
 
     Ok(reply_with_file(path, ("Content-Type", "video/mp4")).await)
 }
@@ -617,12 +646,19 @@ pub async fn get_subtitle(
     State(AppState { state, .. }): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
-    let path: String = timeout_segment(
+    let path: String = match timeout_segment(
         || state.get_sub(id.clone(), "stream".into()),
         Duration::from_millis(100),
         200,
     )
-    .await?;
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => {
+            stop_failed_transcode(&state, &id, &error).await;
+            return Err(error.into());
+        }
+    };
 
     Ok(reply_with_file(path, ("Content-Type", "text/vtt")).await)
 }
@@ -636,7 +672,7 @@ pub async fn get_subtitle_ass(
     State(AppState { state, .. }): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
-    let path: String = timeout_segment(
+    let path: String = match timeout_segment(
         || async {
             if state.has_started(id.clone()).await.unwrap_or(false) {
                 if state.is_done(id.clone()).await.unwrap_or(false) {
@@ -651,7 +687,14 @@ pub async fn get_subtitle_ass(
         Duration::from_millis(100),
         200,
     )
-    .await?;
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => {
+            stop_failed_transcode(&state, &id, &error).await;
+            return Err(error.into());
+        }
+    };
 
     Ok(reply_with_file(path, ("Content-Type", "text/ass")).await)
 }
@@ -748,5 +791,52 @@ async fn reply_with_file(file: String, header: (&str, &str)) -> Response<Body> {
             .status(StatusCode::NOT_FOUND)
             .body(Body::empty())
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod stream_failure_tests {
+    use super::timeout_segment;
+    use nightfall::error::NightfallError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn segment_waits_are_bounded() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+
+        let result = timeout_segment(
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(NightfallError::ChunkNotDone) }
+            },
+            Duration::ZERO,
+            3,
+        )
+        .await;
+
+        assert!(matches!(result, Err(NightfallError::ChunkNotDone)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn terminal_transcode_errors_return_without_retrying() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+
+        let result = timeout_segment(
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(NightfallError::ProfileChainExhausted) }
+            },
+            Duration::ZERO,
+            10,
+        )
+        .await;
+
+        assert!(matches!(result, Err(NightfallError::ProfileChainExhausted)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

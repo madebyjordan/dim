@@ -26,6 +26,7 @@ import ContinueProgress from "./ContinueProgress";
 import VttSubtitles from "./VttSubtitles";
 import SsaSubtitles from "./SsaSubtitles";
 import NextVideo from "./NextVideo/Index";
+import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
 
 import "./Index.scss";
 
@@ -116,34 +117,56 @@ function VideoPlayer() {
         },
       };
 
-      const res = await fetch(host, config);
-      const payload = await res.json();
+      try {
+        const res = await fetch(host, config);
+        if (!res.ok) throw new Error(`Manifest request failed (${res.status})`);
+        const payload = await res.json();
+        if (!payload.gid || !Array.isArray(payload.tracks)) {
+          throw new Error("Manifest response was incomplete");
+        }
 
-      dispatch(setGID(payload.gid));
+        sessionStorage.setItem("GID", payload.gid);
+        dispatch(setGID(payload.gid));
 
-      const tVideos = payload.tracks.filter(
-        (track) => track.content_type === "video"
-      );
-      const tAudios = payload.tracks.filter(
-        (track) => track.content_type === "audio"
-      );
-      const tSubtitles = payload.tracks.filter(
-        (track) => track.content_type === "subtitle"
-      );
+        const tVideos = payload.tracks.filter(
+          (track) => track.content_type === "video"
+        );
+        const tAudios = payload.tracks.filter(
+          (track) => track.content_type === "audio"
+        );
+        const tSubtitles = payload.tracks.filter(
+          (track) => track.content_type === "subtitle"
+        );
 
-      dispatch(
-        setTracks({
-          video: tVideos,
-          audio: tAudios,
-          subtitle: tSubtitles,
-        })
-      );
+        dispatch(
+          setTracks({
+            video: tVideos,
+            audio: tAudios,
+            subtitle: tSubtitles,
+          })
+        );
 
-      dispatch(
-        setManifestState({
-          virtual: { loaded: true },
-        })
-      );
+        dispatch(
+          setManifestState({
+            virtual: { loaded: true },
+          })
+        );
+      } catch (error) {
+        console.error("[VIDEO] failed to create playback manifest", error);
+        dispatch(
+          setManifestState({
+            loading: false,
+            loaded: false,
+          })
+        );
+        dispatch(
+          updateVideo({
+            canPlay: false,
+            error: { msg: PLAYBACK_ERROR_MESSAGE },
+            waiting: false,
+          })
+        );
+      }
     })();
   }, [dispatch, params.fileID, token, video.gid]);
 
@@ -230,7 +253,7 @@ function VideoPlayer() {
           method: "DELETE",
           headers: { Authorization: auth.token },
         });
-        sessionStorage.clear();
+        sessionStorage.removeItem("GID");
       })();
     };
   }, [
@@ -312,7 +335,7 @@ function VideoPlayer() {
         <VideoEvents />
         <VideoMediaData />
         <video ref={videoRef} />
-        <VttSubtitles />+
+        <VttSubtitles />
         <SsaSubtitles />
         <div className="overlay" ref={overlay}>
           {!error && manifest.loaded && video.canPlay && <Menus />}
@@ -320,7 +343,7 @@ function VideoPlayer() {
             <NextVideo id={nextEpisodeId} showAfter={showNextVideoAfter} />
           )}
           {!error && manifest.loaded && video.canPlay && <VideoControls />}
-          {(!error & (manifest.loading || !video.canPlay) || video.waiting) && (
+          {!error && (manifest.loading || !video.canPlay || video.waiting) && (
             <RingLoad />
           )}
           {!error &&

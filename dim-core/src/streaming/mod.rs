@@ -238,3 +238,42 @@ pub const AVC1_LEVELS: [Avc1Level; 20] = [
         max_bitrate: 800_000_000,
     },
 ];
+
+#[cfg(test)]
+mod compatibility_tests {
+    use nightfall::profiles::{
+        AacTranscodeProfile, H264TranscodeProfile, ProfileContext, TranscodingProfile,
+    };
+
+    #[test]
+    fn nightfall_uses_the_supported_hls_segment_option() {
+        for args in [
+            H264TranscodeProfile
+                .build(ProfileContext::default())
+                .expect("H264 profile should generate FFmpeg arguments"),
+            AacTranscodeProfile
+                .build(ProfileContext::default())
+                .expect("AAC profile should generate FFmpeg arguments"),
+        ] {
+            assert!(!args.iter().any(|arg| arg == "-hls_ts_options"));
+            assert!(args.iter().any(|arg| arg == "-hls_segment_options"));
+            assert!(args
+                .iter()
+                .any(|arg| arg == "movflags=frag_custom+dash+delay_moov"));
+        }
+    }
+
+    #[test]
+    fn preserves_discontinuity_flags_used_for_seeking() {
+        let mut ctx = ProfileContext::default();
+        ctx.output_ctx.start_num = 4;
+
+        let args = H264TranscodeProfile
+            .build(ctx)
+            .expect("H264 seek profile should generate FFmpeg arguments");
+
+        assert!(args
+            .iter()
+            .any(|arg| arg == "movflags=frag_custom+dash+delay_moov+frag_discont"));
+    }
+}

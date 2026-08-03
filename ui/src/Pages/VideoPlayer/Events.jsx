@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useContext } from "react";
+import { useCallback, useEffect, useContext, useRef } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { MediaPlayer } from "dashjs";
 
 import { VideoPlayerContext } from "./Context";
+import { consumeRetryPosition, stopFailedPlayback } from "./PlaybackFailure";
 
 import {
   setManifestState,
@@ -13,6 +14,7 @@ import {
 function VideoEvents() {
   const dispatch = useDispatch();
   const { player } = useContext(VideoPlayerContext);
+  const failureHandled = useRef(false);
 
   const { token, video } = useSelector((store) => ({
     token: store.auth.token,
@@ -62,11 +64,15 @@ function VideoEvents() {
       })
     );
 
+    const retryPosition = consumeRetryPosition(sessionStorage);
+    if (retryPosition !== null) player.seek(retryPosition);
+
     dispatch(
       updateVideo({
         canPlay: true,
         waiting: false,
         duration: Math.round(player.duration()) | 0,
+        ...(retryPosition !== null && { currentTime: retryPosition }),
       })
     );
   }, [dispatch, player, video]);
@@ -111,28 +117,27 @@ function VideoEvents() {
 
   const eError = useCallback(
     (e) => {
-      // segment not available
-      if (e.error.code === 27) {
-        console.log("[VIDEO] segment not available", e.error.message);
-        return;
-      }
+      if (failureHandled.current) return;
+      failureHandled.current = true;
 
       (async () => {
-        console.log("[VIDEO] fetching stderr");
-        const res = await fetch(
-          `/api/v1/stream/${video.gid}/state/get_stderr`,
-          {
-            headers: { Authorization: token },
-          }
-        );
-        const error = await res.json();
+        const error = await stopFailedPlayback({
+          details: e?.error?.message || e?.event?.message || "Unknown error",
+          gid: video.gid,
+          token,
+        });
 
         dispatch(
+          setManifestState({
+            loading: false,
+            loaded: false,
+          })
+        );
+        dispatch(
           updateVideo({
-            error: {
-              msg: e.error.message,
-              errors: error.errors,
-            },
+            canPlay: false,
+            error,
+            waiting: false,
           })
         );
       })();

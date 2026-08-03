@@ -1,0 +1,14 @@
+# Dim Nightfall patches
+
+This directory vendors Nightfall tag `0.3.12-rc4` at commit
+`147ea96146b4cae6f666741020cef0622a90d46c`. Dim changes Nightfall's obsolete
+`hls_ts_options` FFmpeg argument to `hls_segment_options`, matching FFmpeg 6 and newer without
+pulling in Nightfall's unrelated dependency or profile changes.
+
+Dim additionally preserves FFmpeg's original version-1 `sidx` bytes while Nightfall updates fMP4
+segment sequence numbers. The `mp4` revision used by Nightfall serializes that box 14 bytes short,
+which corrupts FFmpeg 8 output and prevents DASH playback from starting.
+
+Nightfall's process-state helper calls a `psutil` status API that is not implemented on macOS. Dim
+uses the native Unix signal existence check on macOS so failed and completed FFmpeg sessions can be
+observed and cleaned up without panicking.

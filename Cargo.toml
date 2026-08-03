@@ -19,3 +19,6 @@ license = "AGPL-3.0-only"
 
 [profile.dev]
 codegen-units = 16
+
+[patch."https://github.com/Dusk-Labs/nightfall"]
+nightfall = { path = "vendor/nightfall" }
