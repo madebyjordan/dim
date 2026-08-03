@@ -1052,6 +1052,7 @@ name = "dim-utils"
 version = "0.1.0"
 dependencies = [
  "dia-i18n",
+ "serde_json",
 ]
 
 [[package]]
