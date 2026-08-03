@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import SettingsIcon from "../../../../assets/Icons/Settings";
 
@@ -9,9 +9,12 @@ import { UnfocusableButton } from "Components/unfocusableButton";
 function VideoActionSettings() {
   const dispatch = useDispatch();
 
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const toggleSettings = useCallback(() => {
     dispatch(toggleShowSettings());

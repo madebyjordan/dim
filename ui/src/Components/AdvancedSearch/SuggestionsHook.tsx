@@ -54,7 +54,7 @@ export const useSuggestions = (initial: Array<SuggestionHint> | null) => {
   }, [setSuggestions, suggestionsTree]);
 
   const selectByName = useCallback(
-    (tag_name) => {
+    (tag_name: string) => {
       setSelected(tag_name);
     },
     [setSelected]

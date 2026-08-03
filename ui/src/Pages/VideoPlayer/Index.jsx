@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { useHistory } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { skipToken } from "@reduxjs/toolkit/query/react";
 import { MediaPlayer, Debug } from "dashjs";
 import {
@@ -39,15 +39,18 @@ function VideoPlayer() {
   const [player, setPlayer] = useState();
 
   const { error, manifest, audioTracks, videoTracks, video, auth, settings } =
-    useSelector((store) => ({
-      auth: store.auth,
-      video: store.video,
-      manifest: store.video.manifest,
-      videoTracks: store.video.tracks.video,
-      audioTracks: store.video.tracks.audio,
-      error: store.video.error,
-      settings: store.settings,
-    }));
+    useSelector(
+      (store) => ({
+        auth: store.auth,
+        video: store.video,
+        manifest: store.video.manifest,
+        videoTracks: store.video.tracks.video,
+        audioTracks: store.video.tracks.audio,
+        error: store.video.error,
+        settings: store.settings,
+      }),
+      shallowEqual
+    );
 
   const videoPlayer = useRef(null);
   const overlay = useRef(null);

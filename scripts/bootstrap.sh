@@ -50,9 +50,11 @@ if [[ "$DIM_SKIP_UI" == false ]]; then
     require_command node
     require_command corepack
 
-    DIM_NODE_MAJOR=$(node -p "Number(process.versions.node.split('.')[0])")
-    if [[ "$DIM_NODE_MAJOR" -ne 24 ]]; then
-        echo "Dim requires Node.js 24.x; found $(node --version)." >&2
+    if ! node -e '
+        const [major, minor, patch] = process.versions.node.split(".").map(Number);
+        process.exit(major === 24 && (minor > 19 || (minor === 19 && patch >= 0)) ? 0 : 1);
+    '; then
+        echo "Dim requires Node.js 24.19.0 or newer in the 24.x line; found $(node --version)." >&2
         exit 1
     fi
 fi
@@ -90,7 +92,7 @@ if [[ "$DIM_SKIP_UI" == false ]]; then
     (
         cd ui
         corepack yarn install --frozen-lockfile --ignore-scripts --non-interactive
-        NODE_OPTIONS=--openssl-legacy-provider corepack yarn build
+        corepack yarn build
     )
 fi
 

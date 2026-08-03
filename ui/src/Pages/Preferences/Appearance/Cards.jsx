@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import { updateUserSettings } from "../../../actions/settings";
 import Toggle from "../../../Components/Toggle";
@@ -14,7 +14,7 @@ function Cards() {
       showHoverCards: data.show_hovercards,
       showCardNames: data.show_card_names,
     };
-  });
+  }, shallowEqual);
 
   const handleShowMediaNamesToggle = useCallback(
     (state) => {

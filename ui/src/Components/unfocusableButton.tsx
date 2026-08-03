@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, type MouseEvent } from "react";
 
 type ButtonProps = {
   onClick: () => void;
@@ -12,9 +12,9 @@ export function UnfocusableButton(props: ButtonProps) {
   const { onClick, children, className } = props;
 
   const callback = useCallback(
-    (e) => {
+    (e: MouseEvent<HTMLButtonElement>) => {
       onClick();
-      e.target.blur();
+      e.currentTarget.blur();
     },
     [onClick]
   );

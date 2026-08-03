@@ -16,7 +16,7 @@ Dim's supported source-development path is macOS or Linux. The repository pins R
 
 - Git
 - Rust 1.93.1, installed automatically through [rustup](https://rustup.rs/)
-- Node.js 24.x, with Corepack available
+- Node.js 24.19.0 LTS, with Corepack available
 - FFmpeg and FFprobe 6.0 or newer
 - SQLite development tools
 - A C/C++ build toolchain and `pkg-config`

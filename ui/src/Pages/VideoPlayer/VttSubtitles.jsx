@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, useContext } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import { calcNewSize } from "../../Helpers/utils";
 import { VideoPlayerContext } from "./Context";
@@ -11,13 +11,16 @@ import "./Subtitles.scss";
 function VideoSubtitles() {
   const dispatch = useDispatch();
 
-  const { token, video, current, tracks, ready } = useSelector((store) => ({
-    token: store.auth.token,
-    video: store.video,
-    current: store.video.tracks.subtitle.current,
-    tracks: store.video.tracks.subtitle.list,
-    ready: store.video.tracks.subtitle.ready,
-  }));
+  const { token, video, current, tracks, ready } = useSelector(
+    (store) => ({
+      token: store.auth.token,
+      video: store.video,
+      current: store.video.tracks.subtitle.current,
+      tracks: store.video.tracks.subtitle.list,
+      ready: store.video.tracks.subtitle.ready,
+    }),
+    shallowEqual
+  );
   const isVtt = tracks[current]?.chunk_path?.endsWith("vtt");
 
   const { videoRef } = useContext(VideoPlayerContext);

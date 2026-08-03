@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import BackwardIcon from "../../../../assets/Icons/Backward";
 import { updateVideo } from "../../../../actions/video";
@@ -9,9 +9,12 @@ import { UnfocusableButton } from "Components/unfocusableButton";
 function VideoActionSeekBack() {
   const dispatch = useDispatch();
 
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const { seekTo } = useContext(VideoPlayerContext);
 

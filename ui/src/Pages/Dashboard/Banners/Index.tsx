@@ -19,7 +19,7 @@ function Banners() {
   >(null);
 
   const handleWS = useCallback(
-    (e) => {
+    (e: MessageEvent) => {
       const { type } = JSON.parse(e.data);
 
       if (items && items.length >= 3) return;
@@ -56,11 +56,11 @@ function Banners() {
   }, [activeIndex, items]);
 
   const toggle = useCallback(
-    (e) => {
+    (e: React.MouseEvent<HTMLElement>) => {
       if (currentTimeoutID) {
         clearTimeout(currentTimeoutID);
       }
-      setActiveIndex(parseInt(e.target.dataset.key));
+      setActiveIndex(parseInt(e.currentTarget.dataset.key ?? "0", 10));
     },
     [currentTimeoutID]
   );

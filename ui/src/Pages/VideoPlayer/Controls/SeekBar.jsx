@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useContext } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import SeekingTo from "./SeekingTo";
 import { VideoPlayerContext } from "../Context";
@@ -12,10 +12,13 @@ function VideoSeekBar(props) {
 
   const { player } = useContext(VideoPlayerContext);
 
-  const { auth, video } = useSelector((store) => ({
-    auth: store.auth,
-    video: store.video,
-  }));
+  const { auth, video } = useSelector(
+    (store) => ({
+      auth: store.auth,
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const seekBar = useRef(null);
 

@@ -1,7 +1,7 @@
 import { cloneElement, useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import Modal from "react-modal";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import { addNotification } from "../../slices/notifications";
 import MediaTypeSelection from "./MediaTypeSelection";
@@ -19,9 +19,12 @@ function RematchMediaModal(props) {
 
   const { id } = useParams();
 
-  const { token } = useSelector((store) => ({
-    token: store.auth.token,
-  }));
+  const { token } = useSelector(
+    (store) => ({
+      token: store.auth.token,
+    }),
+    shallowEqual
+  );
 
   const [visible, setVisible] = useState(false);
 

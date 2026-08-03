@@ -1,14 +1,17 @@
 import { useCallback, useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { register, authenticate } from "../../actions/auth.js";
 
 function RegisterBtn(props) {
   const dispatch = useDispatch();
 
-  const { auth, admin_exists } = useSelector((store) => ({
-    auth: store.auth,
-    admin_exists: store.auth.admin_exists,
-  }));
+  const { auth, admin_exists } = useSelector(
+    (store) => ({
+      auth: store.auth,
+      admin_exists: store.auth.admin_exists,
+    }),
+    shallowEqual
+  );
 
   const { credentials, error, registering } = props;
 

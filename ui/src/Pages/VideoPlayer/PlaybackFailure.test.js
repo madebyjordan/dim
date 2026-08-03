@@ -7,14 +7,14 @@ import {
 
 describe("playback failure handling", () => {
   it("keeps FFmpeg diagnostics in logs and returns a controlled UI error", async () => {
-    const request = jest
+    const request = vi
       .fn()
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ errors: ["raw ffmpeg output"] }),
       })
       .mockResolvedValueOnce({ ok: true });
-    const logger = jest.fn();
+    const logger = vi.fn();
 
     const error = await stopFailedPlayback({
       details: "segment unavailable",
@@ -40,14 +40,14 @@ describe("playback failure handling", () => {
   });
 
   it("still stops the stream when diagnostics cannot be fetched", async () => {
-    const request = jest
+    const request = vi
       .fn()
       .mockRejectedValueOnce(new Error("diagnostics unavailable"))
       .mockResolvedValueOnce({ ok: true });
 
     await stopFailedPlayback({
       gid: "stream-group",
-      logger: jest.fn(),
+      logger: vi.fn(),
       request,
       token: "token",
     });

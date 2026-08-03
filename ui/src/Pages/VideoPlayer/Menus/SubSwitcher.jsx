@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import { updateTrack, updateVideo } from "../../../actions/video";
 
 function VideoMenuSubSwitcher() {
   const dispatch = useDispatch();
 
-  const { video, subtitleTracks } = useSelector((store) => ({
-    video: store.video,
-    subtitleTracks: store.video.tracks.subtitle,
-  }));
+  const { video, subtitleTracks } = useSelector(
+    (store) => ({
+      video: store.video,
+      subtitleTracks: store.video.tracks.subtitle,
+    }),
+    shallowEqual
+  );
 
   const menuRef = useRef(null);
 

@@ -111,7 +111,7 @@ function ImageLoad(props: Props) {
   }, [fetchImage, timeoutID, tryAgain]);
 
   const handleAnimationEnd = useCallback(
-    (e) => {
+    (e: React.AnimationEvent<HTMLDivElement>) => {
       if (e.animationName !== props.triggerAnimation) return;
 
       fetchImage();

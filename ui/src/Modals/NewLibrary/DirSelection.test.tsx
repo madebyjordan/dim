@@ -1,15 +1,16 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import type { Mock } from "vitest";
 
 import { useGetDirectoriesQuery } from "../../api/v1/fileBrowser";
 import DirSelection from "./DirSelection";
 
-jest.mock("../../api/v1/fileBrowser", () => ({
-  useGetDirectoriesQuery: jest.fn(),
+vi.mock("../../api/v1/fileBrowser", () => ({
+  useGetDirectoriesQuery: vi.fn(),
 }));
 
-const mockedUseGetDirectoriesQuery = useGetDirectoriesQuery as jest.Mock;
+const mockedUseGetDirectoriesQuery = useGetDirectoriesQuery as Mock;
 
 function Harness() {
   const [current, setCurrent] = useState<string | undefined>();
@@ -47,7 +48,7 @@ describe("library folder selection", () => {
     });
   });
 
-  afterEach(() => jest.clearAllMocks());
+  afterEach(() => vi.clearAllMocks());
 
   it("browses into a child and uses the current folder", async () => {
     render(<Harness />);

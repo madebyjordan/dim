@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useContext } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import PlayIcon from "../../../../assets/Icons/Play";
 import PauseIcon from "../../../../assets/Icons/Pause";
@@ -13,9 +13,12 @@ function VideoActionPlayPause() {
 
   const { player } = useContext(VideoPlayerContext);
 
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const play = useCallback(() => {
     dispatch(

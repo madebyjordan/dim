@@ -5,22 +5,22 @@ import BackButton from "./BackButton";
 import { createPlaybackState } from "./Navigation";
 
 const mockHistory = {
-  goBack: jest.fn(),
-  replace: jest.fn(),
+  goBack: vi.fn(),
+  replace: vi.fn(),
   location: {},
 };
 
 let mockVideo = {};
 
-jest.mock("react-router-dom", () => ({
+vi.mock("react-router-dom", () => ({
   useHistory: () => mockHistory,
 }));
 
-jest.mock("react-redux", () => ({
+vi.mock("react-redux", () => ({
   useSelector: (selector) => selector({ video: mockVideo }),
 }));
 
-jest.mock("../../assets/Icons/ArrowLeft", () => () => null);
+vi.mock("../../assets/Icons/ArrowLeft", () => ({ default: () => null }));
 
 describe("player back navigation", () => {
   beforeEach(() => {

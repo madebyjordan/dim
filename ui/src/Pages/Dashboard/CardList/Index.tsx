@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { useLocation } from "react-router";
 
 import { useGetCardsQuery } from "../../../api/v1/dashboard";
@@ -20,7 +20,7 @@ function CardList() {
   const ws = useWebSocket();
 
   const handleWS = useCallback(
-    (e) => {
+    (e: MessageEvent) => {
       const { type } = JSON.parse(e.data);
 
       if (type === "EventNewCard") {
@@ -68,7 +68,7 @@ function CardList() {
           ));
           return memo;
         },
-        {} as Record<string, JSX.Element[]>
+        {} as Record<string, ReactElement[]>
       );
 
       card_list = Object.entries(sections).map(

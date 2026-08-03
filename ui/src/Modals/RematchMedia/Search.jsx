@@ -1,5 +1,5 @@
 import { useCallback, useContext, useState } from "react";
-import { useSelector } from "react-redux";
+import { shallowEqual, useSelector } from "react-redux";
 import DimLogo from "../../assets/DimLogo";
 import SearchIcon from "../../assets/Icons/Search";
 import CheckIcon from "../../assets/Icons/Check";
@@ -10,9 +10,12 @@ import { RematchContext } from "./Context";
 import "./Search.scss";
 
 const SelectRematchSearch = () => {
-  const { token } = useSelector((store) => ({
-    token: store.auth.token,
-  }));
+  const { token } = useSelector(
+    (store) => ({
+      token: store.auth.token,
+    }),
+    shallowEqual
+  );
 
   const {
     mediaType,

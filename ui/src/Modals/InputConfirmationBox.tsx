@@ -18,14 +18,14 @@ interface Props {
   type: string;
   cancelText: string;
   confirmText: string;
-  children?: React.ReactElement;
+  children?: React.ReactElement<{ onClick?: () => void }>;
 }
 
 export const InputConfirmationBox = (props: Props) => {
   const { action } = props;
 
   const confirmAction = useCallback(
-    async (close) => {
+    async (close: () => void) => {
       const valid = await action();
 
       if (valid) {

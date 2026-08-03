@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { updateGlobalSettings } from "../../../actions/settings";
 
 import Toggle from "../../../Components/Toggle";
@@ -13,7 +13,7 @@ function Authentication() {
     return {
       disableAuth: data.disable_auth,
     };
-  });
+  }, shallowEqual);
 
   const handleToggle = useCallback(
     (state) => {

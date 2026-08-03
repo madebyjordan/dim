@@ -1,4 +1,11 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import SearchIcon from "assets/figma_icons/Search";
 import Suggestions from "./Suggestions";
 import { ISearchTag, SearchTag, useSearchTags } from "./TagHook";
@@ -73,8 +80,8 @@ export const AdvancedSearch = (props: Props) => {
   } = suggestionsState;
 
   const onInput = useCallback(
-    (e) => {
-      setValue(e.target.innerText);
+    (e: FormEvent<HTMLDivElement>) => {
+      setValue(e.currentTarget.innerText);
       toggleSuggestionsOn();
     },
     [setValue, toggleSuggestionsOn]
@@ -88,7 +95,7 @@ export const AdvancedSearch = (props: Props) => {
 
   // Callback attempt to parse input and append it to a un-filled tag if possible.
   const matchInput = useCallback(
-    (e) => {
+    (e: KeyboardEvent<HTMLDivElement>) => {
       if (activeTags.length === 0) return;
 
       const lastTag = activeTags[activeTags.length - 1];
@@ -198,7 +205,7 @@ export const AdvancedSearch = (props: Props) => {
   }, [popTag, resetTree]);
 
   const onKeyDown = useCallback(
-    (e) => {
+    (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === "Enter") {
         // Prevent deault event handler so we dont get newlines in our div.
         e.preventDefault();
@@ -233,7 +240,7 @@ export const AdvancedSearch = (props: Props) => {
               contentEditable="true"
               ref={inputRef}
               spellCheck="false"
-              placeholder="Search..."
+              data-placeholder="Search..."
             />
           </div>
           <SearchIcon />

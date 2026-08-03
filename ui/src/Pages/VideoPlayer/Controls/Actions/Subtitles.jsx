@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import CCIcon from "../../../../assets/Icons/CC";
 
@@ -9,9 +9,12 @@ import { UnfocusableButton } from "Components/unfocusableButton";
 function VideoActionSubtitles() {
   const dispatch = useDispatch();
 
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const toggleSubtitles = useCallback(() => {
     dispatch(toggleShowSubSwitcher());

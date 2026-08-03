@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { addNotification } from "slices/notifications";
 import { formatHHMMSSDate } from "../../../Helpers/utils";
 import {
@@ -12,10 +12,13 @@ import TrashIcon from "../../../assets/Icons/Trash";
 function ManageInvites() {
   const dispatch = useDispatch();
 
-  const { user, auth } = useSelector((store) => ({
-    user: store.user,
-    auth: store.auth,
-  }));
+  const { user, auth } = useSelector(
+    (store) => ({
+      user: store.user,
+      auth: store.auth,
+    }),
+    shallowEqual
+  );
 
   useEffect(() => {
     dispatch(fetchInvites());

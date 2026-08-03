@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { shallowEqual } from "react-redux";
 
 import { useAppSelector } from "../../../hooks/store";
 import { DashboardPoster } from "../../../api/v1/dashboard";
@@ -19,10 +20,13 @@ interface Props {
 }
 
 function Banner({ data, isError, isFetching }: Props) {
-  const { libraries, user } = useAppSelector((store) => ({
-    libraries: store.library.fetch_libraries,
-    user: store.user,
-  }));
+  const { libraries, user } = useAppSelector(
+    (store) => ({
+      libraries: store.library.fetch_libraries,
+      user: store.user,
+    }),
+    shallowEqual
+  );
 
   if (isFetching || isError) {
     return (

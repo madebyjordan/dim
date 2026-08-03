@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useContext, useRef } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { MediaPlayer } from "dashjs";
 
 import { VideoPlayerContext } from "./Context";
@@ -16,10 +16,13 @@ function VideoEvents() {
   const { player } = useContext(VideoPlayerContext);
   const failureHandled = useRef(false);
 
-  const { token, video } = useSelector((store) => ({
-    token: store.auth.token,
-    video: store.video,
-  }));
+  const { token, video } = useSelector(
+    (store) => ({
+      token: store.auth.token,
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const eManifestLoad = useCallback(() => {
     console.log("[VIDEO] manifest loaded");

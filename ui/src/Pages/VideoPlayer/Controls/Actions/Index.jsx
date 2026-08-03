@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useContext } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import Volume from "./Volume";
 import SeekBack from "./SeekBack";
@@ -20,9 +20,12 @@ import "./Index.scss";
 function VideoActions(props) {
   const dispatch = useDispatch();
 
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const { videoPlayer } = useContext(VideoPlayerContext);
 

@@ -1,5 +1,11 @@
 import Fuse from "fuse.js";
-import { useContext, useCallback, useEffect, useState } from "react";
+import {
+  useContext,
+  useCallback,
+  useEffect,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { SearchContext } from "./Context";
 import "./Suggestions.scss";
 
@@ -14,7 +20,7 @@ const Suggestion = (props: ISuggestion) => {
   const { active, name, description, onClick } = props;
 
   const suggestionClick = useCallback(
-    (event) => {
+    (event: ReactMouseEvent<HTMLDivElement>) => {
       // Stop propagating the event, otherwise the suggestions will get hidden.
       event.stopPropagation();
       onClick(name);
@@ -77,7 +83,7 @@ export const Suggestions = ({ onClick }: ISuggestions) => {
   }, [currentIndex, setCurrentIndex, availableOptions]);
 
   const onKeyDown = useCallback(
-    (e) => {
+    (e: KeyboardEvent) => {
       if (e.key === "ArrowDown") selectNext();
       if (e.key === "ArrowUp") selectPrev();
     },

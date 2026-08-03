@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Route, useHistory } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import { checkAdminExists, updateAuthToken } from "../actions/auth.js";
 import { fetchUser } from "../actions/user.js";
@@ -8,10 +8,13 @@ import { fetchUser } from "../actions/user.js";
 function PrivateRoute(props) {
   const dispatch = useDispatch();
 
-  const { auth, user } = useSelector((store) => ({
-    auth: store.auth,
-    user: store.user,
-  }));
+  const { auth, user } = useSelector(
+    (store) => ({
+      auth: store.auth,
+      user: store.user,
+    }),
+    shallowEqual
+  );
 
   const history = useHistory();
 

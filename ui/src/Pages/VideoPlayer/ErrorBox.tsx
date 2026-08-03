@@ -1,4 +1,5 @@
 import { useHistory } from "react-router-dom";
+import { shallowEqual } from "react-redux";
 
 import { useAppSelector } from "hooks/store";
 import { RETRY_POSITION_KEY } from "./PlaybackFailure";
@@ -7,10 +8,13 @@ import { navigateBackFromPlayback } from "./Navigation";
 function ErrorBox() {
   const history = useHistory();
 
-  const { video, error } = useAppSelector((store) => ({
-    video: store.video,
-    error: store.video.error,
-  }));
+  const { video, error } = useAppSelector(
+    (store) => ({
+      video: store.video,
+      error: store.video.error,
+    }),
+    shallowEqual
+  );
 
   const reloadPlayer = () => {
     sessionStorage.setItem(RETRY_POSITION_KEY, String(video.currentTime));

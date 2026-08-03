@@ -31,14 +31,14 @@ export const useSearchTags = (initial: Array<ISearchTag>): TagHook => {
   const [activeTags, setActiveTags] = useState<Array<ISearchTag>>(initial);
 
   const appendTag = useCallback(
-    (tag) => {
+    (tag: ISearchTag) => {
       setActiveTags([...activeTags, tag]);
     },
     [activeTags, setActiveTags]
   );
 
   const setTagValue = useCallback(
-    (tag, value) => {
+    (tag: string, value: string) => {
       const tags = [...activeTags];
       const selectedTag = tags.findIndex((x) => x.name === tag);
 

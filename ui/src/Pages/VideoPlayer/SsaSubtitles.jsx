@@ -1,5 +1,5 @@
 import { useEffect, useState, useContext } from "react";
-import { useSelector } from "react-redux";
+import { shallowEqual, useSelector } from "react-redux";
 
 import { VideoPlayerContext } from "./Context";
 
@@ -8,11 +8,14 @@ import JASSUB from "jassub";
 import "./Subtitles.scss";
 
 function VideoSubtitles() {
-  const { token, video, subtitle } = useSelector((store) => ({
-    token: store.auth.token,
-    video: store.video,
-    subtitle: store.video.tracks.subtitle,
-  }));
+  const { token, video, subtitle } = useSelector(
+    (store) => ({
+      token: store.auth.token,
+      video: store.video,
+      subtitle: store.video.tracks.subtitle,
+    }),
+    shallowEqual
+  );
 
   const currentSub = subtitle.list[subtitle.current];
 

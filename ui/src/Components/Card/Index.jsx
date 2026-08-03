@@ -1,5 +1,5 @@
 import { createRef, useCallback, useEffect, useRef, useState } from "react";
-import { useSelector } from "react-redux";
+import { shallowEqual, useSelector } from "react-redux";
 import { Link } from "react-router-dom";
 
 import HoverCard from "./HoverCard";
@@ -8,9 +8,12 @@ import Image from "./Image";
 import "./Index.scss";
 
 function Card(props) {
-  const { settings } = useSelector((store) => ({
-    settings: store.settings.userSettings,
-  }));
+  const { settings } = useSelector(
+    (store) => ({
+      settings: store.settings.userSettings,
+    }),
+    shallowEqual
+  );
 
   const cardWrapper = useRef(null);
   const hoverCard = createRef();

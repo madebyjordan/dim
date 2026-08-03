@@ -22,15 +22,15 @@ describe("new library creation", () => {
   };
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   it("adds the created library immediately after the server accepts it", async () => {
-    jest.spyOn(global, "fetch").mockResolvedValue({
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
       json: async () => ({ id: 42, scan_status: "scanning" }),
     });
-    const dispatch = jest.fn();
+    const dispatch = vi.fn();
 
     const result = await newLibrary(data)(dispatch, () => ({
       auth: { token: "owner-token" },
@@ -53,11 +53,11 @@ describe("new library creation", () => {
   });
 
   it("returns a controlled server error without adding a library", async () => {
-    jest.spyOn(global, "fetch").mockResolvedValue({
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: false,
       text: async () => "Dim does not have permission to read that folder.",
     });
-    const dispatch = jest.fn();
+    const dispatch = vi.fn();
 
     const result = await newLibrary(data)(dispatch, () => ({
       auth: { token: "owner-token" },
@@ -77,7 +77,7 @@ describe("new library creation", () => {
   });
 
   it("stops progress and notifies the user when scanning fails", async () => {
-    const dispatch = jest.fn();
+    const dispatch = vi.fn();
 
     await wsScanFailed(42)(dispatch);
 
@@ -97,11 +97,11 @@ describe("new library creation", () => {
     ["complete", SCAN_STOP],
     ["failed", SCAN_FAILED],
   ])("hydrates the %s scan state", async (status, type) => {
-    jest.spyOn(global, "fetch").mockResolvedValue({
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
       json: async () => ({ status }),
     });
-    const dispatch = jest.fn();
+    const dispatch = vi.fn();
 
     await fetchLibraryScanStatus(42)(dispatch, () => ({
       auth: { token: "owner-token" },
@@ -111,8 +111,8 @@ describe("new library creation", () => {
   });
 
   it("starts a manual library rescan", async () => {
-    jest.spyOn(global, "fetch").mockResolvedValue({ ok: true });
-    const dispatch = jest.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true });
+    const dispatch = vi.fn();
 
     const result = await rescanLibrary(42)(dispatch, () => ({
       auth: { token: "owner-token" },

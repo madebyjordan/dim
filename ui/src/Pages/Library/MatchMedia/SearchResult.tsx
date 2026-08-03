@@ -1,4 +1,4 @@
-import { useState, useCallback, useContext } from "react";
+import { useState, useCallback, useContext, type MouseEvent } from "react";
 import TruncText from "Helpers/TruncText";
 import { SearchResultContext } from "./Context";
 import Ellipsis from "assets/Icons/Ellipsis";
@@ -42,10 +42,14 @@ export const SearchResult = ({
   }, [trunLen, setTrunLen, descriptionLen]);
 
   const toggleCard = useCallback(
-    (e) => {
+    (e: MouseEvent<HTMLDivElement>) => {
       // Because we have various buttons nested inside a result card (which itself is a big button)
       // we want to detect when we clicked on a child and ignore the click on the parent.
-      if (e.target.closest(".description-toggle, .button")) return;
+      if (
+        e.target instanceof Element &&
+        e.target.closest(".description-toggle, .button")
+      )
+        return;
       if (isActive) setCurrent(null);
       else setCurrent(id);
     },

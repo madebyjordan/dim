@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSelector } from "react-redux";
+import { shallowEqual, useSelector } from "react-redux";
 import SelectMediaFile from "../../../Modals/SelectMediaFile/Index";
 import SelectMediaFilePlayButton from "../../../Modals/SelectMediaFile/Activators/PlayButton";
 
@@ -7,9 +7,12 @@ import "./Index.scss";
 
 function NextVideo(props) {
   const { id, showAfter } = props;
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const [visibile, setVisible] = useState(true);
 

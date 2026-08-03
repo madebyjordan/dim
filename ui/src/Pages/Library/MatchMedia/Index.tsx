@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import NestedFileView from "Components/NestedFileView/Index";
 import SimpleSearch from "Components/SimpleSearch";
 import AdvancedSearch from "Components/AdvancedSearch/Index";
+import type { ISearchTag } from "Components/AdvancedSearch/TagHook";
 import { SearchResultContext } from "./Context";
 import { SearchResults } from "./Results";
 import { SelectMediatype } from "./MediaTypeSelector";
@@ -27,9 +28,9 @@ const MatchMedia = ({ data, refetch, mediafileSearch }: MatchMediaProps) => {
   const [showSuggestions, setShowSuggestions] = useState<boolean>(false);
   // all the states needed to search external provider
   const [searchQuery, setSearchQuery] = useState<string | null>(null);
-  const [searchParams, setSearchParams] = useState<Array<
-    Record<string, any>
-  > | null>(null);
+  const [searchParams, setSearchParams] = useState<Array<ISearchTag> | null>(
+    null
+  );
   // contains list of mediafile ids.
   const [selectedFiles, setSelectedFiles] = useState<number[]>([]);
   const [selectedMediatype, setMediatype] = useState<string | null>(null);
@@ -134,7 +135,7 @@ const MatchMedia = ({ data, refetch, mediafileSearch }: MatchMediaProps) => {
   );
 
   const onSearch = useCallback(
-    (query, params) => {
+    (query: string, params: Array<ISearchTag>) => {
       if (!query || query === "") return;
 
       setSearchQuery(query);
@@ -145,7 +146,7 @@ const MatchMedia = ({ data, refetch, mediafileSearch }: MatchMediaProps) => {
   );
 
   const selectMediatype = useCallback(
-    (mediatype) => {
+    (mediatype: string) => {
       setMediatype(mediatype);
     },
     [setMediatype]

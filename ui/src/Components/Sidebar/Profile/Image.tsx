@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type AnimationEvent } from "react";
 
 import "./Image.scss";
 
@@ -30,7 +30,7 @@ function ProfileImage(props: Props) {
   }, [currentSrc, props.src]);
 
   const swapSrc = useCallback(
-    (e) => {
+    (e: AnimationEvent<HTMLDivElement>) => {
       if (e.animationName !== "onHideProfileImage") return;
 
       setErr(false);

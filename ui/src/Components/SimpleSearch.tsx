@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, type ChangeEvent } from "react";
 import SearchIcon from "assets/figma_icons/Search";
 import "./SimpleSearch.scss";
 
@@ -15,7 +15,7 @@ export const SimpleSearch = ({ placeholder, onChange }: SimpleSearchProps) => {
   }, [value, onChange]);
 
   const changeValue = useCallback(
-    (e) => {
+    (e: ChangeEvent<HTMLInputElement>) => {
       setValue(e?.target?.value || "");
     },
     [setValue]

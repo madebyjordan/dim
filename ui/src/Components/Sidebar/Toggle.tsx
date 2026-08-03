@@ -92,7 +92,7 @@ function Toggle(props: Props) {
     <section className="sidebarToggleWrapper">
       <DimLogo />
       <span className="version">{version}</span>
-      <div className="toggle" onClick={toggleSidebar}>
+      <div className="toggle" onClick={() => toggleSidebar()}>
         <AngleLeftIcon />
       </div>
     </section>

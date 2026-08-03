@@ -1,8 +1,0 @@
-{
-  "extends": ["react-app", "react-app/jest", "prettier"],
-  "rules": {
-    "no-extra-semi": "error",
-    "eqeqeq": "error",
-    "no-multi-str": "error"
-  }
-}

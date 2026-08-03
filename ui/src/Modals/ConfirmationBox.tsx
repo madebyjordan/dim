@@ -10,14 +10,14 @@ interface Props {
   msg: string;
   cancelText: string;
   confirmText: string;
-  children?: React.ReactElement;
+  children?: React.ReactElement<{ onClick?: () => void }>;
 }
 
 export const ConfirmationBox = (props: Props) => {
   const { action } = props;
 
   const confirmAction = useCallback(
-    (close) => {
+    (close: () => void) => {
       close();
       action();
     },

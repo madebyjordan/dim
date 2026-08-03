@@ -7,12 +7,12 @@ const defaultProps = {
   canRescan: true,
   mediaState: "empty" as const,
   mediaType: "movie",
-  onRescan: jest.fn(),
+  onRescan: vi.fn(),
   scanStarting: false,
 };
 
 describe("library scan states", () => {
-  afterEach(() => jest.clearAllMocks());
+  afterEach(() => vi.clearAllMocks());
 
   it("shows persistent progress while scanning", () => {
     render(<LibraryState {...defaultProps} scanState="scanning" />);

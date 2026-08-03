@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { shallowEqual, useDispatch, useSelector } from "react-redux";
 
 import ExpandIcon from "../../../../assets/Icons/Expand";
 import CompressIcon from "../../../../assets/Icons/Compress";
@@ -12,9 +12,12 @@ import { UnfocusableButton } from "Components/unfocusableButton";
 function VideoActionFullscreen() {
   const dispatch = useDispatch();
 
-  const { video } = useSelector((store) => ({
-    video: store.video,
-  }));
+  const { video } = useSelector(
+    (store) => ({
+      video: store.video,
+    }),
+    shallowEqual
+  );
 
   const { videoPlayer } = useContext(VideoPlayerContext);
 

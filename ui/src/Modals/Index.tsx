@@ -4,7 +4,7 @@ import Modal from "react-modal";
 import "./Index.scss";
 
 interface Props {
-  activatingComponent?: React.ReactElement;
+  activatingComponent?: React.ReactElement<{ onClick?: () => void }>;
   id?: string;
   children: (close: () => void) => React.ReactNode;
 }
