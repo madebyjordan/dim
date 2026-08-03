@@ -275,7 +275,7 @@ export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
   } catch (_) {}
 };
 
-export const retryLibraryScan = (id) => async (dispatch, getState) => {
+export const rescanLibrary = (id) => async (dispatch, getState) => {
   const token = getState().auth.token;
 
   try {

@@ -1,7 +1,7 @@
 import {
   fetchLibraryScanStatus,
   newLibrary,
-  retryLibraryScan,
+  rescanLibrary,
   wsScanFailed,
 } from "./library";
 import {
@@ -110,11 +110,11 @@ describe("new library creation", () => {
     expect(dispatch).toHaveBeenCalledWith({ type, id: 42 });
   });
 
-  it("restarts a failed scan", async () => {
+  it("starts a manual library rescan", async () => {
     jest.spyOn(global, "fetch").mockResolvedValue({ ok: true });
     const dispatch = jest.fn();
 
-    const result = await retryLibraryScan(42)(dispatch, () => ({
+    const result = await rescanLibrary(42)(dispatch, () => ({
       auth: { token: "owner-token" },
     }));
 

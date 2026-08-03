@@ -187,7 +187,11 @@ pub async fn insert_mediafiles(
             futures::future::join_all(chunk).await;
 
         for result in results {
-            insertables.push(result?);
+            match result {
+                Ok(insertable) => insertables.push(insertable),
+                Err(CreatorError::FileExists) => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 

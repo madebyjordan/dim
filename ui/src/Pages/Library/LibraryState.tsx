@@ -4,18 +4,20 @@ export type LibraryMediaState = "loading" | "empty" | "results" | "error";
 export type LibraryScanState = "scanning" | "complete" | "failed";
 
 interface LibraryStateProps {
+  canRescan: boolean;
   mediaState: LibraryMediaState;
   mediaType?: string;
-  onRetry: () => void;
-  retrying: boolean;
+  onRescan: () => void;
+  scanStarting: boolean;
   scanState?: LibraryScanState;
 }
 
 const LibraryState = ({
+  canRescan,
   mediaState,
   mediaType,
-  onRetry,
-  retrying,
+  onRescan,
+  scanStarting,
   scanState,
 }: LibraryStateProps) => {
   if (scanState === "scanning") {
@@ -39,9 +41,11 @@ const LibraryState = ({
           Dim could not finish scanning this folder. Check that the folder is
           available and readable, then try again.
         </p>
-        <button type="button" onClick={onRetry} disabled={retrying}>
-          {retrying ? "Starting scan…" : "Retry scan"}
-        </button>
+        {canRescan && (
+          <button type="button" onClick={onRescan} disabled={scanStarting}>
+            {scanStarting ? "Starting scan…" : "Retry scan"}
+          </button>
+        )}
       </section>
     );
   }
@@ -73,6 +77,11 @@ const LibraryState = ({
           Dim finished scanning the selected folder, but did not find any media
           it can add to this library.
         </p>
+        {canRescan && (
+          <button type="button" onClick={onRescan} disabled={scanStarting}>
+            {scanStarting ? "Starting scan…" : "Scan library"}
+          </button>
+        )}
       </section>
     );
   }

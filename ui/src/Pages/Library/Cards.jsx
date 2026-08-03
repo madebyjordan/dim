@@ -3,10 +3,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router";
 
 import Card from "../../Components/Card/Index";
-import {
-  fetchLibraryScanStatus,
-  retryLibraryScan,
-} from "../../actions/library";
+import { fetchLibraryScanStatus, rescanLibrary } from "../../actions/library";
 import useWebSocket from "../../hooks/ws";
 import Dropdown from "./Dropdown";
 import LibraryState from "./LibraryState";
@@ -20,6 +17,9 @@ function Cards() {
   const refreshTimer = useRef();
 
   const auth = useSelector((store) => store.auth);
+  const canRescan = useSelector((store) =>
+    store.user.info.roles?.includes("owner")
+  );
   const libraries = useSelector((store) => store.library.fetch_libraries.items);
   const scanState = useSelector((store) => store.library.scan_status[id]);
   const library = libraries.find((item) => String(item.id) === String(id));
@@ -27,7 +27,7 @@ function Cards() {
   const [cards, setCards] = useState([]);
   const [mediaState, setMediaState] = useState("loading");
   const [responseTitle, setResponseTitle] = useState("");
-  const [retrying, setRetrying] = useState(false);
+  const [scanStarting, setScanStarting] = useState(false);
 
   const title = library?.name || responseTitle || "Library";
 
@@ -117,10 +117,12 @@ function Cards() {
     document.title = `Dim - ${title}`;
   }, [title]);
 
-  const handleRetry = async () => {
-    setRetrying(true);
-    await dispatch(retryLibraryScan(id));
-    setRetrying(false);
+  const handleRescan = async () => {
+    if (scanStarting || scanState === "scanning") return;
+
+    setScanStarting(true);
+    await dispatch(rescanLibrary(id));
+    setScanStarting(false);
   };
 
   return (
@@ -128,15 +130,20 @@ function Cards() {
       <div className="libraryHeader">
         <h2>{title}</h2>
         <div className="actions">
-          <Dropdown />
+          <Dropdown
+            onRescan={handleRescan}
+            scanStarting={scanStarting}
+            scanning={scanState === "scanning"}
+          />
         </div>
       </div>
 
       <LibraryState
+        canRescan={canRescan}
         mediaState={mediaState}
         mediaType={library?.media_type}
-        onRetry={handleRetry}
-        retrying={retrying}
+        onRescan={handleRescan}
+        scanStarting={scanStarting}
         scanState={scanState}
       />
 

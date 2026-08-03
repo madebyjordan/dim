@@ -44,7 +44,7 @@ async fn test_construct_mediafile() {
     let files = (0..512)
         .map(|i| format!("Movie{i}.mkv"))
         .collect::<Vec<String>>();
-    let (_tempdir, files) = super::temp_dir_symlink(files.into_iter(), super::TEST_MP4_PATH);
+    let (tempdir, files) = super::temp_dir_symlink(files.into_iter(), super::TEST_MP4_PATH);
 
     let mut conn = dim_database::get_conn_memory()
         .await
@@ -112,6 +112,12 @@ async fn test_construct_mediafile() {
         .await
         .expect("Failed to get mediafiles.");
     assert_eq!(files_in_db.len(), files.len());
+
+    let rescan_work =
+        super::super::insert_mediafiles(&mut conn, library, vec![tempdir.path().to_path_buf()])
+            .await
+            .expect("Rescanning existing files should not fail.");
+    assert!(rescan_work.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

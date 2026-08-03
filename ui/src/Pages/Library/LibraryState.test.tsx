@@ -4,10 +4,11 @@ import userEvent from "@testing-library/user-event";
 import LibraryState from "./LibraryState";
 
 const defaultProps = {
+  canRescan: true,
   mediaState: "empty" as const,
   mediaType: "movie",
-  onRetry: jest.fn(),
-  retrying: false,
+  onRescan: jest.fn(),
+  scanStarting: false,
 };
 
 describe("library scan states", () => {
@@ -27,6 +28,8 @@ describe("library scan states", () => {
 
     expect(screen.getByText("No supported movies found")).toBeInTheDocument();
     expect(screen.getByText(/finished scanning/i)).toBeInTheDocument();
+    userEvent.click(screen.getByRole("button", { name: "Scan library" }));
+    expect(defaultProps.onRescan).toHaveBeenCalledTimes(1);
   });
 
   it("leaves the normal library view unobstructed when results exist", () => {
@@ -41,6 +44,16 @@ describe("library scan states", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("does not offer scan controls to non-owner users", () => {
+    render(
+      <LibraryState {...defaultProps} canRescan={false} scanState="complete" />
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Scan library" })
+    ).not.toBeInTheDocument();
+  });
+
   it("stops progress and offers retry when scanning fails", () => {
     render(<LibraryState {...defaultProps} scanState="failed" />);
 
@@ -48,6 +61,6 @@ describe("library scan states", () => {
     expect(screen.queryByText("Scanning your library")).not.toBeInTheDocument();
 
     userEvent.click(screen.getByRole("button", { name: "Retry scan" }));
-    expect(defaultProps.onRetry).toHaveBeenCalledTimes(1);
+    expect(defaultProps.onRescan).toHaveBeenCalledTimes(1);
   });
 });

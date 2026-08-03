@@ -69,6 +69,11 @@
         background: var(--tertiaryColor);
       }
 
+      &:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+
       &.delete {
         background: var(--criticalLighterColor);
 

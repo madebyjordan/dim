@@ -8,7 +8,7 @@ import EditIcon from "../../assets/Icons/Edit";
 
 import "./Dropdown.scss";
 
-function Dropdown() {
+function Dropdown({ onRescan, scanStarting, scanning }) {
   const dropdownRef = useRef(null);
   const params = useParams();
 
@@ -36,6 +36,11 @@ function Dropdown() {
     setDropdownVisible((visible) => !visible);
   }, []);
 
+  const handleRescan = useCallback(() => {
+    setDropdownVisible(false);
+    onRescan();
+  }, [onRescan]);
+
   if (!user.info.roles?.includes("owner")) return null;
 
   return (
@@ -50,6 +55,14 @@ function Dropdown() {
         Library actions
       </button>
       <div className={`dropDownContent visible-${dropdownVisible}`} role="menu">
+        <button
+          type="button"
+          className="rescan"
+          onClick={handleRescan}
+          disabled={scanning || scanStarting}
+        >
+          {scanning || scanStarting ? "Scanning library…" : "Rescan library"}
+        </button>
         <Delete id={params.id} />
         <button className="rename">
           Rename library

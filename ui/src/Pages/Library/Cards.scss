@@ -42,23 +42,23 @@
     margin-top: 1.25em;
   }
 
+  > button {
+    margin-top: 1.25em;
+    padding: 0.75em 1em;
+    border-radius: 8px;
+    color: var(--accentTextColor);
+    background: var(--accentColor);
+    font-family: "Roboto Bold", Arial;
+    cursor: pointer;
+
+    &:disabled {
+      cursor: wait;
+      opacity: 0.7;
+    }
+  }
+
   &.failed {
     border-left: 4px solid var(--criticalColor);
-
-    button {
-      margin-top: 1.25em;
-      padding: 0.75em 1em;
-      border-radius: 8px;
-      color: var(--accentTextColor);
-      background: var(--accentColor);
-      font-family: "Roboto Bold", Arial;
-      cursor: pointer;
-
-      &:disabled {
-        cursor: wait;
-        opacity: 0.7;
-      }
-    }
   }
 }
 
