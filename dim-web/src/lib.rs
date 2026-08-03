@@ -213,7 +213,7 @@ pub fn build_router(app: AppState) -> Router {
         .route("/api/v1/dashboard/banner", get(routes::dashboard::banners))
         .route("/api/v1/search", get(routes::search::search))
         .route(
-            "/api/v1/filebrowser/*path",
+            "/api/v1/filebrowser",
             get(routes::filebrowser::get_directory_structure),
         )
         .merge(media_routes(app.clone()))

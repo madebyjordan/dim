@@ -124,7 +124,7 @@ async fn enforces_the_application_security_boundary() {
         "/api/v1/user/settings",
         "/api/v1/host/settings",
         "/api/v1/auth/invites",
-        "/api/v1/filebrowser/tmp",
+        "/api/v1/filebrowser?path=/tmp",
         "/api/v1/stream/missing/state/get_stderr",
     ] {
         let response = test
@@ -163,7 +163,7 @@ async fn enforces_the_application_security_boundary() {
     assert_eq!(response.status(), StatusCode::OK);
 
     for (method, uri, body) in [
-        (Method::GET, "/api/v1/filebrowser/tmp", ""),
+        (Method::GET, "/api/v1/filebrowser?path=/tmp", ""),
         (Method::GET, "/api/v1/host/settings", ""),
         (Method::POST, "/api/v1/host/settings", "{}"),
         (Method::GET, "/api/v1/auth/invites", ""),
@@ -194,7 +194,7 @@ async fn enforces_the_application_security_boundary() {
         .clone()
         .oneshot(request(
             Method::GET,
-            "/api/v1/filebrowser/tmp",
+            "/api/v1/filebrowser?path=/tmp",
             Some(&test.owner_token),
             "",
         ))

@@ -7,6 +7,7 @@ import {
   handleWsDelLibrary,
   wsScanStart,
   wsScanStop,
+  wsScanFailed,
 } from "../../actions/library.js";
 import useWebSocket from "../../hooks/ws";
 
@@ -29,6 +30,10 @@ function Libraries() {
 
       if (payload.type === "EventStoppedScanning") {
         dispatch(wsScanStop(payload.id));
+      }
+
+      if (payload.type === "EventScanFailed") {
+        dispatch(wsScanFailed(payload.id));
       }
 
       if (payload.type === "EventNewLibrary") {

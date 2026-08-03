@@ -18,6 +18,16 @@ import {
   FETCH_LIBRARY_UNMATCHED_ERR,
   FETCH_LIBRARY_UNMATCHED_OK,
 } from "./types";
+import { addNotification } from "../slices/notifications";
+
+const responseError = async (response, fallback) => {
+  try {
+    const message = await response.text();
+    return message || fallback;
+  } catch (_) {
+    return fallback;
+  }
+};
 
 export const fetchLibraries = () => async (dispatch, getState) => {
   const token = getState().auth.token;
@@ -105,19 +115,43 @@ export const newLibrary = (data) => async (dispatch, getState) => {
   try {
     const res = await fetch("/api/v1/library", options);
 
-    if (res.status !== 200) {
-      return dispatch({
+    if (!res.ok) {
+      const error = await responseError(
+        res,
+        "Dim could not create the library."
+      );
+      dispatch({
         type: NEW_LIBRARY_ERR,
-        payload: res.statusText,
+        payload: error,
       });
+      return { ok: false, error };
     }
 
+    const payload = await res.json();
     dispatch({ type: NEW_LIBRARY_OK });
+    dispatch({
+      type: ADD_LIBRARY,
+      payload: {
+        id: payload.id,
+        name: data.name,
+        media_type: data.media_type,
+        locations: data.locations,
+        hidden: false,
+      },
+    });
+    dispatch(
+      addNotification({
+        msg: "Library created. The initial scan has started.",
+      })
+    );
+    return { ok: true, id: payload.id };
   } catch (err) {
+    const error = "Dim could not reach the server to create the library.";
     dispatch({
       type: NEW_LIBRARY_ERR,
-      payload: err,
+      payload: error,
     });
+    return { ok: false, error };
   }
 };
 
@@ -204,4 +238,16 @@ export const wsScanStop = (id) => async (dispatch) => {
     type: SCAN_STOP,
     id,
   });
+};
+
+export const wsScanFailed = (id) => async (dispatch) => {
+  dispatch({
+    type: SCAN_STOP,
+    id,
+  });
+  dispatch(
+    addNotification({
+      msg: "The library scan failed. Check that its folders are still readable.",
+    })
+  );
 };

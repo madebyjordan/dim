@@ -1,6 +1,6 @@
 import { cloneElement, useCallback, useEffect, useState } from "react";
 import Modal from "react-modal";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 
 import { newLibrary } from "../../actions/library.js";
 import MediaTypeSelection from "./MediaTypeSelection";
@@ -14,13 +14,15 @@ Modal.setAppElement("body");
 
 function NewLibraryModal(props) {
   const dispatch = useDispatch();
+  const creating = useSelector((state) => state.library.new_library.creating);
   const [visible, setVisible] = useState(false);
 
-  const [current, setCurrent] = useState("");
+  const [current, setCurrent] = useState(undefined);
   const [name, setName] = useState("");
   const [nameErr, setNameErr] = useState("");
+  const [submitErr, setSubmitErr] = useState("");
   const [mediaType, setMediaType] = useState("movie");
-  const [selectedFolders, setSelectedFolders] = useState([]);
+  const [selectedFolder, setSelectedFolder] = useState(undefined);
 
   // prevent scrolling behind Modal
   useEffect(() => {
@@ -31,9 +33,10 @@ function NewLibraryModal(props) {
 
   const clear = useCallback(() => {
     setName("");
-    setCurrent("");
-    setSelectedFolders([]);
+    setCurrent(undefined);
+    setSelectedFolder(undefined);
     setMediaType("movie");
+    setSubmitErr("");
   }, []);
 
   const close = useCallback(() => {
@@ -72,22 +75,27 @@ function NewLibraryModal(props) {
   }, [name]);
 
   const add = useCallback(async () => {
-    if (!name) {
+    if (!name.trim()) {
       setNameErr("Label your library");
+      return;
     }
 
-    if (name && selectedFolders.length > 0) {
-      const data = {
-        name,
-        locations: selectedFolders,
-        media_type: mediaType,
-      };
+    if (!selectedFolder || creating) return;
 
-      dispatch(newLibrary(data));
+    setSubmitErr("");
+    const data = {
+      name: name.trim(),
+      locations: [selectedFolder],
+      media_type: mediaType,
+    };
 
+    const result = await dispatch(newLibrary(data));
+    if (result.ok) {
       close();
+    } else {
+      setSubmitErr(result.error);
     }
-  }, [close, dispatch, mediaType, name, selectedFolders]);
+  }, [close, creating, dispatch, mediaType, name, selectedFolder]);
 
   return (
     <div className="modalBoxContainer">
@@ -96,7 +104,7 @@ function NewLibraryModal(props) {
         isOpen={visible}
         className="modalBox"
         id="modalNewLibrary"
-        onRequestClose={close}
+        onRequestClose={() => !creating && close()}
         overlayClassName="popupOverlay"
       >
         <div className="modalNewLibrary">
@@ -119,18 +127,23 @@ function NewLibraryModal(props) {
           <DirSelection
             current={current}
             setCurrent={setCurrent}
-            selectedFolders={selectedFolders}
-            setSelectedFolders={setSelectedFolders}
+            selectedFolder={selectedFolder}
+            setSelectedFolder={setSelectedFolder}
           />
+          {submitErr && (
+            <div className="library-submit-error" role="alert">
+              {submitErr}
+            </div>
+          )}
           <div className="options">
-            <Button type="secondary" onClick={close}>
+            <Button type="secondary" onClick={close} disabled={creating}>
               Nevermind
             </Button>
             <Button
-              disabled={!name || selectedFolders.length === 0}
+              disabled={!name.trim() || !selectedFolder || creating}
               onClick={add}
             >
-              Add library
+              {creating ? "Creating library…" : "Create Library"}
             </Button>
           </div>
         </div>

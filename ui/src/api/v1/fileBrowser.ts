@@ -1,9 +1,23 @@
 import v1 from "./";
 
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export interface DirectoryListing {
+  current: string;
+  parent: string | null;
+  directories: DirectoryEntry[];
+}
+
 export const fileBrowser = v1.injectEndpoints({
   endpoints: (build) => ({
-    getDirectories: build.query<string[], string>({
-      query: (path) => `filebrowser/${path}`,
+    getDirectories: build.query<DirectoryListing, string | undefined>({
+      query: (path) => ({
+        url: "filebrowser",
+        params: path ? { path } : undefined,
+      }),
     }),
   }),
 });

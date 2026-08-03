@@ -1,8 +1,7 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useGetDirectoriesQuery } from "../../api/v1/fileBrowser";
 import FolderIcon from "../../assets/Icons/Folder";
-import CheckIcon from "../../assets/Icons/Check";
 import Button from "../../Components/Misc/Button";
 import ChevronRight from "../../assets/Icons/ChevronRight";
 import ChevronLeft from "../../assets/Icons/ChevronLeft";
@@ -10,153 +9,112 @@ import ChevronLeft from "../../assets/Icons/ChevronLeft";
 import "./DirSelection.scss";
 
 interface Props {
-  current: string;
-  setCurrent: React.Dispatch<React.SetStateAction<string>>;
-  selectedFolders: string[];
-  setSelectedFolders: React.Dispatch<React.SetStateAction<string[]>>;
+  current?: string;
+  setCurrent: React.Dispatch<React.SetStateAction<string | undefined>>;
+  selectedFolder?: string;
+  setSelectedFolder: React.Dispatch<React.SetStateAction<string | undefined>>;
 }
 
-function DirSelection(props: Props) {
-  const { current, setCurrent, selectedFolders, setSelectedFolders } = props;
-  const [forwardHistory, setForwardHistory] = useState<string[]>([]);
+const EMPTY_DIRECTORIES: Array<{ name: string; path: string }> = [];
 
-  const { data: items, error, isFetching } = useGetDirectoriesQuery(current);
-
-  const selectFolder = useCallback(
-    (path) => {
-      const alreadySelected = selectedFolders.includes(path);
-
-      if (alreadySelected) {
-        const newSelectedFolders = [];
-
-        for (const name of selectedFolders) {
-          if (name === path) continue;
-          newSelectedFolders.push(name);
-        }
-
-        setSelectedFolders(newSelectedFolders);
-
-        return;
-      }
-
-      if (!alreadySelected) {
-        setSelectedFolders((state) => [...state, path]);
-      }
-    },
-    [selectedFolders, setSelectedFolders]
-  );
-
-  const selectAllFolders = useCallback(() => {
-    if (!items) {
-      return;
-    }
-
-    const unselectedFolders = items.filter(
-      (item) => !selectedFolders.includes(item)
-    );
-
-    setSelectedFolders((state) => unselectedFolders.concat(state));
-  }, [items, selectedFolders, setSelectedFolders]);
-
-  const clearSelection = useCallback(() => {
-    setSelectedFolders([]);
-  }, [setSelectedFolders]);
-
-  const select = useCallback(
-    (path) => {
-      const history = [...forwardHistory];
-
-      // This truncates our forward history till we get to the item thats equivalent to our current path.
-      while (history.length !== 0) {
-        if (history.pop() === current) break;
-      }
-
-      setForwardHistory(history);
-      setCurrent(path);
-    },
-    [current, setCurrent, forwardHistory, setForwardHistory]
-  );
-
-  const goBack = useCallback(() => {
-    if (current.length === 0) return;
-
-    const history = [...forwardHistory];
-    const path = current.split("/");
-
-    history.push(current);
-    path.pop();
-    setCurrent(path.join("/"));
-    setForwardHistory(history);
-  }, [current, setCurrent, forwardHistory, setForwardHistory]);
-
-  const goForward = useCallback(() => {
-    const history = [...forwardHistory];
-    if (history.length === 0) return;
-
-    setCurrent(history.pop()!);
-    setForwardHistory(history);
-  }, [setCurrent, forwardHistory, setForwardHistory]);
-
-  let dirs;
-
-  if (isFetching || error) {
-    dirs = (
-      <div className="vertical-err">
-        <p>Cannot load data</p>
-      </div>
-    );
-  } else if (items) {
-    if (items.length === 0) {
-      dirs = (
-        <div className="vertical-err">
-          <p>Empty</p>
-        </div>
-      );
-    } else {
-      dirs = items.map((dir, i) => {
-        const count = selectedFolders.filter(
-          (folder) => folder.includes(dir + "/") && folder !== dir
-        ).length;
-
-        return (
-          <div
-            key={i}
-            className={`dir selected-${selectedFolders.includes(dir)}`}
-          >
-            <div className="selectBox" onClick={() => selectFolder(dir)}>
-              <CheckIcon />
-            </div>
-            <div className="label" onClick={() => select(dir)}>
-              <FolderIcon />
-              <p>
-                {dir.replace(current, "").replace("/", "")}
-                <span className="selectedInsideCount">
-                  {count
-                    ? ` ${count} ${
-                        count === 1 ? "folder" : "folders"
-                      } selected inside`
-                    : ""}
-                </span>
-              </p>
-            </div>
-            <div className="chevron-hint">
-              <ChevronRight />
-            </div>
-          </div>
-        );
-      });
+function browserErrorMessage(error: unknown): string {
+  if (error && typeof error === "object" && "data" in error) {
+    const data = (error as { data?: unknown }).data;
+    if (
+      typeof data === "string" &&
+      data.length > 0 &&
+      data.length <= 200 &&
+      !data.includes("<")
+    ) {
+      return data;
     }
   }
 
-  const allFoldersInCurrentSelected =
-    items && items.every((item) => selectedFolders.includes(item));
+  return "The folder browser is unavailable. Restart Dim and try again.";
+}
+
+function DirSelection(props: Props) {
+  const { current, setCurrent, selectedFolder, setSelectedFolder } = props;
+  const [forwardHistory, setForwardHistory] = useState<string[]>([]);
+
+  const { data, error, isFetching } = useGetDirectoriesQuery(current);
+  const directories = data?.directories ?? EMPTY_DIRECTORIES;
+  const listedCurrent = data?.current;
+
+  useEffect(() => {
+    if (!listedCurrent) return;
+    setCurrent((currentPath) => currentPath ?? listedCurrent);
+  }, [listedCurrent, setCurrent]);
+
+  const navigateTo = useCallback(
+    (path: string) => {
+      setForwardHistory([]);
+      setCurrent(path);
+    },
+    [setCurrent]
+  );
+
+  const goBack = useCallback(() => {
+    if (!data?.parent) return;
+
+    setForwardHistory((history) => [...history, data.current]);
+    setCurrent(data.parent);
+  }, [data, setCurrent]);
+
+  const goForward = useCallback(() => {
+    setForwardHistory((history) => {
+      if (history.length === 0) return history;
+
+      const next = [...history];
+      setCurrent(next.pop());
+      return next;
+    });
+  }, [setCurrent]);
+
+  let directoryContent;
+  if (isFetching && !data) {
+    directoryContent = (
+      <div className="vertical-err" role="status">
+        <p>Loading folders…</p>
+      </div>
+    );
+  } else if (error) {
+    directoryContent = (
+      <div className="vertical-err" role="alert">
+        <p>{browserErrorMessage(error)}</p>
+      </div>
+    );
+  } else if (directories.length === 0) {
+    directoryContent = (
+      <div className="vertical-err">
+        <p>No folders inside this location.</p>
+      </div>
+    );
+  } else {
+    directoryContent = directories.map((directory) => (
+      <button
+        type="button"
+        key={directory.path}
+        className="dir"
+        onClick={() => navigateTo(directory.path)}
+      >
+        <FolderIcon />
+        <span>{directory.name}</span>
+        <ChevronRight />
+      </button>
+    ));
+  }
+
+  const currentFolderSelected = Boolean(
+    data && selectedFolder === data.current
+  );
 
   return (
     <div className="dirSelection">
       <div className="controls">
         <Button
           onClick={goBack}
-          disabled={current === ""}
+          disabled={!data?.parent}
           type="secondary contrast"
         >
           <ChevronLeft />
@@ -168,35 +126,19 @@ function DirSelection(props: Props) {
         >
           <ChevronRight />
         </Button>
-        <div className="current-folder-label">
-          <p className="current-label">Currently in:</p>
-          <p className="current">{current?.length === 0 ? "/" : current}</p>
-        </div>
       </div>
       <div className="dirs-wrapper">
-        <div className="dirs">{dirs}</div>
+        <div className="dirs" aria-busy={isFetching}>
+          {directoryContent}
+        </div>
       </div>
-      <div className="header">
-        <div className="folders-selected-cnt">
-          <h4>Folders selected:</h4>
-          <h4>{selectedFolders.length}</h4>
-        </div>
-        <div className="actions">
-          <Button
-            disabled={selectedFolders.length <= 0}
-            type="secondary"
-            onClick={clearSelection}
-          >
-            Clear all
-          </Button>
-          <Button
-            disabled={allFoldersInCurrentSelected}
-            type="secondary"
-            onClick={selectAllFolders}
-          >
-            Select all
-          </Button>
-        </div>
+      <div className="folder-action">
+        <Button
+          onClick={() => data && setSelectedFolder(data.current)}
+          disabled={!data || Boolean(error) || currentFolderSelected}
+        >
+          {currentFolderSelected ? "Folder selected" : "Use this folder"}
+        </Button>
       </div>
     </div>
   );

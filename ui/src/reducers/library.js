@@ -190,7 +190,11 @@ export default function libraryReducer(state = initialState, action) {
         ...state,
         fetch_libraries: {
           ...state.fetch_libraries,
-          items: [...state.fetch_libraries.items, action.payload],
+          items: state.fetch_libraries.items.some(
+            (item) => item.id === action.payload.id
+          )
+            ? state.fetch_libraries.items
+            : [...state.fetch_libraries.items, action.payload],
         },
       };
     case SCAN_START:

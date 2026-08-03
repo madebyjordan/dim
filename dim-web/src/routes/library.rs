@@ -1,6 +1,10 @@
 #![warn(warnings)]
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -21,10 +25,150 @@ use fuzzy_matcher::FuzzyMatcher;
 use http::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::task::spawn_blocking;
 
 use crate::error::DimErrorWrapper;
 use crate::middleware::Owner;
 use crate::AppState;
+
+#[derive(Debug)]
+enum CreateLibraryError {
+    InvalidName,
+    MissingLocations,
+    InvalidLocation,
+    LocationNotFound,
+    LocationNotDirectory,
+    PermissionDenied,
+    InvalidMediaType,
+    Internal,
+}
+
+impl From<io::Error> for CreateLibraryError {
+    fn from(error: io::Error) -> Self {
+        match error.kind() {
+            io::ErrorKind::NotFound => Self::LocationNotFound,
+            io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            _ => Self::Internal,
+        }
+    }
+}
+
+impl IntoResponse for CreateLibraryError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::InvalidName => (StatusCode::BAD_REQUEST, "Enter a library name."),
+            Self::MissingLocations => (
+                StatusCode::BAD_REQUEST,
+                "Select at least one folder for this library.",
+            ),
+            Self::InvalidLocation => (
+                StatusCode::BAD_REQUEST,
+                "Library folders must use valid absolute paths.",
+            ),
+            Self::LocationNotFound => (
+                StatusCode::NOT_FOUND,
+                "One or more selected folders no longer exist.",
+            ),
+            Self::LocationNotDirectory => (
+                StatusCode::BAD_REQUEST,
+                "One or more selected paths are not folders.",
+            ),
+            Self::PermissionDenied => (
+                StatusCode::FORBIDDEN,
+                "Dim does not have permission to read one or more selected folders.",
+            ),
+            Self::InvalidMediaType => (
+                StatusCode::BAD_REQUEST,
+                "Choose either Movies or Shows for this library.",
+            ),
+            Self::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Dim could not create the library.",
+            ),
+        };
+
+        (status, message).into_response()
+    }
+}
+
+fn validate_new_library(
+    mut library: InsertableLibrary,
+) -> Result<InsertableLibrary, CreateLibraryError> {
+    library.name = library.name.trim().to_owned();
+    if library.name.is_empty() {
+        return Err(CreateLibraryError::InvalidName);
+    }
+    if library.locations.is_empty() {
+        return Err(CreateLibraryError::MissingLocations);
+    }
+    if !matches!(library.media_type, MediaType::Movie | MediaType::Tv) {
+        return Err(CreateLibraryError::InvalidMediaType);
+    }
+
+    let mut seen = HashSet::new();
+    let mut locations = Vec::with_capacity(library.locations.len());
+    for location in library.locations {
+        let path = PathBuf::from(location);
+        if !path.is_absolute() {
+            return Err(CreateLibraryError::InvalidLocation);
+        }
+
+        let path = fs::canonicalize(path)?;
+        if !path.is_dir() {
+            return Err(CreateLibraryError::LocationNotDirectory);
+        }
+
+        // Opening the directory verifies that the scanner can at least begin walking it.
+        fs::read_dir(&path)?;
+        if seen.insert(path.clone()) {
+            locations.push(path.to_string_lossy().into_owned());
+        }
+    }
+
+    library.locations = locations;
+    Ok(library)
+}
+
+#[cfg(test)]
+mod library_creation_tests {
+    use super::*;
+
+    #[test]
+    fn validates_movie_and_tv_directories_and_rejects_relative_paths() {
+        let directory = std::env::temp_dir().join(format!("dim-library-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+
+        for media_type in [MediaType::Movie, MediaType::Tv] {
+            let library = validate_new_library(InsertableLibrary {
+                name: "  Media  ".to_owned(),
+                locations: vec![directory.to_string_lossy().into_owned()],
+                media_type,
+            })
+            .unwrap();
+
+            assert_eq!(library.name, "Media");
+            assert_eq!(library.media_type, media_type);
+            assert_eq!(
+                library.locations,
+                vec![fs::canonicalize(&directory)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()]
+            );
+        }
+
+        assert!(matches!(
+            validate_new_library(InsertableLibrary {
+                name: "Media".to_owned(),
+                locations: vec!["relative/media".to_owned()],
+                media_type: MediaType::Movie,
+            }),
+            Err(CreateLibraryError::InvalidLocation)
+        ));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
 
 /// Method maps to `POST /api/v1/library`, it adds a new library to the database, starts a new
 /// scanner for it, then dispatches a event to all clients notifying them that a new library has
@@ -35,13 +179,22 @@ pub async fn library_post(
     State(state): State<AppState>,
     Json(new_library): Json<InsertableLibrary>,
 ) -> Response {
+    let new_library = match spawn_blocking(move || validate_new_library(new_library)).await {
+        Ok(Ok(library)) => library,
+        Ok(Err(error)) => return error.into_response(),
+        Err(error) => {
+            tracing::error!(?error, "Library path validation task failed");
+            return CreateLibraryError::Internal.into_response();
+        }
+    };
+
     let mut lock = state.conn.writer().lock_owned().await;
 
     let mut tx = match dim_database::write_tx(&mut lock).await {
         Ok(tx) => tx,
         Err(err) => {
             tracing::error!(?err, "Error getting connection");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return CreateLibraryError::Internal.into_response();
         }
     };
 
@@ -49,7 +202,7 @@ pub async fn library_post(
         Ok(id) => id,
         Err(err) => {
             tracing::error!(?err, "Error inserting library");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return CreateLibraryError::Internal.into_response();
         }
     };
 
@@ -57,7 +210,7 @@ pub async fn library_post(
         Ok(_) => (),
         Err(err) => {
             tracing::error!(?err, "Error committing transaction");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return CreateLibraryError::Internal.into_response();
         }
     }
     drop(lock);
@@ -83,9 +236,21 @@ pub async fn library_post(
 
     tokio::spawn(async move { fs_watcher.start_daemon().await });
     let mut conn = state.conn.clone();
-    tokio::spawn(async move { dim_core::scanner::start(&mut conn, id, tx_clone, provider).await });
+    let failure_tx = tx_clone.clone();
+    tokio::spawn(async move {
+        if let Err(error) = dim_core::scanner::start(&mut conn, id, tx_clone, provider).await {
+            tracing::error!(?error, library_id = id, "Initial library scan failed");
+            let _ = failure_tx.send(
+                dim_events::Message {
+                    id,
+                    event_type: dim_events::PushEventType::EventScanFailed,
+                }
+                .to_string(),
+            );
+        }
+    });
 
-    Json(serde_json::json!({ "id": id })).into_response()
+    Json(serde_json::json!({ "id": id, "scan_status": "started" })).into_response()
 }
 
 /// Method mapped to `DELETE /api/v1/library/<id>` deletes the library with the supplied id from the path.
