@@ -58,7 +58,7 @@ jobs:
           chmod +x release/utils/ffprobe
 
       - name: Create Cargo target directory
-        run: mkdir -p target
+        run: mkdir -p target dim-database/target
 
       - name: Test Dim
         uses: actions-rs/cargo@v1
