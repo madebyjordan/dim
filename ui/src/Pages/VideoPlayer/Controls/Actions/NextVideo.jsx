@@ -4,6 +4,7 @@ import { useSelector } from "react-redux";
 import { skipToken } from "@reduxjs/toolkit/query/react";
 import NextVideoIcon from "../../../../assets/Icons/NextVideo";
 import { UnfocusableButton } from "Components/unfocusableButton";
+import { createPlaybackState } from "Pages/VideoPlayer/Navigation";
 
 import {
   useGetMediaFilesQuery,
@@ -36,7 +37,7 @@ function VideoActionNextVideo() {
     const item = nextMediaFiles[0];
     if (!item) return;
 
-    history.replace(`/play/${item.id}`, { from: history.location.pathname });
+    history.replace(`/play/${item.id}`, createPlaybackState(history.location));
   }, [history, nextMediaFiles]);
 
   return (

@@ -30,6 +30,34 @@
       "controls";
     transition: background 200ms ease-in-out;
 
+    .videoBack {
+      position: absolute;
+      top: 2em;
+      left: 2em;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 0.6em;
+      padding: 0.7em 0.9em;
+      border-radius: 5px;
+      background: rgba(0, 0, 0, 0.55);
+      color: #fff;
+      font: inherit;
+      cursor: pointer;
+      transition: background 100ms ease-in-out, color 100ms ease-in-out;
+
+      &:hover,
+      &:focus-visible {
+        background: var(--secondaryColor);
+        color: var(--accentColor);
+      }
+
+      svg {
+        width: 1em;
+        fill: currentColor;
+      }
+    }
+
     .errorBox {
       position: absolute;
       top: 50%;

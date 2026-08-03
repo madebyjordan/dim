@@ -31,6 +31,7 @@ function VideoMediaData() {
       dispatch(
         updateVideo({
           mediaID: payload.media_id,
+          libraryID: payload.library_id,
         })
       );
     })();

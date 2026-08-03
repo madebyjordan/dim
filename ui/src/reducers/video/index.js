@@ -59,6 +59,7 @@ const initialState = {
   error: null,
   textTrackEnabled: false,
   mediaID: null,
+  libraryID: null,
   prevSubs: null,
   episode: null,
   buffer: 0,

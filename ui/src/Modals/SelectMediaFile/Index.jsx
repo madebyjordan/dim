@@ -8,6 +8,7 @@ import { useGetMediaFilesQuery } from "../../api/v1/media";
 import FileVideoIcon from "../../assets/Icons/FileVideo";
 import { SelectMediaFileContext } from "./Context";
 import Button from "../../Components/Misc/Button";
+import { createPlaybackState } from "../../Pages/VideoPlayer/Navigation";
 
 import "./Index.scss";
 
@@ -59,17 +60,16 @@ const SelectMediaFile = (props) => {
 
     if (mediaFiles.length === 1) {
       setClicked(false);
-      if (
-        history.location.state?.from &&
-        history.location.state.from.startsWith("/play")
-      ) {
-        history.replace(`/play/${mediaFiles[0].id}`, {
-          from: history.location.pathname,
-        });
+      if (history.location.pathname.startsWith("/play/")) {
+        history.replace(
+          `/play/${mediaFiles[0].id}`,
+          createPlaybackState(history.location)
+        );
       } else {
-        history.push(`/play/${mediaFiles[0].id}`, {
-          from: history.location.pathname,
-        });
+        history.push(
+          `/play/${mediaFiles[0].id}`,
+          createPlaybackState(history.location)
+        );
       }
     } else {
       setClicked(false);
@@ -122,7 +122,10 @@ const SelectMediaFile = (props) => {
                   {mediaFiles &&
                     mediaFiles.map((file, i) => (
                       <Link
-                        to={`/play/${file.id}`}
+                        to={{
+                          pathname: `/play/${file.id}`,
+                          state: createPlaybackState(history.location),
+                        }}
                         className="fileVersion"
                         key={i}
                       >

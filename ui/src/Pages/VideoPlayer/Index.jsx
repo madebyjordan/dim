@@ -26,7 +26,9 @@ import ContinueProgress from "./ContinueProgress";
 import VttSubtitles from "./VttSubtitles";
 import SsaSubtitles from "./SsaSubtitles";
 import NextVideo from "./NextVideo/Index";
+import BackButton from "./BackButton";
 import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
+import { createPlaybackState } from "./Navigation";
 
 import "./Index.scss";
 
@@ -86,7 +88,10 @@ function VideoPlayer() {
 
     const ts_diff = video.currentTime - media.duration;
     if (video.playback_ended && ts_diff < 10) {
-      history.replace(`/play/${item.id}`, { from: history.location.pathname });
+      history.replace(
+        `/play/${item.id}`,
+        createPlaybackState(history.location)
+      );
     }
   }, [
     media,
@@ -290,7 +295,7 @@ function VideoPlayer() {
       if (!videoRef.current) return;
       if (
         e.target.closest(
-          ".videoMenus, .videoControls, .modalBoxContainer, .ReactModalPortal"
+          ".videoBack, .videoMenus, .videoControls, .modalBoxContainer, .ReactModalPortal"
         )
       )
         return;
@@ -338,6 +343,7 @@ function VideoPlayer() {
         <VttSubtitles />
         <SsaSubtitles />
         <div className="overlay" ref={overlay}>
+          <BackButton />
           {!error && manifest.loaded && video.canPlay && <Menus />}
           {!error && manifest.loaded && video.canPlay && nextEpisodeId && (
             <NextVideo id={nextEpisodeId} showAfter={showNextVideoAfter} />
