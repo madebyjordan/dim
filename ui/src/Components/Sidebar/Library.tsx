@@ -14,16 +14,14 @@ interface Props {
 function Library(props: Props) {
   const scanning = useAppSelector((store) => store.library.scanning);
   const { id, media_type, name } = props;
+  const isScanning = scanning.some((scanId) => String(scanId) === String(id));
 
   return (
-    <NavLink
-      to={"/library/" + id}
-      className={`item showLoad-${scanning.includes(id)}`}
-    >
+    <NavLink to={"/library/" + id} className={`item showLoad-${isScanning}`}>
       {media_type === "movie" && <FilmIcon />}
       {media_type === "tv" && <TvIcon />}
       <p>{name}</p>
-      {scanning.includes(id) && <BarLoad />}
+      {isScanning && <BarLoad />}
     </NavLink>
   );
 }

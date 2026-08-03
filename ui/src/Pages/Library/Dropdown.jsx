@@ -33,28 +33,29 @@ function Dropdown() {
   }, [handleClick]);
 
   const handleToggle = useCallback(() => {
-    setDropdownVisible(!dropdownVisible);
-  }, [dropdownVisible]);
+    setDropdownVisible((visible) => !visible);
+  }, []);
+
+  if (!user.info.roles?.includes("owner")) return null;
 
   return (
     <div className="dropdown" ref={dropdownRef}>
-      <div
+      <button
+        type="button"
         className={`toggle visible-${dropdownVisible}`}
         onClick={handleToggle}
+        aria-expanded={dropdownVisible}
+        aria-haspopup="menu"
       >
-        <div />
-        <div />
-        <div />
+        Library actions
+      </button>
+      <div className={`dropDownContent visible-${dropdownVisible}`} role="menu">
+        <Delete id={params.id} />
+        <button className="rename">
+          Rename library
+          <EditIcon />
+        </button>
       </div>
-      {user.info.roles?.includes("owner") && (
-        <div className={`dropDownContent visible-${dropdownVisible}`}>
-          <Delete id={params.id} />
-          <button className="rename">
-            Rename library
-            <EditIcon />
-          </button>
-        </div>
-      )}
     </div>
   );
 }

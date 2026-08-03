@@ -14,6 +14,7 @@ import {
   ADD_LIBRARY,
   SCAN_START,
   SCAN_STOP,
+  SCAN_FAILED,
   FETCH_LIBRARY_UNMATCHED_START,
   FETCH_LIBRARY_UNMATCHED_OK,
   FETCH_LIBRARY_UNMATCHED_ERR,
@@ -46,6 +47,7 @@ const del_library = {
 };
 
 const scanning = [];
+const scan_status = {};
 
 const initialState = {
   fetch_libraries,
@@ -53,6 +55,7 @@ const initialState = {
   new_library,
   del_library,
   scanning,
+  scan_status,
 };
 
 export default function libraryReducer(state = initialState, action) {
@@ -175,9 +178,13 @@ export default function libraryReducer(state = initialState, action) {
           error: action.payload,
         },
       };
-    case RM_LIBRARY:
+    case RM_LIBRARY: {
+      const remainingScanStatus = { ...state.scan_status };
+      delete remainingScanStatus[action.id];
       return {
         ...state,
+        scanning: state.scanning.filter((id) => id !== action.id),
+        scan_status: remainingScanStatus,
         fetch_libraries: {
           ...state.fetch_libraries,
           items: state.fetch_libraries.items.filter(
@@ -185,6 +192,7 @@ export default function libraryReducer(state = initialState, action) {
           ),
         },
       };
+    }
     case ADD_LIBRARY:
       return {
         ...state,
@@ -200,12 +208,31 @@ export default function libraryReducer(state = initialState, action) {
     case SCAN_START:
       return {
         ...state,
-        scanning: [...state.scanning, action.id],
+        scanning: state.scanning.includes(action.id)
+          ? state.scanning
+          : [...state.scanning, action.id],
+        scan_status: {
+          ...state.scan_status,
+          [action.id]: "scanning",
+        },
       };
     case SCAN_STOP:
       return {
         ...state,
         scanning: state.scanning.filter((id) => id !== action.id),
+        scan_status: {
+          ...state.scan_status,
+          [action.id]: "complete",
+        },
+      };
+    case SCAN_FAILED:
+      return {
+        ...state,
+        scanning: state.scanning.filter((id) => id !== action.id),
+        scan_status: {
+          ...state.scan_status,
+          [action.id]: "failed",
+        },
       };
     default:
       return state;

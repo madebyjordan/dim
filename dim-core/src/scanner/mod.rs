@@ -215,14 +215,15 @@ pub async fn start_custom(
 ) -> Result<(), Error> {
     info!(library_id, "Scanning library");
 
-    tx.send(
+    if let Err(error) = tx.send(
         dim_events::Message {
             id: library_id,
             event_type: dim_events::PushEventType::EventStartedScanning,
         }
         .to_string(),
-    )
-    .map_err(|x| Error::EventDispatch(x.into()))?;
+    ) {
+        warn!(?error, library_id, "Could not publish scan start event");
+    }
 
     let matcher = match media_type {
         MediaType::Movie => Arc::new(movie::MovieMatcher) as Arc<dyn MediaMatcher>,
@@ -275,14 +276,18 @@ pub async fn start_custom(
         "Finished scanning library."
     );
 
-    tx.send(
+    if let Err(error) = tx.send(
         dim_events::Message {
             id: library_id,
             event_type: dim_events::PushEventType::EventStoppedScanning,
         }
         .to_string(),
-    )
-    .map_err(|e| Error::EventDispatch(e.into()))?;
+    ) {
+        warn!(
+            ?error,
+            library_id, "Could not publish scan completion event"
+        );
+    }
 
     Ok(())
 }

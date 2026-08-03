@@ -1,9 +1,16 @@
-import { newLibrary, wsScanFailed } from "./library";
+import {
+  fetchLibraryScanStatus,
+  newLibrary,
+  retryLibraryScan,
+  wsScanFailed,
+} from "./library";
 import {
   ADD_LIBRARY,
   NEW_LIBRARY_ERR,
   NEW_LIBRARY_OK,
   NEW_LIBRARY_START,
+  SCAN_FAILED,
+  SCAN_START,
   SCAN_STOP,
 } from "./types";
 
@@ -21,7 +28,7 @@ describe("new library creation", () => {
   it("adds the created library immediately after the server accepts it", async () => {
     jest.spyOn(global, "fetch").mockResolvedValue({
       ok: true,
-      json: async () => ({ id: 42, scan_status: "started" }),
+      json: async () => ({ id: 42, scan_status: "scanning" }),
     });
     const dispatch = jest.fn();
 
@@ -42,6 +49,7 @@ describe("new library creation", () => {
         hidden: false,
       },
     });
+    expect(dispatch).toHaveBeenCalledWith({ type: SCAN_START, id: 42 });
   });
 
   it("returns a controlled server error without adding a library", async () => {
@@ -73,7 +81,7 @@ describe("new library creation", () => {
 
     await wsScanFailed(42)(dispatch);
 
-    expect(dispatch).toHaveBeenCalledWith({ type: SCAN_STOP, id: 42 });
+    expect(dispatch).toHaveBeenCalledWith({ type: SCAN_FAILED, id: 42 });
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "notifications/addNotification",
@@ -82,5 +90,39 @@ describe("new library creation", () => {
         },
       })
     );
+  });
+
+  it.each([
+    ["scanning", SCAN_START],
+    ["complete", SCAN_STOP],
+    ["failed", SCAN_FAILED],
+  ])("hydrates the %s scan state", async (status, type) => {
+    jest.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ status }),
+    });
+    const dispatch = jest.fn();
+
+    await fetchLibraryScanStatus(42)(dispatch, () => ({
+      auth: { token: "owner-token" },
+    }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type, id: 42 });
+  });
+
+  it("restarts a failed scan", async () => {
+    jest.spyOn(global, "fetch").mockResolvedValue({ ok: true });
+    const dispatch = jest.fn();
+
+    const result = await retryLibraryScan(42)(dispatch, () => ({
+      auth: { token: "owner-token" },
+    }));
+
+    expect(result).toEqual({ ok: true });
+    expect(fetch).toHaveBeenCalledWith("/api/v1/library/42/scan", {
+      method: "POST",
+      headers: { authorization: "owner-token" },
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: SCAN_START, id: 42 });
   });
 });

@@ -71,6 +71,10 @@ fn library_routes(_app: AppState) -> Router<AppState> {
             "/api/v1/library/:id/unmatched",
             get(routes::library::library_get_unmatched),
         )
+        .route(
+            "/api/v1/library/:id/scan",
+            get(routes::library::library_scan_status).post(routes::library::library_scan_retry),
+        )
 }
 
 fn auth_routes(AppState { .. }: AppState) -> Router<AppState> {

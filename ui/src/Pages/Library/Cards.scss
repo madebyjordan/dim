@@ -9,19 +9,55 @@
   overflow-y: auto;
   scrollbar-width: thin;
 
-  .desc {
-    color: var(--secondaryTextColor);
-    margin: 0.5em 0 1em 0;
-  }
-
   .libraryHeader {
     margin-bottom: 1em;
     display: flex;
     justify-content: space-between;
     align-items: center;
 
-    h2::first-letter {
-      text-transform: uppercase;
+    h2 {
+      margin: 0;
+    }
+  }
+}
+
+.libraryState {
+  max-width: 680px;
+  padding: 1.5em;
+  margin-bottom: 2em;
+  border-radius: 10px;
+  background: var(--secondaryColor);
+
+  h3 {
+    margin: 0 0 0.5em;
+  }
+
+  p {
+    color: var(--secondaryTextColor);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .barLoad {
+    margin-top: 1.25em;
+  }
+
+  &.failed {
+    border-left: 4px solid var(--criticalColor);
+
+    button {
+      margin-top: 1.25em;
+      padding: 0.75em 1em;
+      border-radius: 8px;
+      color: var(--accentTextColor);
+      background: var(--accentColor);
+      font-family: "Roboto Bold", Arial;
+      cursor: pointer;
+
+      &:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
     }
   }
 }
@@ -31,13 +67,7 @@
   grid-gap: 2em;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
 
-  &.show-true {
-    animation: showCards 250ms ease-in-out forwards;
-  }
-
-  &.show-false {
-    animation: hideCards 250ms ease-in-out forwards;
-  }
+  animation: showCards 250ms ease-in-out forwards;
 }
 
 /*
@@ -56,14 +86,5 @@
   }
   100% {
     opacity: 1;
-  }
-}
-
-@keyframes hideCards {
-  0% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
   }
 }

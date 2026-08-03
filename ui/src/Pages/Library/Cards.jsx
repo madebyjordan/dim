@@ -1,167 +1,152 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router";
 
 import Card from "../../Components/Card/Index";
-import Dropdown from "./Dropdown";
+import {
+  fetchLibraryScanStatus,
+  retryLibraryScan,
+} from "../../actions/library";
 import useWebSocket from "../../hooks/ws";
+import Dropdown from "./Dropdown";
+import LibraryState from "./LibraryState";
 
 import "./Cards.scss";
 
 function Cards() {
-  const params = useParams();
+  const { id } = useParams();
+  const dispatch = useDispatch();
   const ws = useWebSocket();
-
-  const [title, setTitle] = useState("");
-  const [cards, setCards] = useState([]);
-
-  /*
-    held in this state temp until animation
-    finishes swapping it.
-  */
-  const [newCards, setNewCards] = useState([]);
-
-  const [fetched, setFetched] = useState(false);
-  const [currentID, setCurrentID] = useState();
-  const [show, setShow] = useState(false);
-
-  const [throttleEventNewCardID, setThrottleEventNewCardID] = useState(false);
+  const refreshTimer = useRef();
 
   const auth = useSelector((store) => store.auth);
+  const libraries = useSelector((store) => store.library.fetch_libraries.items);
+  const scanState = useSelector((store) => store.library.scan_status[id]);
+  const library = libraries.find((item) => String(item.id) === String(id));
 
-  const cardList = useRef(null);
+  const [cards, setCards] = useState([]);
+  const [mediaState, setMediaState] = useState("loading");
+  const [responseTitle, setResponseTitle] = useState("");
+  const [retrying, setRetrying] = useState(false);
+
+  const title = library?.name || responseTitle || "Library";
 
   const fetchCards = useCallback(
-    async (reset = true) => {
-      if (reset) {
-        setNewCards([]);
-      }
+    async (showLoading = false) => {
+      if (showLoading) setMediaState("loading");
 
       try {
-        const config = {
-          headers: {
-            authorization: auth.token,
-          },
-        };
+        const res = await fetch(`/api/v1/library/${id}/media`, {
+          headers: { authorization: auth.token },
+        });
 
-        const res = await fetch(`/api/v1/library/${currentID}/media`, config);
+        if (res.status === 404) {
+          setCards([]);
+          setMediaState("empty");
+          return;
+        }
 
-        if (res.status !== 200) {
+        if (!res.ok) {
+          setMediaState("error");
           return;
         }
 
         const payload = await res.json();
+        const payloadTitle = Object.keys(payload)[0];
+        const nextCards = Object.values(payload)[0] || [];
 
-        setTitle(Object.keys(payload)[0]);
-        setNewCards(Object.values(payload)[0]);
-        setFetched(true);
-      } catch (err) {}
-    },
-    [auth.token, currentID]
-  );
-
-  const handleWS = useCallback(
-    (e) => {
-      const { type, lib_id } = JSON.parse(e.data);
-
-      if (type === "EventNewCard") {
-        if (lib_id !== parseInt(params.id)) return;
-
-        if (throttleEventNewCardID) {
-          clearTimeout(throttleEventNewCardID);
-          setThrottleEventNewCardID();
-        }
-
-        const id = setTimeout(() => {
-          fetchCards(false);
-        }, 500);
-
-        setThrottleEventNewCardID(id);
+        setResponseTitle(payloadTitle || "");
+        setCards(nextCards);
+        setMediaState(nextCards.length > 0 ? "results" : "empty");
+      } catch (_) {
+        setMediaState("error");
       }
     },
-    [fetchCards, params.id, throttleEventNewCardID]
+    [auth.token, id]
   );
 
   useEffect(() => {
-    if (!ws) return;
+    setCards([]);
+    setResponseTitle("");
+    setMediaState("loading");
+    dispatch(fetchLibraryScanStatus(id));
+    fetchCards();
+  }, [dispatch, fetchCards, id]);
+
+  useEffect(() => {
+    if (scanState === "complete") fetchCards();
+  }, [fetchCards, scanState]);
+
+  useEffect(() => {
+    if (scanState !== "scanning") return undefined;
+
+    const statusTimer = setInterval(() => {
+      dispatch(fetchLibraryScanStatus(id));
+    }, 2000);
+
+    return () => clearInterval(statusTimer);
+  }, [dispatch, id, scanState]);
+
+  const handleWS = useCallback(
+    ({ data }) => {
+      const event = JSON.parse(data);
+      if (
+        event.type !== "EventNewCard" ||
+        String(event.lib_id) !== String(id)
+      ) {
+        return;
+      }
+
+      clearTimeout(refreshTimer.current);
+      refreshTimer.current = setTimeout(() => fetchCards(), 500);
+    },
+    [fetchCards, id]
+  );
+
+  useEffect(() => {
+    if (!ws) return undefined;
 
     ws.addEventListener("message", handleWS);
-    return () => ws.removeEventListener("message", handleWS);
+    return () => {
+      ws.removeEventListener("message", handleWS);
+      clearTimeout(refreshTimer.current);
+    };
   }, [handleWS, ws]);
 
   useEffect(() => {
-    if (!title) return;
     document.title = `Dim - ${title}`;
   }, [title]);
 
-  useEffect(() => {
-    if (currentID !== params.id) {
-      setCurrentID(params.id);
-      setShow(false);
-    }
-  }, [currentID, params.id]);
-
-  useEffect(() => {
-    if (!currentID) return;
-    fetchCards();
-  }, [currentID, fetchCards]);
-
-  const handleTransitionEnd = useCallback((e) => {
-    if (e.target !== cardList.current) return;
-    if (e.propertyName !== "top") return;
-  }, []);
-
-  useEffect(() => {
-    if (!cardList.current) return;
-
-    const cards = cardList.current;
-
-    cards.addEventListener("transitionend", handleTransitionEnd);
-
-    return () =>
-      cards.removeEventListener("transitionend", handleTransitionEnd);
-  }, [handleTransitionEnd]);
-
-  /*
-    update cards list when hide animation
-    ends and new cards have been fetched
-  */
-  useEffect(() => {
-    if (show && fetched) {
-      setCards(newCards);
-    }
-  }, [fetched, newCards, show]);
-
-  /*
-    when card list hides, cleanse cards
-    set to ready to show new cards
-  */
-  const handleEnd = useCallback(async (e) => {
-    if (e.animationName !== "hideCards") return;
-
-    setCards([]);
-    setShow(true);
-  }, []);
+  const handleRetry = async () => {
+    setRetrying(true);
+    await dispatch(retryLibraryScan(id));
+    setRetrying(false);
+  };
 
   return (
-    <div className="libraryCards" ref={cardList}>
+    <div className="libraryCards">
       <div className="libraryHeader">
-        <h2>{title.toLowerCase()}</h2>
+        <h2>{title}</h2>
         <div className="actions">
           <Dropdown />
         </div>
       </div>
-      {show && fetched && newCards.length === 0 && (
-        <p className="desc">No media has been found</p>
+
+      <LibraryState
+        mediaState={mediaState}
+        mediaType={library?.media_type}
+        onRetry={handleRetry}
+        retrying={retrying}
+        scanState={scanState}
+      />
+
+      {cards.length > 0 && (
+        <div className="cards">
+          {cards.map((card, index) => (
+            <Card key={card.id || index} data={card} />
+          ))}
+        </div>
       )}
-      <div
-        className={`cards show-${show && fetched}`}
-        onAnimationEnd={handleEnd}
-      >
-        {cards.map((card, i) => (
-          <Card key={i} data={card} />
-        ))}
-      </div>
     </div>
   );
 }

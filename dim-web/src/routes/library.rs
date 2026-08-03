@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -23,6 +23,7 @@ use dim_extern_api::tmdb::TMDBMetadataProvider;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use http::StatusCode;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
@@ -30,6 +31,64 @@ use tokio::task::spawn_blocking;
 use crate::error::DimErrorWrapper;
 use crate::middleware::Owner;
 use crate::AppState;
+
+#[derive(Copy, Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum LibraryScanStatus {
+    Scanning,
+    Complete,
+    Failed,
+}
+
+static LIBRARY_SCAN_STATUS: Lazy<RwLock<HashMap<i64, LibraryScanStatus>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+fn set_scan_status(id: i64, status: LibraryScanStatus) {
+    LIBRARY_SCAN_STATUS.write().unwrap().insert(id, status);
+}
+
+fn get_scan_status(id: i64) -> Option<LibraryScanStatus> {
+    LIBRARY_SCAN_STATUS.read().unwrap().get(&id).copied()
+}
+
+fn metadata_provider(media_type: MediaType) -> Arc<dyn dim_extern_api::ExternalQueryIntoShow> {
+    const TMDB_KEY: &str = "38c372f5bc572c8aadde7a802638534e";
+    let provider = TMDBMetadataProvider::new(TMDB_KEY);
+
+    match media_type {
+        MediaType::Movie => Arc::new(provider.movies()),
+        MediaType::Tv => Arc::new(provider.tv_shows()),
+        _ => unreachable!(),
+    }
+}
+
+fn spawn_library_scan(
+    state: &AppState,
+    id: i64,
+    provider: Arc<dyn dim_extern_api::ExternalQueryIntoShow>,
+) {
+    set_scan_status(id, LibraryScanStatus::Scanning);
+
+    let mut conn = state.conn.clone();
+    let scan_tx = state.event_tx.clone();
+    let failure_tx = scan_tx.clone();
+    tokio::spawn(async move {
+        match dim_core::scanner::start(&mut conn, id, scan_tx, provider).await {
+            Ok(()) => set_scan_status(id, LibraryScanStatus::Complete),
+            Err(error) => {
+                set_scan_status(id, LibraryScanStatus::Failed);
+                tracing::error!(?error, library_id = id, "Library scan failed");
+                let _ = failure_tx.send(
+                    dim_events::Message {
+                        id,
+                        event_type: dim_events::PushEventType::EventScanFailed,
+                    }
+                    .to_string(),
+                );
+            }
+        }
+    });
+}
 
 #[derive(Debug)]
 enum CreateLibraryError {
@@ -217,14 +276,7 @@ pub async fn library_post(
 
     let tx_clone = state.event_tx.clone();
 
-    const TMDB_KEY: &str = "38c372f5bc572c8aadde7a802638534e";
-    let provider = TMDBMetadataProvider::new(TMDB_KEY);
-
-    let provider = match new_library.media_type {
-        MediaType::Movie => Arc::new(provider.movies()) as Arc<_>,
-        MediaType::Tv => Arc::new(provider.tv_shows()) as Arc<_>,
-        _ => unreachable!(),
-    };
+    let provider = metadata_provider(new_library.media_type);
 
     let mut fs_watcher = FsWatcher::new(
         state.conn.clone(),
@@ -235,22 +287,56 @@ pub async fn library_post(
     );
 
     tokio::spawn(async move { fs_watcher.start_daemon().await });
-    let mut conn = state.conn.clone();
-    let failure_tx = tx_clone.clone();
-    tokio::spawn(async move {
-        if let Err(error) = dim_core::scanner::start(&mut conn, id, tx_clone, provider).await {
-            tracing::error!(?error, library_id = id, "Initial library scan failed");
-            let _ = failure_tx.send(
-                dim_events::Message {
-                    id,
-                    event_type: dim_events::PushEventType::EventScanFailed,
-                }
-                .to_string(),
-            );
-        }
-    });
+    spawn_library_scan(&state, id, provider);
 
-    Json(serde_json::json!({ "id": id, "scan_status": "started" })).into_response()
+    Json(serde_json::json!({ "id": id, "scan_status": "scanning" })).into_response()
+}
+
+pub async fn library_scan_status(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+    let mut tx = match state.conn.read().begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(?error, "Error getting connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if Library::get_one(&mut tx, id).await.is_err() {
+        return (StatusCode::NOT_FOUND, "Library not found.").into_response();
+    }
+
+    let status = get_scan_status(id).unwrap_or(LibraryScanStatus::Complete);
+    Json(serde_json::json!({ "status": status })).into_response()
+}
+
+pub async fn library_scan_retry(
+    _owner: Owner,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Response {
+    if get_scan_status(id) == Some(LibraryScanStatus::Scanning) {
+        return (
+            StatusCode::CONFLICT,
+            "This library is already being scanned.",
+        )
+            .into_response();
+    }
+
+    let mut tx = match state.conn.read().begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(?error, "Error getting connection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let library = match Library::get_one(&mut tx, id).await {
+        Ok(library) => library,
+        Err(_) => return (StatusCode::NOT_FOUND, "Library not found.").into_response(),
+    };
+
+    spawn_library_scan(&state, id, metadata_provider(library.media_type));
+    Json(serde_json::json!({ "status": LibraryScanStatus::Scanning })).into_response()
 }
 
 /// Method mapped to `DELETE /api/v1/library/<id>` deletes the library with the supplied id from the path.
@@ -259,6 +345,7 @@ pub async fn library_delete(
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, DimErrorWrapper> {
+    LIBRARY_SCAN_STATUS.write().unwrap().remove(&id);
     // First we mark the library as scheduled for deletion which will make the library and all its
     // content hidden. This is necessary because huge libraries take a long time to delete.
     {

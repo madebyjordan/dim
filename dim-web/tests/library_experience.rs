@@ -194,7 +194,7 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
     assert_eq!(response.status(), StatusCode::OK);
     let created = json_body(response).await;
     let id = created["id"].as_i64().unwrap();
-    assert_eq!(created["scan_status"], "started");
+    assert_eq!(created["scan_status"], "scanning");
 
     let mut scan_started = false;
     let mut scan_stopped = false;
@@ -214,6 +214,138 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
         }
     }
     assert!(scan_started);
+
+    let mut status = String::new();
+    for _ in 0..20 {
+        let response = test
+            .router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/api/v1/library/{id}/scan"),
+                Some(&owner_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        status = json_body(response).await["status"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if status == "complete" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status, "complete");
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/v1/library/{id}/media"),
+            Some(&owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/v1/library/{id}/scan"),
+            Some(&owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["status"], "scanning");
+
+    let mut retry_started = false;
+    let mut retry_stopped = false;
+    while !retry_stopped {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), test.event_rx.recv())
+            .await
+            .expect("retry scan timed out")
+            .expect("scanner event channel closed");
+        let event: Value = serde_json::from_str(&message).unwrap();
+        if event["id"] != id {
+            continue;
+        }
+        match event["type"].as_str() {
+            Some("EventStartedScanning") => retry_started = true,
+            Some("EventStoppedScanning") => retry_stopped = true,
+            _ => {}
+        }
+    }
+    assert!(retry_started);
+
+    for _ in 0..20 {
+        let response = test
+            .router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/api/v1/library/{id}/scan"),
+                Some(&owner_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        status = json_body(response).await["status"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if status == "complete" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status, "complete");
+
+    // Losing websocket listeners must not prevent the scanner from doing its work.
+    test.event_rx.close();
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/api/v1/library/{id}/scan"),
+            Some(&owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for _ in 0..20 {
+        let response = test
+            .router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/api/v1/library/{id}/scan"),
+                Some(&owner_token),
+                "",
+            ))
+            .await
+            .unwrap();
+        status = json_body(response).await["status"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if status == "complete" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status, "complete");
 
     let response = test
         .router

@@ -115,6 +115,7 @@ async fn enforces_the_application_security_boundary() {
 
     for uri in [
         "/api/v1/library",
+        "/api/v1/library/1/scan",
         "/api/v1/auth/whoami",
         "/api/v1/dashboard",
         "/api/v1/search?query=movie",
@@ -170,6 +171,7 @@ async fn enforces_the_application_security_boundary() {
         (Method::POST, "/api/v1/auth/invites", ""),
         (Method::DELETE, "/api/v1/auth/token/invite", ""),
         (Method::POST, "/api/v1/library", "{}"),
+        (Method::POST, "/api/v1/library/1/scan", ""),
         (Method::DELETE, "/api/v1/library/1", ""),
         (Method::PATCH, "/api/v1/media/1", "{}"),
         (Method::DELETE, "/api/v1/media/1", ""),

@@ -14,6 +14,7 @@ import {
   ADD_LIBRARY,
   SCAN_START,
   SCAN_STOP,
+  SCAN_FAILED,
   FETCH_LIBRARY_UNMATCHED_START,
   FETCH_LIBRARY_UNMATCHED_ERR,
   FETCH_LIBRARY_UNMATCHED_OK,
@@ -139,6 +140,7 @@ export const newLibrary = (data) => async (dispatch, getState) => {
         hidden: false,
       },
     });
+    dispatch({ type: SCAN_START, id: payload.id });
     dispatch(
       addNotification({
         msg: "Library created. The initial scan has started.",
@@ -242,7 +244,7 @@ export const wsScanStop = (id) => async (dispatch) => {
 
 export const wsScanFailed = (id) => async (dispatch) => {
   dispatch({
-    type: SCAN_STOP,
+    type: SCAN_FAILED,
     id,
   });
   dispatch(
@@ -250,4 +252,49 @@ export const wsScanFailed = (id) => async (dispatch) => {
       msg: "The library scan failed. Check that its folders are still readable.",
     })
   );
+};
+
+export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
+  const token = getState().auth.token;
+
+  try {
+    const res = await fetch(`/api/v1/library/${id}/scan`, {
+      headers: { authorization: token },
+    });
+
+    if (!res.ok) return;
+
+    const { status } = await res.json();
+    const type = {
+      scanning: SCAN_START,
+      complete: SCAN_STOP,
+      failed: SCAN_FAILED,
+    }[status];
+
+    if (type) dispatch({ type, id });
+  } catch (_) {}
+};
+
+export const retryLibraryScan = (id) => async (dispatch, getState) => {
+  const token = getState().auth.token;
+
+  try {
+    const res = await fetch(`/api/v1/library/${id}/scan`, {
+      method: "POST",
+      headers: { authorization: token },
+    });
+
+    if (!res.ok) {
+      const error = await responseError(res, "Dim could not restart the scan.");
+      dispatch(addNotification({ msg: error }));
+      return { ok: false, error };
+    }
+
+    dispatch({ type: SCAN_START, id });
+    return { ok: true };
+  } catch (_) {
+    const error = "Dim could not reach the server to restart the scan.";
+    dispatch(addNotification({ msg: error }));
+    return { ok: false, error };
+  }
 };
