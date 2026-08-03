@@ -31,6 +31,8 @@ use tracing::info;
 use displaydoc::Display;
 use thiserror::Error;
 
+use crate::middleware::Owner;
+
 #[derive(Debug, Display, Error)]
 pub enum Error {
     /// No mediafiles.
@@ -112,6 +114,7 @@ pub async fn get_mediafile_info(
 /// * `mediafiles` - ids of the orphan mediafiles we want to rematch
 /// * `tmdb_id` - the tmdb id of the proper metadata we want to fetch for the media
 pub async fn rematch_mediafile(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Json(route_args): Json<RouteArgs>,
 ) -> Result<impl IntoResponse, Error> {

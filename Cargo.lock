@@ -1090,6 +1090,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid 1.18.1",
+ "xtra",
 ]
 
 [[package]]

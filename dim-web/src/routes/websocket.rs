@@ -129,8 +129,9 @@ pub async fn handle_websocket_session(
     };
 
     tokio::pin!(stream);
+    let mut sink: Pin<Box<dyn Sink<WsMessage, Error = WsMessageError> + Send>> = Box::pin(sink);
 
-    'auth_loop: while let Some(message) = stream.next().await {
+    while let Some(message) = stream.next().await {
         if let WsMessage::Text(st) = message {
             if let Ok(ClientActions::Authenticate { token }) = serde_json::from_str(&st) {
                 if let Ok(token_data) = dim_database::user::Login::verify_cookie(token) {
@@ -141,7 +142,7 @@ pub async fn handle_websocket_session(
                             let _ = socket_tx
                                 .send(CtrlEvent::Track {
                                     addr,
-                                    sink: Box::pin(sink),
+                                    sink,
                                     auth: Box::new(u),
                                 })
                                 .await;
@@ -157,23 +158,21 @@ pub async fn handle_websocket_session(
                                 })
                                 .await;
 
-                            break 'auth_loop;
+                            break;
                         }
                     }
                 }
             }
-
-            let _ = socket_tx
-                .send(CtrlEvent::SendTo {
-                    addr,
-                    message: dim_events::Message {
-                        id: -1,
-                        event_type: dim_events::PushEventType::EventAuthErr,
-                    }
-                    .to_string(),
-                })
-                .await;
         }
+
+        let message = dim_events::Message {
+            id: -1,
+            event_type: dim_events::PushEventType::EventAuthErr,
+        }
+        .to_string();
+        let _ = sink.send(WsMessage::Text(message)).await;
+        let _ = sink.close().await;
+        return;
     }
 
     loop {
@@ -272,4 +271,47 @@ where
     };
 
     EventRepeater::new(stream_forward, ctrl_event_processor_fut, tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn invalid_authentication_closes_without_tracking_the_socket() {
+        let conn = dim_database::get_conn_memory().await.unwrap();
+        let (outgoing, mut outgoing_rx) = futures::channel::mpsc::unbounded();
+        let sink = outgoing.sink_map_err(|_| WsMessageError);
+        let stream = futures::stream::iter([WsMessage::Text("not-json".to_owned())]);
+        let (socket_tx, mut socket_rx) = mpsc::channel(4);
+
+        handle_websocket_session(
+            sink,
+            stream,
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)),
+            conn,
+            socket_tx,
+        )
+        .await;
+
+        let message = outgoing_rx.next().await.unwrap();
+        let WsMessage::Text(body) = message else {
+            panic!("expected an authentication error message");
+        };
+        assert_eq!(
+            body,
+            dim_events::Message {
+                id: -1,
+                event_type: dim_events::PushEventType::EventAuthErr,
+            }
+            .to_string()
+        );
+        assert!(outgoing_rx.next().await.is_none());
+        assert!(matches!(
+            socket_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
 }

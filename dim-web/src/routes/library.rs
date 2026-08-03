@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::Extension;
 use axum::Json;
 
 use dim_core::errors::DimError;
@@ -14,7 +13,6 @@ use dim_database::compact_mediafile::CompactMediafile;
 use dim_database::library::{InsertableLibrary, Library, MediaType};
 use dim_database::media::Media;
 use dim_database::mediafile::MediaFile;
-use dim_database::user::User;
 
 use dim_extern_api::tmdb::TMDBMetadataProvider;
 
@@ -25,6 +23,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::error::DimErrorWrapper;
+use crate::middleware::Owner;
 use crate::AppState;
 
 /// Method maps to `POST /api/v1/library`, it adds a new library to the database, starts a new
@@ -32,17 +31,10 @@ use crate::AppState;
 /// been created. This method can only be accessed by authenticated users. Method returns 200 OK
 ///
 pub async fn library_post(
-    Extension(user): Extension<User>,
+    _owner: Owner,
     State(state): State<AppState>,
     Json(new_library): Json<InsertableLibrary>,
 ) -> Response {
-    if !user.has_role("owner") {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "User account is not allowed to add a library.".to_string(),
-        )
-            .into_response();
-    }
     let mut lock = state.conn.writer().lock_owned().await;
 
     let mut tx = match dim_database::write_tx(&mut lock).await {
@@ -98,13 +90,10 @@ pub async fn library_post(
 
 /// Method mapped to `DELETE /api/v1/library/<id>` deletes the library with the supplied id from the path.
 pub async fn library_delete(
-    Extension(user): Extension<User>,
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, DimErrorWrapper> {
-    if !user.has_role("owner") {
-        return Err(DimErrorWrapper(DimError::Unauthorized));
-    }
     // First we mark the library as scheduled for deletion which will make the library and all its
     // content hidden. This is necessary because huge libraries take a long time to delete.
     {

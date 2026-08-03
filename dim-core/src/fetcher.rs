@@ -12,7 +12,6 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::io::copy;
 use std::io::Cursor;
-use std::path::PathBuf;
 
 use once_cell::sync::OnceCell;
 
@@ -52,9 +51,17 @@ async fn process_queue(mut rx: UnboundedReceiver<(String, String)>) {
 
         match reqwest::get(url.as_str()).await {
             Ok(resp) => {
-                let meta_path = METADATA_PATH.get().unwrap();
-                let mut out_path = PathBuf::from(meta_path);
-                out_path.push(outfile);
+                let Some(meta_path) = METADATA_PATH.get() else {
+                    error!(url = &url, "Metadata path is not initialized.");
+                    continue;
+                };
+                let out_path = match crate::utils::safe_metadata_path(meta_path, &outfile) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        error!(error = ?e, url = &url, outfile = &outfile, "Rejected unsafe metadata path.");
+                        continue;
+                    }
+                };
 
                 debug!("Caching {} -> {:?}", url, out_path);
 

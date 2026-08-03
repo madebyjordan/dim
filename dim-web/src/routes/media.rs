@@ -48,6 +48,8 @@ use tracing::info;
 use displaydoc::Display;
 use thiserror::Error;
 
+use crate::middleware::Owner;
+
 #[derive(Debug, Display, Error)]
 pub enum Error {
     /// Not Found.
@@ -392,6 +394,7 @@ pub async fn get_mediafile_tree(
 /// * `data` - the info that we changed about the media entry
 /// * `_user` - Auth middleware
 pub async fn update_media_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
     Json(data): Json<UpdateMedia>,
@@ -419,6 +422,7 @@ pub async fn update_media_by_id(
 /// * `id` - id of the media we want to delete
 /// * `_user` - auth middleware
 pub async fn delete_media_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, Error> {
@@ -526,6 +530,7 @@ pub struct RematchMediaParams {
 ///
 /// TODO: Add ability to specify overrides like episode and season ranges.
 pub async fn rematch_media_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
     Json(params): Json<RematchMediaParams>,

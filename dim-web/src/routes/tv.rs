@@ -13,6 +13,7 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::auth::AuthError;
+use crate::middleware::Owner;
 
 /// Method mapped to `GET /api/v1/tv/<id>/season` returns all seasons for TV Show mapped to the id
 /// passed in.
@@ -49,6 +50,7 @@ pub async fn get_season_by_id(
 /// This route additionally requires you to pass in a json object by the format of
 /// `dim_database::season::UpdateSeason`.
 pub async fn patch_season_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
     Json(season): Json<UpdateSeason>,
@@ -99,6 +101,7 @@ pub async fn get_season_episodes(
 /// # Arguments
 /// * `id` - id of the season.
 pub async fn delete_season_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AuthError> {
@@ -122,6 +125,7 @@ pub async fn delete_season_by_id(
 /// This route additionally requires you to pass in a json object by the format of
 /// `dim_database::episode::UpdateEpisode`.
 pub async fn patch_episode_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
     Json(episode): Json<UpdateEpisode>,
@@ -142,6 +146,7 @@ pub async fn patch_episode_by_id(
 /// # Arguments
 /// * `id` - id an episode to delete
 pub async fn delete_episode_by_id(
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AuthError> {

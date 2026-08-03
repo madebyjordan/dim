@@ -11,8 +11,63 @@ use dim_database::user::UpdateableUser;
 use dim_database::user::User;
 use dim_database::user::UserSettings;
 use dim_database::DatabaseError;
+use serde::{Deserialize, Serialize};
 
 use super::auth::AuthError;
+use crate::middleware::Owner;
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSettings {
+    pub enable_ssl: bool,
+    pub port: u16,
+    pub priv_key: Option<String>,
+    pub ssl_cert: Option<String>,
+    pub cache_dir: String,
+    pub metadata_dir: String,
+    pub quiet_boot: bool,
+    pub disable_auth: bool,
+    pub verbose: bool,
+    pub enable_hwaccel: bool,
+    pub version: String,
+}
+
+impl From<GlobalSettings> for HostSettings {
+    fn from(settings: GlobalSettings) -> Self {
+        Self {
+            enable_ssl: settings.enable_ssl,
+            port: settings.port,
+            priv_key: settings.priv_key,
+            ssl_cert: settings.ssl_cert,
+            cache_dir: settings.cache_dir,
+            metadata_dir: settings.metadata_dir,
+            quiet_boot: settings.quiet_boot,
+            disable_auth: settings.disable_auth,
+            verbose: settings.verbose,
+            enable_hwaccel: settings.enable_hwaccel,
+            version: settings.version,
+        }
+    }
+}
+
+impl HostSettings {
+    fn into_global_settings(self, secret_key: Option<[u8; 32]>) -> GlobalSettings {
+        GlobalSettings {
+            enable_ssl: self.enable_ssl,
+            port: self.port,
+            priv_key: self.priv_key,
+            ssl_cert: self.ssl_cert,
+            cache_dir: self.cache_dir,
+            metadata_dir: self.metadata_dir,
+            quiet_boot: self.quiet_boot,
+            disable_auth: self.disable_auth,
+            verbose: self.verbose,
+            secret_key,
+            enable_hwaccel: self.enable_hwaccel,
+            version: self.version,
+        }
+    }
+}
 
 pub async fn get_user_settings(
     Extension(user): Extension<User>,
@@ -43,30 +98,27 @@ pub async fn post_user_settings(
     Ok(axum::response::Json(&new_settings).into_response())
 }
 
-fn get_global_settings() -> GlobalSettings {
+fn get_host_settings() -> HostSettings {
     let mut global_settings: GlobalSettings = settings::get_global_settings();
     let git_tag = String::from(env!("GIT_TAG")).to_owned();
     let mut git_sha = String::from(env!("GIT_SHA_256")).to_owned();
     git_sha.truncate(8);
     let version = git_tag + " " + git_sha.as_str();
     global_settings.version = version;
-    global_settings
+    global_settings.into()
 }
 
-// TODO: Hide secret key.
-pub async fn http_get_global_settings() -> Result<Response, AuthError> {
-    Ok(axum::response::Json(&get_global_settings()).into_response())
+pub async fn http_get_global_settings(_owner: Owner) -> Result<Response, AuthError> {
+    Ok(axum::response::Json(&get_host_settings()).into_response())
 }
 
-// TODO: Disallow setting secret key over http.
 pub async fn http_set_global_settings(
-    Extension(user): Extension<User>,
-    Json(new_settings): Json<GlobalSettings>,
+    _owner: Owner,
+    Json(new_settings): Json<HostSettings>,
 ) -> Result<Response, AuthError> {
-    if user.has_role("owner") {
-        set_global_settings(new_settings).unwrap();
-        return Ok(Json(&get_global_settings()).into_response());
-    }
+    let secret_key = settings::get_global_settings().secret_key;
+    set_global_settings(new_settings.into_global_settings(secret_key))
+        .map_err(|error| AuthError::BadRequest(error.to_string()))?;
 
-    Err(AuthError::InvalidCredentials)
+    Ok(Json(&get_host_settings()).into_response())
 }

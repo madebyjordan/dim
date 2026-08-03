@@ -14,7 +14,8 @@ function VideoEvents() {
   const dispatch = useDispatch();
   const { player } = useContext(VideoPlayerContext);
 
-  const { video } = useSelector((store) => ({
+  const { token, video } = useSelector((store) => ({
+    token: store.auth.token,
     video: store.video,
   }));
 
@@ -118,7 +119,12 @@ function VideoEvents() {
 
       (async () => {
         console.log("[VIDEO] fetching stderr");
-        const res = await fetch(`/api/v1/stream/${video.gid}/state/get_stderr`);
+        const res = await fetch(
+          `/api/v1/stream/${video.gid}/state/get_stderr`,
+          {
+            headers: { Authorization: token },
+          }
+        );
         const error = await res.json();
 
         dispatch(
@@ -131,7 +137,7 @@ function VideoEvents() {
         );
       })();
     },
-    [dispatch, video.gid]
+    [dispatch, token, video.gid]
   );
 
   const ePlayBackNotAllowed = useCallback(

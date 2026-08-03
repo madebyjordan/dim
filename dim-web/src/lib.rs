@@ -35,6 +35,24 @@ pub struct AppState {
     stream_tracking: StreamTracking,
 }
 
+impl AppState {
+    pub fn new(
+        conn: DbConnection,
+        socket_tx: routes::websocket::EventSocketTx,
+        event_tx: EventTx,
+        state: StateManager,
+        stream_tracking: StreamTracking,
+    ) -> Self {
+        Self {
+            conn,
+            socket_tx,
+            event_tx,
+            state,
+            stream_tracking,
+        }
+    }
+}
+
 fn library_routes(_app: AppState) -> Router<AppState> {
     Router::new()
         .route(
@@ -158,73 +176,38 @@ fn settings_routes(AppState { .. }: AppState) -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/user/settings",
-            get(|| async { "User settings - needs actual implementation" }),
+            get(routes::settings::get_user_settings),
         )
         .route(
             "/api/v1/user/settings",
-            post(|| async { "User settings post - needs actual implementation" }),
+            post(routes::settings::post_user_settings),
         )
 }
 
-pub async fn start_webserver(
-    address: SocketAddr,
-    event_tx: EventTx,
-    stream_manager: StateManager,
-    event_rx: UnboundedReceiver<String>,
-    shutdown_fut: impl Future<Output = ()> + Send + 'static,
-) {
-    let state = stream_manager;
-    let stream_tracking = StreamTracking::default();
-    let conn = dim_database::get_conn()
-        .await
-        .expect("Failed to grab a handle to the connection pool.");
+async fn ws_handler(
+    ws: axum::extract::WebSocketUpgrade,
+    ConnectInfo(remote_address): ConnectInfo<SocketAddr>,
+    State(AppState {
+        conn, socket_tx, ..
+    }): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |websocket| async move {
+        let (ws_tx, ws_rx) = websocket.split();
 
-    let event_repeater = routes::websocket::event_repeater(
-        tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx),
-        1024,
-    );
+        routes::websocket::handle_websocket_session(
+            ws_tx.sink_err_into::<routes::websocket::WsMessageError>(),
+            ws_rx.filter_map(|m| async move { m.ok() }),
+            Some(remote_address),
+            conn,
+            socket_tx,
+        )
+        .await;
+    })
+}
 
-    let socket_tx = event_repeater.sender();
-
-    tokio::spawn(event_repeater.into_future());
-
-    async fn ws_handler(
-        ws: axum::extract::WebSocketUpgrade,
-        ConnectInfo(remote_address): ConnectInfo<SocketAddr>,
-        State(AppState {
-            conn, socket_tx, ..
-        }): State<AppState>,
-    ) -> Response {
-        ws.on_upgrade(move |websocket| async move {
-            let (ws_tx, ws_rx) = websocket.split();
-
-            routes::websocket::handle_websocket_session(
-                ws_tx.sink_err_into::<routes::websocket::WsMessageError>(),
-                ws_rx.filter_map(|m| async move { m.ok() }),
-                Some(remote_address),
-                conn,
-                socket_tx,
-            )
-            .await;
-        })
-    }
-
-    let app = AppState {
-        conn: conn.clone(),
-        socket_tx: socket_tx.clone(),
-        event_tx: event_tx.clone(),
-        state,
-        stream_tracking,
-    };
-
-    let router = axum::Router::new()
+pub fn build_router(app: AppState) -> Router {
+    let protected = axum::Router::new()
         .route("/api/v1/auth/whoami", get(routes::auth::whoami))
-        .route_layer(axum::middleware::from_fn_with_state(
-            conn.clone(),
-            verify_cookie_token,
-        ))
-        // --- End of routes authenticated by Axum middleware ---
-        .merge(auth_routes(app.clone()))
         .merge(library_routes(app.clone()))
         .route("/api/v1/dashboard", get(routes::dashboard::dashboard))
         .route("/api/v1/dashboard/banner", get(routes::dashboard::banners))
@@ -233,7 +216,6 @@ pub async fn start_webserver(
             "/api/v1/filebrowser/*path",
             get(routes::filebrowser::get_directory_structure),
         )
-        .route("/images/*path", get(routes::statik::get_image))
         .merge(media_routes(app.clone()))
         .merge(stream_routes(app.clone()))
         .route(
@@ -268,19 +250,47 @@ pub async fn start_webserver(
             "/api/v1/auth/token/:token",
             delete(routes::auth::delete_token),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            app.conn.clone(),
+            verify_cookie_token,
+        ));
+
+    axum::Router::new()
+        .merge(auth_routes(app.clone()))
+        .route("/images/*path", get(routes::statik::get_image))
         .route("/", get(routes::statik::react_routes))
         .route("/*path", get(routes::statik::react_routes))
         .route("/static/*path", get(routes::statik::dist_static))
         .route("/ws", get(ws_handler))
+        .merge(protected)
         .with_state(app)
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer({
-            let cors = tower_http::cors::CorsLayer::new()
-                // allow requests from any origin
-                .allow_origin(tower_http::cors::Any);
+}
 
-            cors
-        });
+pub async fn start_webserver(
+    address: SocketAddr,
+    event_tx: EventTx,
+    stream_manager: StateManager,
+    event_rx: UnboundedReceiver<String>,
+    shutdown_fut: impl Future<Output = ()> + Send + 'static,
+) {
+    let state = stream_manager;
+    let stream_tracking = StreamTracking::default();
+    let conn = dim_database::get_conn()
+        .await
+        .expect("Failed to grab a handle to the connection pool.");
+
+    let event_repeater = routes::websocket::event_repeater(
+        tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx),
+        1024,
+    );
+
+    let socket_tx = event_repeater.sender();
+
+    tokio::spawn(event_repeater.into_future());
+
+    let app = AppState::new(conn, socket_tx, event_tx, state, stream_tracking);
+    let router = build_router(app);
 
     tracing::info!(%address, "webserver is listening");
 

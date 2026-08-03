@@ -16,7 +16,6 @@ use dim_database::asset;
 use http::StatusCode;
 use rust_embed::RustEmbed;
 
-use std::path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -67,12 +66,16 @@ pub async fn get_image(
     Path(path): Path<String>,
     Query(params): Query<ImageParams>,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
-    let meta_path = dim_core::core::METADATA_PATH.get().unwrap();
-    let mut file_path = PathBuf::from(&meta_path);
-    file_path.push(path.as_str());
+    let meta_path = dim_core::core::METADATA_PATH
+        .get()
+        .ok_or(dim_core::errors::DimError::InternalServerError)?;
+    let relative_path = dim_core::utils::safe_relative_path(path.as_str())
+        .map_err(|_| dim_core::errors::DimError::NotFoundError)?;
+    let file_path = dim_core::utils::safe_metadata_path(meta_path, &relative_path)
+        .map_err(|_| dim_core::errors::DimError::NotFoundError)?;
 
     let mut url_path = PathBuf::from("images/");
-    url_path.push(path.as_str());
+    url_path.push(&relative_path);
 
     /*
     let image = if let (Some(w), Some(h)) = (resize_w, resize_h) {
@@ -85,9 +88,9 @@ pub async fn get_image(
     let mut tx = conn.read().begin().await?;
     // FIXME (val): return not yet available error here as a hint that in the future this URL will
     // return 200 OK.
-    if !path::Path::new(&file_path).exists() {
+    if !file_path.exists() {
         if let Ok(x) = asset::Asset::get_url_by_file(&mut tx, &url_path).await {
-            insert_into_queue(x, path.as_str().into(), true).await;
+            insert_into_queue(x, relative_path.to_string_lossy().into_owned(), true).await;
         }
 
         return Err(dim_core::errors::DimError::NotFoundError.into());

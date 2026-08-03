@@ -91,10 +91,13 @@ function PrivateRoute(props) {
     if (!GID) return;
 
     (async () => {
-      await fetch(`/api/v1/stream/${GID}/state/kill`);
+      await fetch(`/api/v1/stream/${GID}/state/kill`, {
+        method: "DELETE",
+        headers: { Authorization: token },
+      });
       sessionStorage.clear();
     })();
-  }, [history.location.pathname]);
+  }, [history.location.pathname, token]);
 
   useEffect(() => {
     dispatch(checkAdminExists());

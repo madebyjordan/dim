@@ -11,7 +11,8 @@ import "./Subtitles.scss";
 function VideoSubtitles() {
   const dispatch = useDispatch();
 
-  const { video, current, tracks, ready } = useSelector((store) => ({
+  const { token, video, current, tracks, ready } = useSelector((store) => ({
+    token: store.auth.token,
     video: store.video,
     current: store.video.tracks.subtitle.current,
     tracks: store.video.tracks.subtitle.list,
@@ -112,7 +113,9 @@ function VideoSubtitles() {
     const intervalID = setInterval(async () => {
       const videoSubTrack = videoRef.current.textTracks[0];
 
-      const req = await fetch(`/api/v1/stream/${tracks[current].chunk_path}`);
+      const req = await fetch(`/api/v1/stream/${tracks[current].chunk_path}`, {
+        headers: { Authorization: token },
+      });
       const text = await req.text();
 
       const diff = text.split(prev).join("");
@@ -158,6 +161,7 @@ function VideoSubtitles() {
     video.textTrackEnabled,
     videoRef,
     isVtt,
+    token,
   ]);
 
   useEffect(() => {

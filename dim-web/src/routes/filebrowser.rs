@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use displaydoc::Display;
 use thiserror::Error;
 
+use crate::middleware::Owner;
+
 #[derive(Debug, Display, Error)]
 pub enum AuthError {
     /// IO Error.
@@ -64,6 +66,7 @@ pub fn enumerate_directory<T: AsRef<std::path::Path>>(path: T) -> io::Result<Vec
 }
 
 pub async fn get_directory_structure(
+    _owner: Owner,
     path: Option<Path<String>>,
 ) -> Result<axum::response::Response, AuthError> {
     cfg_if::cfg_if! {
@@ -92,7 +95,7 @@ pub async fn get_directory_structure(
     Ok(axum::response::Json(
         &spawn_blocking(|| enumerate_directory(path))
             .await
-            .unwrap()?,
+            .map_err(|_| AuthError::IOError)??,
     )
     .into_response())
 }

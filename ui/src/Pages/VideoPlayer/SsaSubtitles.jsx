@@ -8,7 +8,8 @@ import JASSUB from "jassub";
 import "./Subtitles.scss";
 
 function VideoSubtitles() {
-  const { video, subtitle } = useSelector((store) => ({
+  const { token, video, subtitle } = useSelector((store) => ({
+    token: store.auth.token,
     video: store.video,
     subtitle: store.video.tracks.subtitle,
   }));
@@ -18,7 +19,39 @@ function VideoSubtitles() {
   const isAssEnabled = localStorage.getItem("enable_ssa") === "true";
   const isAss = !!(isAssEnabled && currentSub?.chunk_path?.endsWith("ass"));
   const [jassub, setJASSUB] = useState();
+  const [subContent, setSubContent] = useState();
   const { videoRef } = useContext(VideoPlayerContext);
+
+  useEffect(() => {
+    if (!isAss || !currentSub) {
+      setSubContent(null);
+      return;
+    }
+
+    let cancelled = false;
+    const chunkPath = `/api/v1/stream/${currentSub.chunk_path}`;
+    setSubContent(null);
+
+    (async () => {
+      try {
+        const response = await fetch(chunkPath, {
+          headers: { Authorization: token },
+        });
+
+        if (response.ok && !cancelled) {
+          setSubContent(await response.text());
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("[subtitle] failed to load ASS subtitle", error);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSub, isAss, token]);
 
   useEffect(() => {
     if (
@@ -26,21 +59,18 @@ function VideoSubtitles() {
       !video.textTrackEnabled ||
       video.prevSubs === subtitle.current ||
       !isAss ||
+      !subContent ||
       !videoRef
     )
       return;
 
     console.log("[INFO] Loading ASS subtitle");
 
-    const chunk_path = `//${window.location.host}/api/v1/stream/${
-      subtitle.list[subtitle.current].chunk_path
-    }`;
-
     JASSUB._test();
 
     const options = {
       video: videoRef.current,
-      subUrl: chunk_path,
+      subContent,
       dropAllBlur: !JASSUB._supportsSIMD,
       workerUrl: new URL(
         "jassub/dist/jassub-worker.js",
@@ -64,22 +94,27 @@ function VideoSubtitles() {
       console.log("[subtitle] disposing of jassub ctx");
       if (jassub) jassub.destroy();
     };
-  }, [video, videoRef, subtitle, isAss, setJASSUB, jassub]);
+  }, [video, videoRef, subtitle, isAss, subContent, setJASSUB, jassub]);
 
   useEffect(() => {
     if (
       !jassub ||
       !video.textTrackEnabled ||
       video.prevSubs === subtitle.current ||
-      !isAss
+      !isAss ||
+      !subContent
     )
       return;
 
-    const chunk_path = `//${window.location.host}/api/v1/stream/${
-      subtitle.list[subtitle.current].chunk_path
-    }`;
-    jassub.setTrackByUrl(chunk_path);
-  }, [jassub, video.textTrackEnabled, video.prevSubs, subtitle, isAss]);
+    jassub.setTrack(subContent);
+  }, [
+    jassub,
+    video.textTrackEnabled,
+    video.prevSubs,
+    subtitle,
+    isAss,
+    subContent,
+  ]);
 
   useEffect(() => {
     if (jassub && !isAss) {

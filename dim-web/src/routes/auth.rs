@@ -40,6 +40,8 @@ use http::StatusCode;
 use serde_json::json;
 use thiserror::Error;
 
+use crate::middleware::Owner;
+
 #[derive(Debug, Display, Error)]
 pub enum AuthError {
     /// Not logged in.
@@ -110,48 +112,44 @@ impl IntoResponse for AuthError {
 ///
 /// [`AuthError`]
 pub async fn get_all_invites(
-    Extension(user): Extension<User>,
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
 ) -> Result<axum::response::Response, AuthError> {
     let mut tx = conn.read().begin().await.map_err(DatabaseError::from)?;
-    if user.has_role("owner") {
-        #[derive(serde::Serialize)]
-        struct Row {
-            id: String,
-            created: i64,
-            claimed_by: Option<String>,
-        }
+    #[derive(serde::Serialize)]
+    struct Row {
+        id: String,
+        created: i64,
+        claimed_by: Option<String>,
+    }
 
-        // FIXME: LEFT JOINs cause sqlx::query! to panic, thus we must get tokens in two queries.
-        // TODO: Move these into database.
-        // TODO: We silently drop db errors here, we should probably change this.
-        let mut row = sqlx::query_as!(
-            Row,
-            r#"SELECT invites.id, invites.date_added as created, NULL as "claimed_by: _"
+    // FIXME: LEFT JOINs cause sqlx::query! to panic, thus we must get tokens in two queries.
+    // TODO: Move these into database.
+    // TODO: We silently drop db errors here, we should probably change this.
+    let mut row = sqlx::query_as!(
+        Row,
+        r#"SELECT invites.id, invites.date_added as created, NULL as "claimed_by: _"
                 FROM invites
                 WHERE invites.id NOT IN (SELECT users.claimed_invite FROM users)
                 ORDER BY created ASC"#
+    )
+    .fetch_all(&mut tx)
+    .await
+    .unwrap_or_default();
+
+    row.append(
+        &mut sqlx::query_as!(
+            Row,
+            r#"SELECT invites.id, invites.date_added as created, users.username as "claimed_by: Option<String>"
+            FROM  invites
+            INNER JOIN users ON users.claimed_invite = invites.id"#
         )
         .fetch_all(&mut tx)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default(),
+    );
 
-        row.append(
-            &mut sqlx::query_as!(
-                Row,
-                r#"SELECT invites.id, invites.date_added as created, users.username as "claimed_by: Option<String>"
-            FROM  invites
-            INNER JOIN users ON users.claimed_invite = invites.id"#
-            )
-            .fetch_all(&mut tx)
-            .await
-            .unwrap_or_default(),
-        );
-
-        return Ok(axum::response::Json(json!(&row)).into_response());
-    }
-
-    Err(AuthError::InvalidCredentials)
+    Ok(axum::response::Json(json!(&row)).into_response())
 }
 
 /// # POST `/api/v1/auth/new_invite`
@@ -187,13 +185,9 @@ pub async fn get_all_invites(
 ///
 /// [`AuthError`]
 pub async fn generate_invite(
-    Extension(user): Extension<User>,
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
 ) -> Result<axum::response::Response, AuthError> {
-    if !user.has_role("owner") {
-        return Err(AuthError::InvalidCredentials);
-    }
-
     let mut lock = conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock)
         .await
@@ -228,14 +222,10 @@ pub async fn generate_invite(
 ///
 /// [`AuthError`]
 pub async fn delete_token(
-    Extension(user): Extension<User>,
+    _owner: Owner,
     State(AppState { conn, .. }): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<impl IntoResponse, AuthError> {
-    if !user.has_role("owner") {
-        return Err(AuthError::InvalidCredentials);
-    }
-
     let mut lock = conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock)
         .await
@@ -372,7 +362,10 @@ pub async fn admin_exists(
     State(AppState { conn, .. }): State<AppState>,
 ) -> Result<Response, LoginError> {
     let mut tx = conn.read().begin().await.map_err(DatabaseError::from)?;
-    let exists = dbg!(User::get_all(&mut tx).await.map_err(LoginError::Database)?).is_empty();
+    let exists = User::get_all(&mut tx)
+        .await
+        .map_err(LoginError::Database)?
+        .is_empty();
     let value = json!({
         "exists": !exists
     });
