@@ -219,6 +219,8 @@ pub async fn start_webserver(
 
     let router = axum::Router::new()
         .route("/api/v1/auth/whoami", get(routes::auth::whoami))
+        .route("/api/v1/dashboard", get(routes::dashboard::dashboard))
+        .route("/api/v1/dashboard/banner", get(routes::dashboard::banners))
         .route_layer(axum::middleware::from_fn_with_state(
             conn.clone(),
             verify_cookie_token,
@@ -226,8 +228,6 @@ pub async fn start_webserver(
         // --- End of routes authenticated by Axum middleware ---
         .merge(auth_routes(app.clone()))
         .merge(library_routes(app.clone()))
-        .route("/api/v1/dashboard", get(routes::dashboard::dashboard))
-        .route("/api/v1/dashboard/banner", get(routes::dashboard::banners))
         .route("/api/v1/search", get(routes::search::search))
         .route(
             "/api/v1/filebrowser/*path",

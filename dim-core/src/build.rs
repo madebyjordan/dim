@@ -2,8 +2,17 @@ use std::env;
 use std::path::Path;
 
 fn main() {
-    let out_dir = env::var("CARGO_TARGET_DIR").unwrap();
-    let db_file = format!("{out_dir}/dim_dev.db");
+    let workspace_dir = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut out_dir = env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| workspace_dir.join("target"));
+    if out_dir.is_relative() {
+        out_dir = std::path::absolute(out_dir).unwrap();
+    }
+    let db_file = out_dir.join("dim_dev.db").display().to_string();
     println!("cargo:rustc-env=DATABASE_URL=sqlite://{db_file}");
 
     if Path::new("../ui/build").exists() {
