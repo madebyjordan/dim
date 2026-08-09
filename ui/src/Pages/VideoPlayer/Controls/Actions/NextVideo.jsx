@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useHistory } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { useSelector } from "react-redux";
 import { skipToken } from "@reduxjs/toolkit/query/react";
 import NextVideoIcon from "../../../../assets/Icons/NextVideo";
@@ -16,7 +16,8 @@ function VideoActionNextVideo() {
 
   const [enabled, setEnable] = useState(false);
 
-  const history = useHistory();
+  const location = useLocation();
+  const navigate = useNavigate();
   const { data: currentMedia } = useGetMediaQuery(
     video.mediaID ? video.mediaID : skipToken
   );
@@ -37,8 +38,11 @@ function VideoActionNextVideo() {
     const item = nextMediaFiles[0];
     if (!item) return;
 
-    history.replace(`/play/${item.id}`, createPlaybackState(history.location));
-  }, [history, nextMediaFiles]);
+    navigate(`/play/${item.id}`, {
+      replace: true,
+      state: createPlaybackState(location),
+    });
+  }, [location, navigate, nextMediaFiles]);
 
   return (
     <UnfocusableButton

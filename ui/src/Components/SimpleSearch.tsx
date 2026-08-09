@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, type ChangeEvent } from "react";
+import { useState, type ChangeEvent } from "react";
 import SearchIcon from "assets/figma_icons/Search";
 import "./SimpleSearch.scss";
 
@@ -10,22 +10,18 @@ export interface SimpleSearchProps {
 export const SimpleSearch = ({ placeholder, onChange }: SimpleSearchProps) => {
   const [value, setValue] = useState<string>("");
 
-  useEffect(() => {
-    if (onChange) onChange(value);
-  }, [value, onChange]);
-
-  const changeValue = useCallback(
-    (e: ChangeEvent<HTMLInputElement>) => {
-      setValue(e?.target?.value || "");
-    },
-    [setValue]
-  );
+  const changeValue = (event: ChangeEvent<HTMLInputElement>) => {
+    const nextValue = event.target.value;
+    setValue(nextValue);
+    onChange?.(nextValue);
+  };
 
   return (
     <div className="simple-searchbox">
       <SearchIcon />
       <input
         type="text"
+        value={value}
         placeholder={placeholder ? placeholder : "Search files to match"}
         onChange={changeValue}
       />

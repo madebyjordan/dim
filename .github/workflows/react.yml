@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
           cache: yarn
@@ -31,7 +31,9 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
       - name: Install locked dependencies
-        run: yarn install --frozen-lockfile --ignore-scripts --non-interactive
+        env:
+          YARN_ENABLE_HARDENED_MODE: "1"
+        run: yarn install --immutable --mode=skip-build
       - name: Prettier
         run: yarn run prettier --check --ignore-unknown src
       - name: ESLint

@@ -1,6 +1,6 @@
-import { createRef, useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { shallowEqual, useSelector } from "react-redux";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 import HoverCard from "./HoverCard";
 import Image from "./Image";
@@ -16,31 +16,28 @@ function Card(props) {
   );
 
   const cardWrapper = useRef(null);
-  const hoverCard = createRef();
+  const hoverCard = useRef(null);
   const card = useRef(null);
 
-  const [mediaProgress, setMediaProgress] = useState(0);
   const [hovering, setHovering] = useState(false);
-  const [timeoutID, setTimeoutID] = useState(null);
   const [hoverCardSide, setHoverCardSide] = useState("right");
+  const timeoutID = useRef(null);
 
   useEffect(() => {
-    return () => {
-      clearTimeout(timeoutID);
-    };
-  }, [timeoutID]);
-
-  const showPopup = useCallback(() => {
-    setHovering(true);
+    return () => clearTimeout(timeoutID.current);
   }, []);
 
-  const onMouseLeave = useCallback(() => {
-    clearTimeout(timeoutID);
+  const showPopup = () => {
+    setHovering(true);
+  };
+
+  const onMouseLeave = () => {
+    clearTimeout(timeoutID.current);
 
     hoverCard.current?.classList.add("hideCardPopup");
-  }, [timeoutID, hoverCard]);
+  };
 
-  const handleMouseEnter = useCallback(() => {
+  const handleMouseEnter = () => {
     // removes cardHighlight animation (when searched for)
     if (card.current && card.current.style.animation) {
       card.current.style.animation = "";
@@ -62,18 +59,14 @@ function Card(props) {
 
     setHoverCardSide(side);
 
-    const ID = setTimeout(showPopup, 600);
-    setTimeoutID(ID);
-  }, [hovering, settings.data.show_hovercards, showPopup]);
+    timeoutID.current = setTimeout(showPopup, 600);
+  };
 
   const { name, poster_path, id, media_type } = props.data;
-
-  useEffect(() => {
-    if (media_type === "movie") {
-      const { duration, progress } = props.data;
-      setMediaProgress((progress / duration) * 100);
-    }
-  }, [media_type, props.data]);
+  const mediaProgress =
+    media_type === "movie"
+      ? (props.data.progress / props.data.duration) * 100
+      : 0;
 
   return (
     <div

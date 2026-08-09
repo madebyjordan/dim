@@ -1,5 +1,5 @@
 import { useCallback, useState, useEffect } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 
 import Cards from "./Cards";
 
@@ -7,10 +7,6 @@ import MatchMedia from "./MatchMedia/Index";
 import { useGetUnmatchedMediaFilesQuery } from "api/v1/unmatchedMedia";
 
 import "./Index.scss";
-
-interface LibraryParams {
-  id: string;
-}
 
 const useDebounced = (value: string, delay: number): string => {
   const [debouncedValue, setDebouncedValue] = useState(value);
@@ -29,13 +25,13 @@ const useDebounced = (value: string, delay: number): string => {
 };
 
 const Library = () => {
-  const { id } = useParams<LibraryParams>();
+  const { id } = useParams<"id">();
   const [searchQuery, setSearchQuery] = useState<string>("");
   const debouncedSearchQuery = useDebounced(searchQuery, 75);
   const [showMatchingMedia, setShowMatchingMedia] = useState(true);
 
   const { data, refetch } = useGetUnmatchedMediaFilesQuery(
-    { id: id, search: debouncedSearchQuery },
+    { id: id ?? "", search: debouncedSearchQuery },
     { refetchOnMountOrArgChange: true }
   );
 

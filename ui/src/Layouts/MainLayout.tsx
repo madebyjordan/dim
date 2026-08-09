@@ -1,11 +1,13 @@
-import type { PropsWithChildren } from "react";
+import { Outlet } from "react-router";
 
 import Sidebar from "../Components/Sidebar/Index";
 
-const MainLayout = (props: PropsWithChildren<{}>) => (
+const MainLayout = () => (
   <>
     <Sidebar />
-    <main className="shrunk">{props.children}</main>
+    <main className="shrunk">
+      <Outlet />
+    </main>
   </>
 );
 

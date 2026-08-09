@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useSelector } from "react-redux";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 import DimLogo from "../../assets/DimLogo";
 import Field from "./Field";

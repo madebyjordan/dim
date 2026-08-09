@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useHistory } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useDispatch } from "react-redux";
 
 import ConfirmationBox from "../../../Modals/ConfirmationBox";
@@ -10,12 +10,12 @@ import "./LogoutBtn.scss";
 
 function LogoutBtn() {
   const dispatch = useDispatch();
-  const history = useHistory();
+  const navigate = useNavigate();
 
   const confirmLogout = useCallback(() => {
     dispatch(logout());
-    history.push("/login");
-  }, [dispatch, history]);
+    navigate("/login");
+  }, [dispatch, navigate]);
 
   return (
     <ConfirmationBox

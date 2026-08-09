@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { useHistory } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 
 import InputConfirmationBox from "../../../Modals/InputConfirmationBox";
@@ -13,7 +12,6 @@ function DelAccountBtn() {
   const [passErr, setPassErr] = useState("");
 
   const dispatch = useDispatch();
-  const history = useHistory();
 
   useEffect(() => {
     if (deleteAccount.error) {
@@ -28,7 +26,7 @@ function DelAccountBtn() {
         window.location.href = "/";
       }
     })();
-  }, [deleteAccount, dispatch, history]);
+  }, [deleteAccount, dispatch]);
 
   const confirmDel = useCallback(async () => {
     if (pass.length === 0) {

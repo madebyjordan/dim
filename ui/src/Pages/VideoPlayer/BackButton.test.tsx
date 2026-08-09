@@ -4,41 +4,38 @@ import userEvent from "@testing-library/user-event";
 import BackButton from "./BackButton";
 import { createPlaybackState } from "./Navigation";
 
-const mockHistory = {
-  goBack: vi.fn(),
-  replace: vi.fn(),
-  location: {},
-};
+const mockNavigate = vi.fn();
+let mockLocation: { state?: { from?: string } } = {};
 
-let mockVideo = {};
+let mockVideo: { mediaID?: number | null; libraryID?: number | null } = {};
 
-vi.mock("react-router-dom", () => ({
-  useHistory: () => mockHistory,
+vi.mock("react-router", () => ({
+  useLocation: () => mockLocation,
+  useNavigate: () => mockNavigate,
 }));
 
-vi.mock("react-redux", () => ({
-  useSelector: (selector) => selector({ video: mockVideo }),
+vi.mock("../../hooks/store", () => ({
+  useAppSelector: (selector: (state: { video: typeof mockVideo }) => unknown) =>
+    selector({ video: mockVideo }),
 }));
 
 vi.mock("../../assets/Icons/ArrowLeft", () => ({ default: () => null }));
 
 describe("player back navigation", () => {
   beforeEach(() => {
-    mockHistory.goBack.mockClear();
-    mockHistory.replace.mockClear();
-    mockHistory.location = {};
+    mockNavigate.mockClear();
+    mockLocation = {};
     mockVideo = {};
   });
 
   it("returns through in-app history when playback has a reliable origin", () => {
-    mockHistory.location = { state: { from: "/media/42" } };
+    mockLocation = { state: { from: "/media/42" } };
     mockVideo = { mediaID: 42, libraryID: 7 };
 
     render(<BackButton />);
     userEvent.click(screen.getByRole("button", { name: "Back" }));
 
-    expect(mockHistory.goBack).toHaveBeenCalledTimes(1);
-    expect(mockHistory.replace).not.toHaveBeenCalled();
+    expect(mockNavigate).toHaveBeenCalledWith(-1);
   });
 
   it("falls back to the relevant media page without an in-app origin", () => {
@@ -47,8 +44,7 @@ describe("player back navigation", () => {
     render(<BackButton />);
     userEvent.click(screen.getByRole("button", { name: "Back" }));
 
-    expect(mockHistory.goBack).not.toHaveBeenCalled();
-    expect(mockHistory.replace).toHaveBeenCalledWith("/media/42");
+    expect(mockNavigate).toHaveBeenCalledWith("/media/42", { replace: true });
   });
 
   it("falls back to the relevant library while media is unavailable", () => {
@@ -57,7 +53,7 @@ describe("player back navigation", () => {
     render(<BackButton />);
     userEvent.click(screen.getByRole("button", { name: "Back" }));
 
-    expect(mockHistory.replace).toHaveBeenCalledWith("/library/7");
+    expect(mockNavigate).toHaveBeenCalledWith("/library/7", { replace: true });
   });
 });
 

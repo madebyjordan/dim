@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { skipToken } from "@reduxjs/toolkit/query/react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 import { useGetMediaQuery } from "../../api/v1/media";
 

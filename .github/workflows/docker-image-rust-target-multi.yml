@@ -16,14 +16,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3        
       - name: Build UI
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
             node-version-file: '.nvmrc'
             cache: 'yarn'
             cache-dependency-path: ui/yarn.lock
       - run: corepack enable
-      - run: yarn --cwd ui/ install --frozen-lockfile --ignore-scripts --non-interactive
-      - run: yarn --cwd ui/ build
+      - run: yarn install --immutable --mode=skip-build
+        working-directory: ui
+      - run: yarn build
+        working-directory: ui
       - name: upload ui artifacts
         uses: actions/upload-artifact@v3
         with:

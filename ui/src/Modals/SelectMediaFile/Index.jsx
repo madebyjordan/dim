@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, useHistory } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
 import { skipToken } from "@reduxjs/toolkit/query/react";
 import Modal from "react-modal";
 
@@ -13,7 +13,8 @@ import { createPlaybackState } from "../../Pages/VideoPlayer/Navigation";
 import "./Index.scss";
 
 const SelectMediaFile = (props) => {
-  const history = useHistory();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   /*
     prevents data from changing if e.g. banner in the
@@ -60,22 +61,20 @@ const SelectMediaFile = (props) => {
 
     if (mediaFiles.length === 1) {
       setClicked(false);
-      if (history.location.pathname.startsWith("/play/")) {
-        history.replace(
-          `/play/${mediaFiles[0].id}`,
-          createPlaybackState(history.location)
-        );
+      const playbackState = createPlaybackState(location);
+      if (location.pathname.startsWith("/play/")) {
+        navigate(`/play/${mediaFiles[0].id}`, {
+          replace: true,
+          state: playbackState,
+        });
       } else {
-        history.push(
-          `/play/${mediaFiles[0].id}`,
-          createPlaybackState(history.location)
-        );
+        navigate(`/play/${mediaFiles[0].id}`, { state: playbackState });
       }
     } else {
       setClicked(false);
       open();
     }
-  }, [clicked, currentID, history, mediaFiles, open]);
+  }, [clicked, currentID, location, mediaFiles, navigate, open]);
 
   const initialValue = {
     open,
@@ -122,10 +121,8 @@ const SelectMediaFile = (props) => {
                   {mediaFiles &&
                     mediaFiles.map((file, i) => (
                       <Link
-                        to={{
-                          pathname: `/play/${file.id}`,
-                          state: createPlaybackState(history.location),
-                        }}
+                        to={`/play/${file.id}`}
+                        state={createPlaybackState(location)}
                         className="fileVersion"
                         key={i}
                       >

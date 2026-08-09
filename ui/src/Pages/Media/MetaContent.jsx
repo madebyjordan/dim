@@ -1,6 +1,5 @@
 import { useEffect } from "react";
-import { useHistory } from "react-router";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router";
 import { skipToken } from "@reduxjs/toolkit/query/react";
 
 import { useGetMediaQuery } from "../../api/v1/media";
@@ -17,7 +16,7 @@ import "./MetaContent.scss";
 
 function MetaContent(props) {
   const { activeId } = props;
-  const history = useHistory();
+  const navigate = useNavigate();
 
   const { id } = useParams();
 
@@ -36,7 +35,7 @@ function MetaContent(props) {
       <div className="metaContentErr">
         <h2>Failed to load media</h2>
         <p className="desc">Something went wrong somewhere.</p>
-        <Button onClick={history.goBack}>Go back</Button>
+        <Button onClick={() => navigate(-1)}>Go back</Button>
       </div>
     );
   }

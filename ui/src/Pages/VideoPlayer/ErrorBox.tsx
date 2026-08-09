@@ -1,4 +1,4 @@
-import { useHistory } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { shallowEqual } from "react-redux";
 
 import { useAppSelector } from "hooks/store";
@@ -6,7 +6,8 @@ import { RETRY_POSITION_KEY } from "./PlaybackFailure";
 import { navigateBackFromPlayback } from "./Navigation";
 
 function ErrorBox() {
-  const history = useHistory();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const { video, error } = useAppSelector(
     (store) => ({
@@ -22,7 +23,7 @@ function ErrorBox() {
   };
 
   const leavePlayer = () => {
-    navigateBackFromPlayback(history, {
+    navigateBackFromPlayback(navigate, location, {
       mediaID: video.mediaID,
       libraryID: video.libraryID,
     });

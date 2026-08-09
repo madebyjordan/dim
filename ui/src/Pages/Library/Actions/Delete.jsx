@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useHistory } from "react-router";
+import { useNavigate } from "react-router";
 import { useDispatch, useSelector } from "react-redux";
 
 import { delLibrary } from "../../../actions/library";
@@ -11,7 +11,7 @@ const Delete = (props) => {
 
   const del_library = useSelector((store) => store.library.del_library);
 
-  const history = useHistory();
+  const navigate = useNavigate();
 
   const removeLib = useCallback(async () => {
     if (del_library.deleting) return;
@@ -19,8 +19,8 @@ const Delete = (props) => {
     dispatch(delLibrary(props.id));
 
     // redirect to dashboard when removed
-    history.push("/");
-  }, [del_library.deleting, dispatch, history, props.id]);
+    navigate("/");
+  }, [del_library.deleting, dispatch, navigate, props.id]);
 
   const { deleting } = del_library;
 

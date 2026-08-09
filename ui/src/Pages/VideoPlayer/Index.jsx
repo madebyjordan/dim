@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router";
-import { useHistory } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router";
 import { shallowEqual, useDispatch, useSelector } from "react-redux";
 import { skipToken } from "@reduxjs/toolkit/query/react";
 import { MediaPlayer, Debug } from "dashjs";
@@ -35,7 +34,8 @@ import "./Index.scss";
 function VideoPlayer() {
   const params = useParams();
   const dispatch = useDispatch();
-  const history = useHistory();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [player, setPlayer] = useState();
 
   const { error, manifest, audioTracks, videoTracks, video, auth, settings } =
@@ -91,10 +91,10 @@ function VideoPlayer() {
 
     const ts_diff = video.currentTime - media.duration;
     if (video.playback_ended && ts_diff < 10) {
-      history.replace(
-        `/play/${item.id}`,
-        createPlaybackState(history.location)
-      );
+      navigate(`/play/${item.id}`, {
+        replace: true,
+        state: createPlaybackState(location),
+      });
     }
   }, [
     media,
@@ -102,7 +102,8 @@ function VideoPlayer() {
     video.mediaID,
     video.currentTime,
     video.playback_ended,
-    history,
+    location,
+    navigate,
     settings,
     settings.userSettings,
   ]);

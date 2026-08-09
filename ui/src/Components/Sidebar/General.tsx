@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 
 import HomeIcon from "../../assets/Icons/Home";
 
@@ -8,7 +8,11 @@ const General = () => (
       <h4>General</h4>
     </header>
     <div className="list">
-      <NavLink className="item" to="/" exact>
+      <NavLink
+        className={({ isActive }) => `item${isActive ? " active" : ""}`}
+        to="/"
+        end
+      >
         <HomeIcon />
         <p>Dashboard</p>
       </NavLink>

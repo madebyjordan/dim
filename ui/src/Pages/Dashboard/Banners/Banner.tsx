@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { shallowEqual } from "react-redux";
 
 import { useAppSelector } from "../../../hooks/store";

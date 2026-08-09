@@ -91,7 +91,7 @@ if [[ "$DIM_SKIP_UI" == false ]]; then
     echo "Installing locked frontend dependencies..."
     (
         cd ui
-        corepack yarn install --frozen-lockfile --ignore-scripts --non-interactive
+        corepack yarn install --immutable --mode=skip-build
         corepack yarn build
     )
 fi

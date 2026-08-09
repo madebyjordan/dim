@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 
 import { useAppSelector } from "hooks/store";
 import FilmIcon from "assets/Icons/Film";
@@ -17,7 +17,12 @@ function Library(props: Props) {
   const isScanning = scanning.some((scanId) => String(scanId) === String(id));
 
   return (
-    <NavLink to={"/library/" + id} className={`item showLoad-${isScanning}`}>
+    <NavLink
+      to={"/library/" + id}
+      className={({ isActive }) =>
+        `item showLoad-${isScanning}${isActive ? " active" : ""}`
+      }
+    >
       {media_type === "movie" && <FilmIcon />}
       {media_type === "tv" && <TvIcon />}
       <p>{name}</p>

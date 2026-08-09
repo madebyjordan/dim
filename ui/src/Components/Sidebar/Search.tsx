@@ -6,7 +6,7 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
-import { useHistory } from "react-router-dom";
+import { useNavigate } from "react-router";
 
 import QuickSearchResults from "./QuickSearchResults";
 import SearchIcon from "../../assets/Icons/Search";
@@ -14,7 +14,7 @@ import SearchIcon from "../../assets/Icons/Search";
 import "./Search.scss";
 
 function Search() {
-  const history = useHistory();
+  const navigate = useNavigate();
 
   const searchBox = useRef<HTMLDivElement>(null);
   const inputBox = useRef<HTMLInputElement>(null);
@@ -48,7 +48,7 @@ function Search() {
   const onKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
       if (query && query.length > 1 && e.keyCode === 13) {
-        history.push({
+        navigate({
           pathname: "/search",
           search: `?query=${encodeURIComponent(query || "")}`,
         });
@@ -57,12 +57,12 @@ function Search() {
         setShowResults(false);
       }
     },
-    [history, query]
+    [navigate, query]
   );
 
   const fullSearch = useCallback(() => {
     if (query && query.length >= 1) {
-      history.push({
+      navigate({
         pathname: "/search",
         search: `?query=${encodeURIComponent(query)}`,
       });
@@ -70,7 +70,7 @@ function Search() {
       setQuery("");
       setShowResults(false);
     }
-  }, [history, query]);
+  }, [navigate, query]);
 
   return (
     <div className="search-box" ref={searchBox}>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import "./Toggle.scss";
 
 type ToggleProps = {
@@ -6,26 +6,20 @@ type ToggleProps = {
   desc?: string | undefined;
   state?: boolean;
   disabled?: boolean;
-  onToggle?: (...args: any) => any;
+  onToggle?: (active: boolean) => void;
 };
 
 function Toggle(props: ToggleProps) {
-  const [active, setActive] = useState(false);
+  const [uncontrolledActive, setUncontrolledActive] = useState(false);
+  const active = props.state ?? uncontrolledActive;
 
-  useEffect(() => {
-    if (props.state === undefined) return;
-    setActive(props.state);
-  }, [props.state]);
-
-  const toggle = useCallback(() => {
+  const toggle = () => {
     if (props.disabled) return;
 
-    if (props.onToggle) {
-      props.onToggle(!active);
-    }
-
-    setActive((state) => !state);
-  }, [active, props]);
+    const nextActive = !active;
+    props.onToggle?.(nextActive);
+    if (props.state === undefined) setUncontrolledActive(nextActive);
+  };
 
   return (
     <div className={`toggleContainer disabled-${props.disabled}`}>

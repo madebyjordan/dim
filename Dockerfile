@@ -1,7 +1,7 @@
 FROM node:24.19.0-bookworm AS web
 WORKDIR /ui
-COPY ui/package.json ui/yarn.lock ./
-RUN corepack enable && yarn install --frozen-lockfile --ignore-scripts --non-interactive
+COPY ui/package.json ui/yarn.lock ui/.yarnrc.yml ./
+RUN corepack enable && yarn install --immutable --mode=skip-build
 COPY ui ./
 RUN yarn run build
 

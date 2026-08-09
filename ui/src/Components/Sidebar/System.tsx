@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 
 import WrenchIcon from "../../assets/Icons/Wrench";
 
@@ -8,7 +8,10 @@ const General = () => (
       <h4>System</h4>
     </header>
     <div className="list">
-      <NavLink to="/preferences" className="item">
+      <NavLink
+        to="/preferences"
+        className={({ isActive }) => `item${isActive ? " active" : ""}`}
+      >
         <WrenchIcon />
         <p>Preferences</p>
       </NavLink>

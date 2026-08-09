@@ -1,7 +1,7 @@
 import { cloneElement, useCallback, useEffect, useState } from "react";
 import Modal from "react-modal";
 import { useDispatch, useSelector } from "react-redux";
-import { useHistory } from "react-router-dom";
+import { useNavigate } from "react-router";
 
 import { newLibrary } from "../../actions/library.js";
 import MediaTypeSelection from "./MediaTypeSelection";
@@ -15,7 +15,7 @@ Modal.setAppElement("body");
 
 function NewLibraryModal(props) {
   const dispatch = useDispatch();
-  const history = useHistory();
+  const navigate = useNavigate();
   const creating = useSelector((state) => state.library.new_library.creating);
   const [visible, setVisible] = useState(false);
 
@@ -94,11 +94,11 @@ function NewLibraryModal(props) {
     const result = await dispatch(newLibrary(data));
     if (result.ok) {
       close();
-      history.push(`/library/${result.id}`);
+      navigate(`/library/${result.id}`);
     } else {
       setSubmitErr(result.error);
     }
-  }, [close, creating, dispatch, history, mediaType, name, selectedFolder]);
+  }, [close, creating, dispatch, mediaType, name, navigate, selectedFolder]);
 
   return (
     <div className="modalBoxContainer">

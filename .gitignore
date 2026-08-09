@@ -20,6 +20,9 @@ benches/bench_1.txt
 
 # UI
 node_modules
+ui/.yarn/install-state.gz
+ui/.yarn/unplugged/
+ui/.yarn/build-state.yml
 ui/coverage
 ui/build
 
