@@ -127,6 +127,7 @@ impl Session {
         };
 
         let mut process = Command::new(self.profile_ctx.ffmpeg_bin.clone())
+            .kill_on_drop(true)
             .stdout(stdout)
             .stderr(stderr)
             .stdin(Stdio::null())
@@ -165,9 +166,14 @@ impl Session {
     }
 
     pub async fn join(&mut self) {
-        if let Some(ref mut x) = self.real_process {
-            let _ = x.kill().await;
-            self.exit_status = x.wait().await.ok();
+        if let Some(mut process) = self.real_process.take() {
+            let _ = process.kill().await;
+            self.exit_status = process.wait().await.ok();
+        }
+        self.child_pid = None;
+        if let Some(process) = self._process.take() {
+            process.abort();
+            let _ = process.await;
         }
     }
 

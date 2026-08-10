@@ -40,10 +40,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await?;
 
-    sqlx::migrate!().run(&pool).await.map_err(|e| {
-        println!("cargo:error=Migration failed: {:?}", e);
-        e
-    })?;
+    // Load migrations at build-script runtime. Embedding them with `migrate!` here leaves Cargo
+    // able to rerun a stale build-script binary after a migration file changes.
+    sqlx::migrate::Migrator::new(PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("migrations"))
+        .await?
+        .run(&pool)
+        .await
+        .map_err(|e| {
+            println!("cargo:error=Migration failed: {:?}", e);
+            e
+        })?;
 
     println!("cargo:warning=Built database {}.", db_file.display());
 

@@ -434,14 +434,14 @@ impl MediaMatcher for TvMatcher {
             .into_iter()
             .map(|WorkUnit(file, metadata)| {
                 let provider_show = Arc::clone(&provider_show);
-                tokio::spawn(Self::lookup_metadata(provider_show, file, metadata))
+                Self::lookup_metadata(provider_show, file, metadata)
             })
             .collect::<Vec<_>>();
 
         let metadata = futures::future::join_all(metadata_futs).await;
 
         for meta in metadata.into_iter() {
-            if let Ok(Some((file, provided))) = meta {
+            if let Some((file, provided)) = meta {
                 self.match_to_result(tx, file, provided)
                     .await
                     .inspect_err(|error| error!(?error, "failed to match to result"))?;

@@ -1,10 +1,13 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
 use dim_core::stream_tracking::StreamTracking;
+use dim_core::workers::{LibraryWorkerKind, LibraryWorkers};
 use dim_database::user::{InsertableUser, Roles, UserSettings};
 use dim_web::routes::websocket::CtrlEvent;
 use dim_web::{build_router, AppState};
@@ -19,6 +22,7 @@ struct TestApp {
     router: axum::Router,
     event_rx: UnboundedReceiver<String>,
     root: PathBuf,
+    workers: LibraryWorkers,
 }
 
 async fn test_app() -> TestApp {
@@ -66,12 +70,15 @@ async fn test_app() -> TestApp {
         cache.to_string_lossy().into_owned(),
         "/bin/false".to_owned(),
     );
-    let app = AppState::new(conn, socket_tx, event_tx, state, StreamTracking::default());
+    let workers = LibraryWorkers::default();
+    let app = AppState::new(conn, socket_tx, event_tx, state, StreamTracking::default())
+        .with_library_workers(workers.clone());
 
     TestApp {
         router: build_router(app),
         event_rx,
         root,
+        workers,
     }
 }
 
@@ -369,6 +376,62 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
             .to_string_lossy()
             .as_ref()
     );
+
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    // Replace the completed scanner with a deterministic in-flight worker. The DELETE response
+    // must wait until this future has been cancelled and dropped before removing database rows.
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let started_task = started.clone();
+    let dropped_task = dropped.clone();
+    test.workers
+        .spawn(id, LibraryWorkerKind::Scanner, async move {
+            let _guard = Dropped(dropped_task);
+            started_task.notify_one();
+            std::future::pending::<()>().await;
+        })
+        .await
+        .unwrap();
+    started.notified().await;
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::DELETE,
+            &format!("/api/v1/library/{id}"),
+            Some(&owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(test
+        .workers
+        .spawn(id, LibraryWorkerKind::Scanner, async {})
+        .await
+        .is_err());
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/api/v1/library",
+            Some(&owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await, serde_json::json!([]));
 
     std::fs::remove_dir_all(&test.root).unwrap();
 }

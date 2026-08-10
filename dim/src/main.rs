@@ -15,6 +15,34 @@ struct Args {
     config: Option<PathBuf>,
 }
 
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(?error, "SIGINT handler failed");
+                }
+                tracing::info!("SIGINT received, shutting down");
+            }
+            _ = terminate.recv() => {
+                tracing::info!("SIGTERM received, shutting down");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(?error, "Shutdown signal handler failed");
+        }
+        tracing::info!("Shutdown signal received, shutting down");
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let _ = std::fs::create_dir_all(dim::utils::ffpath("config"));
@@ -50,7 +78,9 @@ fn main() {
         .set(global_settings.metadata_dir.clone())
         .expect("Failed to set METADATA_PATH");
 
-    dim::setup_logging(global_settings.verbose);
+    // Keep the nonblocking logging worker alive until all shutdown cleanup has completed. Dropping
+    // this guard flushes buffered log records.
+    let _logging_guard = dim::setup_logging(global_settings.verbose);
 
     {
         let failed = streaming::ffcheck()
@@ -68,8 +98,7 @@ fn main() {
             });
 
         if failed {
-            // FIXME: I think in some cases we exit so fast that the error above is not printed out
-            // or just partially printed out.
+            drop(_logging_guard);
             std::process::exit(1);
         }
     }
@@ -84,9 +113,10 @@ fn main() {
     let async_main = async move {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let pool = dim_database::get_conn().await.unwrap();
+        let library_workers = dim::workers::LibraryWorkers::default();
 
         // Before we start making DB-calls we need to initialize our CDC pipeline.
-        {
+        let reactor_handle = {
             let mut lock = pool.writer().lock_owned().await;
             let mut reactor_core = dim::reactor::ReactorCore::new();
             reactor_core.register(&mut lock).await;
@@ -94,8 +124,8 @@ fn main() {
             let reactor = dim::reactor::handler::EventReactor::new(pool.clone())
                 .with_websocket(event_tx.clone());
 
-            tokio::spawn(reactor_core.react(reactor));
-        }
+            tokio::spawn(reactor_core.react(reactor))
+        };
 
         let stream_manager = nightfall::StateManager::new(
             &mut Tokio::Global,
@@ -105,8 +135,8 @@ fn main() {
 
         let stream_manager_clone = stream_manager.clone();
 
-        // GC the stream manager every 100ms
-        tokio::spawn(async move {
+        // GC the stream manager every second.
+        let gc_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(1000));
             interval.tick().await;
 
@@ -118,7 +148,7 @@ fn main() {
 
         if !global_settings.quiet_boot {
             tracing::info!("Scanning for media files...");
-            dim::core::run_scanners(event_tx.clone()).await;
+            dim::core::run_scanners(event_tx.clone(), &library_workers).await;
         }
 
         tracing::info!("Launching Dim");
@@ -128,11 +158,28 @@ fn main() {
             global_settings.port,
         );
 
-        dim_web::start_webserver(address, event_tx, stream_manager, event_rx, async move {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("CTRL-C received, shutting down...");
-        })
+        dim_web::start_webserver(
+            address,
+            event_tx,
+            stream_manager.clone(),
+            event_rx,
+            library_workers.clone(),
+            shutdown_signal(),
+        )
         .await;
+
+        library_workers.shutdown().await;
+
+        gc_handle.abort();
+        let _ = gc_handle.await;
+
+        if let Err(error) = stream_manager.shutdown_all().await {
+            tracing::error!(?error, "Failed to stop all transcoding sessions");
+        }
+
+        reactor_handle.abort();
+        let _ = reactor_handle.await;
+        tracing::info!("Shutdown complete");
     };
 
     tokio::runtime::Runtime::new()

@@ -13,6 +13,7 @@ use axum::Json;
 
 use dim_core::errors::DimError;
 use dim_core::scanner::daemon::FsWatcher;
+use dim_core::workers::LibraryWorkerKind;
 use dim_database::compact_mediafile::CompactMediafile;
 use dim_database::library::{InsertableLibrary, Library, MediaType};
 use dim_database::media::Media;
@@ -62,32 +63,35 @@ fn metadata_provider(media_type: MediaType) -> Arc<dyn dim_extern_api::ExternalQ
     }
 }
 
-fn spawn_library_scan(
+async fn spawn_library_scan(
     state: &AppState,
     id: i64,
     provider: Arc<dyn dim_extern_api::ExternalQueryIntoShow>,
-) {
+) -> Result<(), &'static str> {
     set_scan_status(id, LibraryScanStatus::Scanning);
 
     let mut conn = state.conn.clone();
     let scan_tx = state.event_tx.clone();
     let failure_tx = scan_tx.clone();
-    tokio::spawn(async move {
-        match dim_core::scanner::start(&mut conn, id, scan_tx, provider).await {
-            Ok(()) => set_scan_status(id, LibraryScanStatus::Complete),
-            Err(error) => {
-                set_scan_status(id, LibraryScanStatus::Failed);
-                tracing::error!(?error, library_id = id, "Library scan failed");
-                let _ = failure_tx.send(
-                    dim_events::Message {
-                        id,
-                        event_type: dim_events::PushEventType::EventScanFailed,
-                    }
-                    .to_string(),
-                );
+    state
+        .library_workers
+        .spawn(id, LibraryWorkerKind::Scanner, async move {
+            match dim_core::scanner::start(&mut conn, id, scan_tx, provider).await {
+                Ok(()) => set_scan_status(id, LibraryScanStatus::Complete),
+                Err(error) => {
+                    set_scan_status(id, LibraryScanStatus::Failed);
+                    tracing::error!(?error, library_id = id, "Library scan failed");
+                    let _ = failure_tx.send(
+                        dim_events::Message {
+                            id,
+                            event_type: dim_events::PushEventType::EventScanFailed,
+                        }
+                        .to_string(),
+                    );
+                }
             }
-        }
-    });
+        })
+        .await
 }
 
 #[derive(Debug)]
@@ -286,8 +290,26 @@ pub async fn library_post(
         Arc::clone(&provider),
     );
 
-    tokio::spawn(async move { fs_watcher.start_daemon().await });
-    spawn_library_scan(&state, id, provider);
+    if let Err(error) = state
+        .library_workers
+        .spawn(id, LibraryWorkerKind::Watcher, async move {
+            if let Err(error) = fs_watcher.start_daemon().await {
+                tracing::error!(?error, library_id = id, "Filesystem watcher failed");
+            }
+        })
+        .await
+    {
+        tracing::error!(
+            ?error,
+            library_id = id,
+            "Filesystem watcher was not started"
+        );
+        return CreateLibraryError::Internal.into_response();
+    }
+    if let Err(error) = spawn_library_scan(&state, id, provider).await {
+        tracing::error!(?error, library_id = id, "Library scanner was not started");
+        return CreateLibraryError::Internal.into_response();
+    }
 
     Json(serde_json::json!({ "id": id, "scan_status": "scanning" })).into_response()
 }
@@ -335,14 +357,23 @@ pub async fn library_scan_retry(
         Err(_) => return (StatusCode::NOT_FOUND, "Library not found.").into_response(),
     };
 
-    spawn_library_scan(&state, id, metadata_provider(library.media_type));
+    if spawn_library_scan(&state, id, metadata_provider(library.media_type))
+        .await
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "This library is stopping.").into_response();
+    }
     Json(serde_json::json!({ "status": LibraryScanStatus::Scanning })).into_response()
 }
 
 /// Method mapped to `DELETE /api/v1/library/<id>` deletes the library with the supplied id from the path.
 pub async fn library_delete(
     _owner: Owner,
-    State(AppState { conn, .. }): State<AppState>,
+    State(AppState {
+        conn,
+        library_workers,
+        ..
+    }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, DimErrorWrapper> {
     LIBRARY_SCAN_STATUS.write().unwrap().remove(&id);
@@ -370,28 +401,25 @@ pub async fn library_delete(
         })?;
     }
 
-    let delete_lib_fut = async move {
-        let inner = async {
-            let mut lock = conn.writer().lock_owned().await;
-            let mut tx = dim_database::write_tx(&mut lock).await?;
+    // The tombstone is installed before awaiting tasks, so a retry which raced the hidden update
+    // cannot register a new scanner after this point.
+    library_workers.stop_library(id).await;
 
-            Library::delete(&mut tx, id).await?;
-            Media::delete_by_lib_id(&mut tx, id).await?;
-            MediaFile::delete_by_lib_id(&mut tx, id).await?;
-
-            tx.commit().await?;
-
-            Ok::<_, dim_database::error::DatabaseError>(())
-        };
-
-        if let Err(e) = inner.await {
-            tracing::error!(reason = ?e, "Failed to delete library and its content.");
-        } else {
-            tracing::info!("Deleted library");
-        }
-    };
-
-    tokio::spawn(delete_lib_fut);
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock).await.map_err(|err| {
+        DimErrorWrapper(DimError::DatabaseError {
+            description: err.to_string(),
+        })
+    })?;
+    MediaFile::delete_by_lib_id(&mut tx, id).await?;
+    Media::delete_by_lib_id(&mut tx, id).await?;
+    Library::delete(&mut tx, id).await?;
+    tx.commit().await.map_err(|err| {
+        DimErrorWrapper(DimError::DatabaseError {
+            description: err.to_string(),
+        })
+    })?;
+    tracing::info!(library_id = id, "Deleted library");
 
     Ok(StatusCode::NO_CONTENT)
 }

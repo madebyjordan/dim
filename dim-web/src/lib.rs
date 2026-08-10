@@ -14,6 +14,7 @@ use axum::Router;
 
 use dim_core::core::EventTx;
 use dim_core::stream_tracking::StreamTracking;
+use dim_core::workers::LibraryWorkers;
 use dim_database::DbConnection;
 
 use futures::{Future, SinkExt, StreamExt};
@@ -33,6 +34,7 @@ pub struct AppState {
     event_tx: EventTx,
     state: StateManager,
     stream_tracking: StreamTracking,
+    library_workers: LibraryWorkers,
 }
 
 impl AppState {
@@ -49,7 +51,13 @@ impl AppState {
             event_tx,
             state,
             stream_tracking,
+            library_workers: LibraryWorkers::default(),
         }
+    }
+
+    pub fn with_library_workers(mut self, library_workers: LibraryWorkers) -> Self {
+        self.library_workers = library_workers;
+        self
     }
 }
 
@@ -285,6 +293,7 @@ pub async fn start_webserver(
     event_tx: EventTx,
     stream_manager: StateManager,
     event_rx: UnboundedReceiver<String>,
+    library_workers: LibraryWorkers,
     shutdown_fut: impl Future<Output = ()> + Send + 'static,
 ) {
     let state = stream_manager;
@@ -300,20 +309,47 @@ pub async fn start_webserver(
 
     let socket_tx = event_repeater.sender();
 
-    tokio::spawn(event_repeater.into_future());
+    let event_repeater_handle = tokio::spawn(event_repeater.into_future());
 
-    let app = AppState::new(conn, socket_tx, event_tx, state, stream_tracking);
+    let app = AppState::new(conn, socket_tx, event_tx, state, stream_tracking)
+        .with_library_workers(library_workers);
     let router = build_router(app);
 
     tracing::info!(%address, "webserver is listening");
 
-    let web_fut = axum::Server::bind(&address)
-        .serve(router.into_make_service_with_connect_info::<SocketAddr>());
+    let result = serve_router(address, router, shutdown_fut).await;
+    if let Err(error) = result {
+        tracing::error!(?error, "HTTP server stopped with an error");
+    }
 
-    tokio::select! {
-        _ = web_fut => {},
-        _ = shutdown_fut => {
-            return;
-        }
+    event_repeater_handle.abort();
+    let _ = event_repeater_handle.await;
+}
+
+async fn serve_router(
+    address: SocketAddr,
+    router: Router,
+    shutdown_fut: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), hyper::Error> {
+    axum::Server::bind(&address)
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_fut)
+        .await
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn http_server_accepts_owned_shutdown_signal() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            serve_router(address, Router::new(), async {}),
+        )
+        .await
+        .expect("server did not shut down")
+        .unwrap();
     }
 }

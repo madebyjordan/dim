@@ -51,6 +51,8 @@ pub mod streaming;
 mod tests;
 /// Tree-like structure for representing directories of files.
 pub mod tree;
+/// Ownership and cancellation for per-library background work.
+pub mod workers;
 
 pub use settings::get_global_settings;
 pub use settings::init_global_settings;
@@ -58,7 +60,7 @@ pub use settings::set_global_settings;
 pub use settings::GlobalSettings;
 
 /// Function builds a logger drain that drains to a json file located in logs/ and also to stdout.
-pub fn setup_logging(_debug: bool) {
+pub fn setup_logging(_debug: bool) -> tracing_appender::non_blocking::WorkerGuard {
     let _ = create_dir_all("logs");
 
     if std::env::var("RUST_LOG").is_err() {
@@ -66,7 +68,7 @@ pub fn setup_logging(_debug: bool) {
     }
 
     let log_appender = tracing_appender::rolling::daily("./logs", "dim-log.log");
-    let (non_blocking_file, _guard) = tracing_appender::non_blocking(log_appender);
+    let (non_blocking_file, guard) = tracing_appender::non_blocking(log_appender);
 
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
@@ -74,6 +76,7 @@ pub fn setup_logging(_debug: bool) {
         .with(fmt::layer().json().with_writer(non_blocking_file));
 
     let _ = tracing::subscriber::set_global_default(subscriber);
+    guard
 }
 
 #[cfg(test)]

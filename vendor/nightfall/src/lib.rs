@@ -435,6 +435,17 @@ impl StateManager {
         Ok(())
     }
 
+    /// Stop and reap every active transcoding process before application shutdown.
+    #[handler]
+    async fn shutdown_all(&mut self) -> Result<()> {
+        for session in self.sessions.values_mut() {
+            session.join().await;
+        }
+        self.sessions.clear();
+        self.stream_stats.clear();
+        Ok(())
+    }
+
     #[handler]
     async fn take_stdout(&mut self, id: String) -> Result<ChildStdout> {
         let session = self

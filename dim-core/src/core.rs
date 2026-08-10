@@ -1,4 +1,5 @@
 use crate::scanner;
+use crate::workers::{LibraryWorkerKind, LibraryWorkers};
 
 use dim_database::library::MediaType;
 
@@ -26,7 +27,7 @@ pub static METADATA_PATH: OnceCell<String> = OnceCell::new();
 /// * `tx` - this is the websocket channel to which we can send websocket events to which get
 /// dispatched to clients.
 #[instrument(skip_all)]
-pub async fn run_scanners(tx: EventTx) {
+pub async fn run_scanners(tx: EventTx, workers: &LibraryWorkers) {
     if let Ok(conn) = dim_database::get_conn_logged().await {
         if let Ok(mut db_tx) = conn.read().begin().await {
             let mut libs = dim_database::library::Library::get_all(&mut db_tx).await;
@@ -56,17 +57,30 @@ pub async fn run_scanners(tx: EventTx) {
 
                 let conn_clone = conn.clone();
 
-                tokio::spawn(async move {
-                    let mut conn = conn_clone;
-                    scanner::start(&mut conn, library_id, tx_clone.clone(), provider).await
-                });
+                if let Err(error) = workers
+                    .spawn(library_id, LibraryWorkerKind::Scanner, async move {
+                        let mut conn = conn_clone;
+                        if let Err(error) =
+                            scanner::start(&mut conn, library_id, tx_clone.clone(), provider).await
+                        {
+                            tracing::error!(?error, library_id, "Library scan failed");
+                        }
+                    })
+                    .await
+                {
+                    tracing::warn!(?error, library_id, "Scanner was not started");
+                }
 
-                tokio::spawn(async move {
-                    watcher
-                        .start_daemon()
-                        .await
-                        .expect("Something went wrong with the fs-watcher");
-                });
+                if let Err(error) = workers
+                    .spawn(library_id, LibraryWorkerKind::Watcher, async move {
+                        if let Err(error) = watcher.start_daemon().await {
+                            tracing::error!(?error, library_id, "Filesystem watcher failed");
+                        }
+                    })
+                    .await
+                {
+                    tracing::warn!(?error, library_id, "Filesystem watcher was not started");
+                }
             }
         }
     }

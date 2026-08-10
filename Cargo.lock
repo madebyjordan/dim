@@ -1012,6 +1012,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "syn 1.0.109",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

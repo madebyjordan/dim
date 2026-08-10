@@ -142,6 +142,7 @@ impl FFProbeCtx {
         let mut probe = Command::new(self.ffprobe_bin.clone());
 
         probe
+            .kill_on_drop(true)
             .arg(file.to_string())
             .arg("-v")
             .arg("error")
