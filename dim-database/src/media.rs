@@ -236,16 +236,22 @@ impl Media {
         .unwrap_or(0)
     }
 
-    pub async fn get_id_by_name(
+    pub async fn get_id_by_identity(
         tx: &mut crate::Transaction<'_>,
+        library_id: i64,
+        media_type: MediaType,
         name: &str,
     ) -> Result<Option<i64>, DatabaseError> {
-        Ok(
-            sqlx::query!(r#"SELECT id FROM _tblmedia where name = ?"#, name)
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|x| x.id),
+        Ok(sqlx::query!(
+            r#"SELECT id FROM _tblmedia
+               WHERE library_id = ? AND media_type = ? AND name = ?"#,
+            library_id,
+            media_type,
+            name
         )
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|x| x.id))
     }
 
     pub async fn media_mediatype(
@@ -436,12 +442,9 @@ impl InsertableMedia {
     ///
     /// Returns a tuple of the id and whether the media object has been in place modified
     pub async fn lazy_insert(&self, tx: &mut crate::Transaction<'_>) -> Result<i64, DatabaseError> {
-        // Maybe a media object that can be linked against this file already exists and we want
-        // to bind to it?
-        // FIXME: Libraries can be of mixed type, and some movies and shows share the same
-        // name. As such we should add an extra param for more accurate matching, year or
-        // mediatype can be considered.
-        match Media::get_id_by_name(tx, &self.name)
+        // Reuse is deliberately constrained to a single library and media type. Provider IDs are
+        // not persisted yet, so title matching remains only a safe incremental fallback.
+        match Media::get_id_by_identity(tx, self.library_id, self.media_type, &self.name)
             .await
             .map_err(|error| {
                 error!(?error, %self.name, "Failed to get a media by name");

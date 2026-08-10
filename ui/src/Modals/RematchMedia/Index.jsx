@@ -14,6 +14,21 @@ import "./Index.scss";
 
 Modal.setAppElement("body");
 
+export const buildRematchRequest = (id, token, tmdbID, mediaType) => ({
+  url: `/api/v1/media/${id}/rematch`,
+  config: {
+    method: "POST",
+    headers: {
+      authorization: token,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      external_id: String(tmdbID),
+      media_type: mediaType,
+    }),
+  },
+});
+
 function RematchMediaModal(props) {
   const dispatch = useDispatch();
 
@@ -68,17 +83,9 @@ function RematchMediaModal(props) {
 
     setMatching(true);
 
-    const config = {
-      method: "PATCH",
-      headers: {
-        authorization: token,
-      },
-    };
+    const { url, config } = buildRematchRequest(id, token, tmdbID, mediaType);
 
-    const req = await fetch(
-      `/api/v1/media/${id}/match?external_id=${tmdbID}&media_type=${mediaType}`,
-      config
-    );
+    const req = await fetch(url, config);
 
     if (req.status !== 200) {
       setError(req.statusText);

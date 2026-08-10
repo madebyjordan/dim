@@ -65,6 +65,22 @@ async fn test_app() -> TestApp {
         .unwrap();
     let owner = insert_user(&conn, "owner", "owner").await;
     let user = insert_user(&conn, "viewer", "user").await;
+    std::fs::write(metadata.join("avatar.png"), b"avatar").unwrap();
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+    let avatar = dim_database::asset::InsertableAsset {
+        local_path: "avatar.png".into(),
+        file_ext: "png".into(),
+        ..Default::default()
+    }
+    .insert_local_asset(&mut tx)
+    .await
+    .unwrap();
+    dim_database::user::User::set_picture(&mut tx, user.id, avatar.id)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(lock);
 
     let owner_token = dim_database::user::Login::create_cookie(owner.id);
     let user_token = dim_database::user::Login::create_cookie(user.id);
@@ -259,6 +275,72 @@ async fn enforces_the_application_security_boundary() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/api/v1/user/username",
+            Some(&test.user_token),
+            r#"{"new_username":"renamed-viewer"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            "/api/v1/user/password",
+            Some(&test.user_token),
+            r#"{"old_password":"password","new_password":"new-password"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/v1/auth/login",
+            None,
+            r#"{"username":"renamed-viewer","password":"new-password"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::DELETE,
+            "/api/v1/user/avatar",
+            Some(&test.user_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!test.root.join("metadata/avatar.png").exists());
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::DELETE,
+            "/api/v1/user",
+            Some(&test.user_token),
+            r#"{"password":"new-password"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 
     let metadata = test.root.join("metadata");
     std::fs::write(metadata.join("poster.jpg"), b"poster").unwrap();

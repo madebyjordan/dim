@@ -152,7 +152,7 @@ pub async fn get_all_invites(
     Ok(axum::response::Json(json!(&row)).into_response())
 }
 
-/// # POST `/api/v1/auth/new_invite`
+/// # POST `/api/v1/auth/invites`
 /// Method will generate and return a new invite token.
 ///
 /// # Authorization
@@ -162,7 +162,7 @@ pub async fn get_all_invites(
 /// # Request
 /// ## Example
 /// ```text
-/// curl -X POST http://127.0.0.1:8000/api/v1/auth/new_invite -H "Authorization: ...."
+/// curl -X POST http://127.0.0.1:8000/api/v1/auth/invites -H "Authorization: ...."
 /// ```
 ///
 /// # Response

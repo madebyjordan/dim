@@ -194,7 +194,7 @@ export const delAccount = (password) => async (dispatch, getState) => {
   };
 
   try {
-    const res = await fetch("/api/v1/user/delete", config);
+    const res = await fetch("/api/v1/user", config);
 
     if (res.status !== 200) {
       dispatch({
@@ -258,7 +258,7 @@ export const createNewInvite = () => async (dispatch, getState) => {
   };
 
   try {
-    const res = await fetch("/api/v1/auth/new_invite", config);
+    const res = await fetch("/api/v1/auth/invites", config);
 
     if (res.status !== 200) {
       return dispatch({

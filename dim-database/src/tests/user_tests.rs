@@ -85,6 +85,22 @@ async fn test_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn changing_username_preserves_password_verification() {
+    let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
+    let mut tx = write_tx(&mut conn).await.unwrap();
+    let user = insert_user(&mut tx).await;
+
+    User::set_username(&mut tx, user.id, "renamed".into())
+        .await
+        .unwrap();
+
+    let authenticated = User::authenticate(&mut tx, "renamed".into(), "test".into())
+        .await
+        .unwrap();
+    assert_eq!(authenticated.id, user.id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_invites() {
     let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
     let mut tx = write_tx(&mut conn).await.unwrap();

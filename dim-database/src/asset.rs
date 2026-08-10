@@ -10,6 +10,16 @@ pub struct Asset {
     pub file_ext: String,
 }
 impl Asset {
+    pub async fn delete(
+        conn: &mut crate::Transaction<'_>,
+        id: i64,
+    ) -> Result<usize, DatabaseError> {
+        Ok(sqlx::query!("DELETE FROM assets WHERE id = ?", id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected() as usize)
+    }
+
     pub async fn get_by_id(
         conn: &mut crate::Transaction<'_>,
         id: i64,

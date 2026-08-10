@@ -121,6 +121,39 @@ async fn test_construct_mediafile() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rescan_keeps_metadata_aligned_after_existing_files_are_filtered() {
+    let names = ["Already Here (1999).mp4", "New Arrival (2024).mp4"];
+    let (tempdir, files) = super::temp_dir_symlink(names.into_iter(), super::TEST_MP4_PATH);
+    let mut conn = dim_database::get_conn_memory()
+        .await
+        .expect("Failed to obtain an in-memory db pool.");
+    let library = create_library(&mut conn).await;
+
+    let existing = InsertableMediaFile {
+        library_id: library,
+        target_file: files[0].to_string_lossy().into_owned(),
+        raw_name: "Already Here".into(),
+        raw_year: Some(1999),
+        ..Default::default()
+    };
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+    existing.insert(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    drop(lock);
+
+    let work =
+        super::super::insert_mediafiles(&mut conn, library, vec![tempdir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].0.target_file, files[1].to_string_lossy());
+    assert_eq!(work[0].1[0].name, "New Arrival");
+    assert_eq!(work[0].1[0].year, Some(2024));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_instances() {
     let files = (0..1024)
         .map(|i| format!("Movie{i}.mkv"))

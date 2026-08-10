@@ -56,7 +56,7 @@ pub struct ChangePasswordParams {
     new_password: String,
 }
 
-/// # POST `/api/v1/user/password`
+/// # PATCH `/api/v1/user/password`
 /// Method changes the password for a logged in account.
 ///
 /// # Request
@@ -72,7 +72,7 @@ pub struct ChangePasswordParams {
 ///
 /// ## Example
 /// ```text
-/// curl -X POST http://127.0.0.1:8000/api/v1/user/password -H "Content-type: application/json"
+/// curl -X PATCH http://127.0.0.1:8000/api/v1/user/password -H "Content-type: application/json"
 /// -H "Authroization: ..." -d '{"old_password": "testPass", "new_password": "newTestPass"}'
 /// ```
 ///
@@ -168,7 +168,7 @@ pub struct ChangeUsernameParams {
     new_username: String,
 }
 
-/// # POST `/api/v1/user/username`
+/// # PATCH `/api/v1/user/username`
 /// Method changes the username of the current account.
 ///
 /// # Request
@@ -181,7 +181,7 @@ pub struct ChangeUsernameParams {
 ///
 /// ## Example
 /// ```text
-/// curl -X POST http://127.0.0.1:8000/api/v1/user/username -H "Content-type: application/json" -H
+/// curl -X PATCH http://127.0.0.1:8000/api/v1/user/username -H "Content-type: application/json" -H
 /// "Authorization: ..." -d '{"new_username": "testUsername"}'
 /// ```
 ///
@@ -205,7 +205,7 @@ pub async fn change_username(
         return Err(AuthError::UsernameNotAvailable);
     }
 
-    User::set_username(&mut tx, user.username.clone(), params.new_username).await?;
+    User::set_username(&mut tx, user.id, params.new_username).await?;
     tx.commit().await.map_err(DatabaseError::from)?;
 
     Ok(StatusCode::OK)
@@ -261,6 +261,38 @@ pub async fn upload_avatar(
         }
         None => Err(AuthError::UploadFailed),
     }
+}
+
+/// Remove the avatar associated with the logged-in user.
+pub async fn delete_avatar(
+    Extension(user): Extension<User>,
+    State(AppState { conn, .. }): State<AppState>,
+) -> Result<impl IntoResponse, AuthError> {
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock)
+        .await
+        .map_err(DatabaseError::from)?;
+
+    let asset = match user.picture {
+        Some(asset_id) => Some(Asset::get_by_id(&mut tx, asset_id).await?),
+        None => None,
+    };
+    User::clear_picture(&mut tx, user.id).await?;
+    if let Some(asset) = &asset {
+        Asset::delete(&mut tx, asset.id).await?;
+    }
+    tx.commit().await.map_err(DatabaseError::from)?;
+
+    if let (Some(asset), Some(metadata_path)) = (asset, dim_core::core::METADATA_PATH.get()) {
+        let path = format!("{metadata_path}/{}", asset.local_path);
+        if let Err(error) = tokio::fs::remove_file(path).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(?error, "Failed to remove deleted avatar from disk");
+            }
+        }
+    }
+
+    Ok(StatusCode::OK)
 }
 
 #[doc(hidden)]

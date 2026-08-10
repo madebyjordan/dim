@@ -242,10 +242,19 @@ pub fn build_router(app: AppState) -> Router {
             get(routes::settings::http_get_global_settings)
                 .post(routes::settings::http_set_global_settings),
         )
-        .route("/api/v1/user/password", post(routes::user::change_password))
+        .route(
+            "/api/v1/user/password",
+            patch(routes::user::change_password),
+        )
         .route("/api/v1/user", delete(routes::user::delete))
-        .route("/api/v1/username", post(routes::user::change_username))
-        .route("/api/v1/user/avatar", post(routes::user::upload_avatar))
+        .route(
+            "/api/v1/user/username",
+            patch(routes::user::change_username),
+        )
+        .route(
+            "/api/v1/user/avatar",
+            post(routes::user::upload_avatar).delete(routes::user::delete_avatar),
+        )
         .route(
             "/api/v1/auth/invites",
             get(routes::auth::get_all_invites).post(routes::auth::generate_invite),

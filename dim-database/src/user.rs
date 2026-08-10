@@ -258,7 +258,13 @@ impl User {
         uname: String,
         pw: String,
     ) -> Result<Self, DatabaseError> {
-        let hash = hash(uname.clone(), pw);
+        let password_salt = sqlx::query_scalar!(
+            r#"SELECT password_salt as "password_salt!: String" FROM users WHERE username = ?"#,
+            uname
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        let hash = hash(password_salt, pw);
         let user = sqlx::query!(
             r#"SELECT id as "id: UserID", username, roles as "roles: Roles", prefs as "prefs: UserSettings", picture FROM users WHERE username = ? AND password = ?"#,
             uname,
@@ -320,8 +326,9 @@ impl User {
         let hash = hash(self.username.clone(), password);
 
         Ok(sqlx::query!(
-            "UPDATE users SET password = $1 WHERE username = ?2",
+            "UPDATE users SET password = $1, password_salt = $2 WHERE username = ?3",
             hash,
+            self.username,
             self.username
         )
         .execute(&mut *conn)
@@ -331,13 +338,13 @@ impl User {
 
     pub async fn set_username(
         conn: &mut crate::Transaction<'_>,
-        old_username: String,
+        user_id: UserID,
         new_username: String,
     ) -> Result<usize, DatabaseError> {
         Ok(sqlx::query!(
-            "UPDATE users SET username = $1 WHERE users.username = ?2",
+            "UPDATE users SET username = $1 WHERE users.id = ?2",
             new_username,
-            old_username
+            user_id
         )
         .execute(&mut *conn)
         .await?
@@ -357,6 +364,18 @@ impl User {
         .execute(&mut *conn)
         .await?
         .rows_affected() as usize)
+    }
+
+    pub async fn clear_picture(
+        conn: &mut crate::Transaction<'_>,
+        uid: UserID,
+    ) -> Result<usize, DatabaseError> {
+        Ok(
+            sqlx::query!("UPDATE users SET picture = NULL WHERE users.id = ?", uid)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected() as usize,
+        )
     }
 
     pub fn has_role(&self, role: &str) -> bool {
@@ -393,7 +412,7 @@ impl InsertableUser {
 
         let user = sqlx::query_as!(
             User,
-            r#"INSERT INTO users (username, password, prefs, claimed_invite, roles) VALUES ($1, $2, $3, $4, $5) returning id as "id: UserID",username,roles as "roles: Roles",prefs as "prefs: UserSettings",picture"#,
+            r#"INSERT INTO users (username, password, password_salt, prefs, claimed_invite, roles) VALUES ($1, $2, $1, $3, $4, $5) returning id as "id: UserID",username,roles as "roles: Roles",prefs as "prefs: UserSettings",picture"#,
             username,
             password,
             prefs,

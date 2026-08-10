@@ -159,6 +159,41 @@ async fn test_blind_insert() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn lazy_insert_does_not_share_titles_across_libraries_or_media_types() {
+    let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
+    let mut tx = write_tx(&mut conn).await.unwrap();
+    let first_library = create_test_library(&mut tx).await;
+    let second_library = create_test_library(&mut tx).await;
+
+    let movie = media::InsertableMedia {
+        library_id: first_library,
+        name: "Shared title".into(),
+        media_type: library::MediaType::Movie,
+        ..Default::default()
+    };
+    let first_id = movie.lazy_insert(&mut tx).await.unwrap();
+    assert_eq!(movie.lazy_insert(&mut tx).await.unwrap(), first_id);
+
+    let cross_library_id = media::InsertableMedia {
+        library_id: second_library,
+        ..movie.clone()
+    }
+    .lazy_insert(&mut tx)
+    .await
+    .unwrap();
+    assert_ne!(cross_library_id, first_id);
+
+    let cross_type_id = media::InsertableMedia {
+        media_type: library::MediaType::Tv,
+        ..movie
+    }
+    .lazy_insert(&mut tx)
+    .await
+    .unwrap();
+    assert_ne!(cross_type_id, first_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_update() {
     let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
     let mut tx = write_tx(&mut conn).await.unwrap();

@@ -30,6 +30,7 @@ use futures::FutureExt;
 use ignore::WalkBuilder;
 use itertools::Itertools;
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::future::Future;
 use std::path::Path;
@@ -166,29 +167,36 @@ pub async fn insert_mediafiles(
 
     let mut instance = MediafileCreator::new(conn.clone(), library_id).await;
 
-    let insertable_futures =
-        parsed
-            .clone()
-            .into_iter()
-            .map(|(path, meta)| instance.construct_mediafile(path, meta[0].clone()).boxed())
-            .chunks(4)
-            .into_iter()
-            .map(|chunk| chunk.collect())
-            .collect::<Vec<
-                Vec<
-                    Pin<Box<dyn Future<Output = Result<InsertableMediaFile, CreatorError>> + Send>>,
+    let insertable_futures = parsed
+        .clone()
+        .into_iter()
+        .map(|(path, metadata)| {
+            let primary = metadata[0].clone();
+            async { (instance.construct_mediafile(path, primary).await, metadata) }.boxed()
+        })
+        .chunks(4)
+        .into_iter()
+        .map(|chunk| chunk.collect())
+        .collect::<Vec<
+            Vec<
+                Pin<
+                    Box<
+                        dyn Future<
+                                Output = (Result<InsertableMediaFile, CreatorError>, Vec<Metadata>),
+                            > + Send,
+                    >,
                 >,
-            >>();
+            >,
+        >>();
 
     let mut insertables = vec![];
 
     for chunk in insertable_futures.into_iter() {
-        let results: Vec<Result<InsertableMediaFile, CreatorError>> =
-            futures::future::join_all(chunk).await;
+        let results = futures::future::join_all(chunk).await;
 
-        for result in results {
+        for (result, metadata) in results {
             match result {
-                Ok(insertable) => insertables.push(insertable),
+                Ok(insertable) => insertables.push((insertable, metadata)),
                 Err(CreatorError::FileExists) => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -198,13 +206,26 @@ pub async fn insert_mediafiles(
     let mut mediafiles = vec![];
 
     for chunk in insertables.chunks(256) {
-        mediafiles.append(&mut instance.insert_batch(chunk.iter()).await?);
+        mediafiles.append(
+            &mut instance
+                .insert_batch(chunk.iter().map(|(file, _)| file))
+                .await?,
+        );
     }
+
+    let mut metadata_by_path = insertables
+        .into_iter()
+        .map(|(file, metadata)| (file.target_file, metadata))
+        .collect::<HashMap<_, _>>();
 
     Ok(mediafiles
         .into_iter()
-        .zip(parsed.into_iter())
-        .map(|(mfile, (_, metadata))| WorkUnit(mfile, metadata))
+        .map(|mfile| {
+            let metadata = metadata_by_path
+                .remove(&mfile.target_file)
+                .expect("inserted mediafile must retain its parsed metadata");
+            WorkUnit(mfile, metadata)
+        })
         .collect())
 }
 

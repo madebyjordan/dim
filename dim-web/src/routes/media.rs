@@ -90,6 +90,51 @@ pub const MOVIES_PROVIDER: Lazy<Arc<dyn ExternalQueryIntoShow>> =
 pub const TV_PROVIDER: Lazy<Arc<dyn ExternalQueryIntoShow>> =
     Lazy::new(|| Arc::new(TMDBMetadataProvider::new(&API_KEY).tv_shows()));
 
+async fn get_tv_progress(
+    tx: &mut dim_database::Transaction<'_>,
+    tv_id: i64,
+    user: &User,
+) -> Result<serde_json::Value, Error> {
+    if let Ok(Some(ep)) = Episode::get_last_watched_episode(tx, tv_id, user.id).await {
+        let (delta, duration) = Progress::get_progress_for_media(tx, ep.id, user.id)
+            .await
+            .unwrap_or((0, 1));
+
+        // When the last watched episode is complete, present the next episode and its own
+        // progress. At the end of a show, keep presenting the final episode.
+        if duration > 0 && (delta as f64 / duration as f64) > 0.90 {
+            if let Ok(next_episode) = ep.get_next_episode(tx).await {
+                let (next_delta, _duration) =
+                    Progress::get_progress_for_media(tx, next_episode.id, user.id)
+                        .await
+                        .unwrap_or((0, 1));
+
+                return Ok(json!({
+                    "progress": next_delta,
+                    "season": next_episode.get_season_number(tx).await.unwrap_or(0),
+                    "episode": next_episode.episode,
+                    "play_btn_id": next_episode.id,
+                }));
+            }
+        }
+
+        Ok(json!({
+            "progress": delta,
+            "season": ep.get_season_number(tx).await.unwrap_or(0),
+            "episode": ep.episode,
+            "play_btn_id": ep.id,
+        }))
+    } else {
+        let ep = Episode::get_first_for_show(tx, tv_id).await?;
+        Ok(json!({
+            "progress": 0,
+            "season": ep.get_season_number(tx).await.unwrap_or(0),
+            "episode": ep.episode,
+            "play_btn_id": ep.id,
+        }))
+    }
+}
+
 /// Method mapped to `GET /api/v1/media/<id>` returns info about a media based on the id queried.
 /// This method can only be accessed by authenticated users.
 ///
@@ -155,46 +200,7 @@ pub async fn get_media_by_id(
             .await
             .map(|x| json!({"progress": x.delta}))
             .ok(),
-        MediaType::Tv => {
-            if let Ok(Some(ep)) = Episode::get_last_watched_episode(&mut tx, id, user.id).await {
-                let (delta, duration) = Progress::get_progress_for_media(&mut tx, ep.id, user.id)
-                    .await
-                    .unwrap_or((0, 1));
-
-                // NOTE: When we get to the last episode of a tv show we want to return the last
-                // episode even if the client finished watching it.
-                let next_episode = ep.get_next_episode(&mut tx).await;
-                if (delta as f64 / duration as f64) > 0.90 && next_episode.is_ok() {
-                    let next_episode = next_episode.unwrap();
-                    let (delta, _duration) =
-                        Progress::get_progress_for_media(&mut tx, ep.id, user.id)
-                            .await
-                            .unwrap_or((0, 1));
-
-                    Some(json!({
-                        "progress": delta,
-                        "season": next_episode.get_season_number(&mut tx).await.unwrap_or(0),
-                        "episode": next_episode.episode,
-                        "play_btn_id": next_episode.id,
-                    }))
-                } else {
-                    Some(json!({
-                        "progress": delta,
-                        "season": ep.get_season_number(&mut tx).await.unwrap_or(0),
-                        "episode": ep.episode,
-                        "play_btn_id": ep.id,
-                    }))
-                }
-            } else {
-                let ep = Episode::get_first_for_show(&mut tx, id).await?;
-                Some(json!({
-                    "progress": 0,
-                    "season": ep.get_season_number(&mut tx).await.unwrap_or(0),
-                    "episode": ep.episode,
-                    "play_btn_id": ep.id,
-                }))
-            }
-        }
+        MediaType::Tv => Some(get_tv_progress(&mut tx, id, &user).await?),
     };
 
     fn mediafile_tags(x: &MediaFile) -> serde_json::Value {
@@ -602,4 +608,107 @@ pub async fn rematch_media_by_id(
     tx.commit().await.map_err(DatabaseError::from)?;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_tv_progress;
+    use dim_database::episode::InsertableEpisode;
+    use dim_database::library::{InsertableLibrary, MediaType};
+    use dim_database::media::InsertableMedia;
+    use dim_database::mediafile::InsertableMediaFile;
+    use dim_database::progress::Progress;
+    use dim_database::season::InsertableSeason;
+    use dim_database::user::{InsertableUser, Login, Roles, UserSettings};
+
+    #[tokio::test]
+    async fn completed_episode_uses_next_episodes_progress() {
+        let conn = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        let library = InsertableLibrary {
+            name: "TV".into(),
+            locations: vec![],
+            media_type: MediaType::Tv,
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let invite = Login::new_invite(&mut tx).await.unwrap();
+        let user = InsertableUser {
+            username: "viewer".into(),
+            password: "password".into(),
+            roles: Roles(vec!["user".into()]),
+            prefs: UserSettings::default(),
+            claimed_invite: invite,
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let tv = InsertableMedia {
+            library_id: library,
+            name: "Show".into(),
+            media_type: MediaType::Tv,
+            ..Default::default()
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let season = InsertableSeason {
+            season_number: 1,
+            ..Default::default()
+        }
+        .insert(&mut tx, tv)
+        .await
+        .unwrap();
+
+        let mut episodes = Vec::new();
+        for number in 1..=2 {
+            let episode = InsertableEpisode {
+                media: InsertableMedia {
+                    library_id: library,
+                    name: format!("Episode {number}"),
+                    media_type: MediaType::Episode,
+                    ..Default::default()
+                },
+                seasonid: season,
+                episode: number,
+            }
+            .insert(&mut tx)
+            .await
+            .unwrap();
+            InsertableMediaFile {
+                library_id: library,
+                media_id: Some(episode),
+                target_file: format!("episode-{number}.mp4"),
+                raw_name: format!("Episode {number}"),
+                duration: Some(100),
+                ..Default::default()
+            }
+            .insert(&mut tx)
+            .await
+            .unwrap();
+            episodes.push(episode);
+        }
+
+        Progress::set(&mut tx, 95, user.id, episodes[0])
+            .await
+            .unwrap();
+        Progress::set(&mut tx, 7, user.id, episodes[1])
+            .await
+            .unwrap();
+
+        // Make the completed first episode the most recently populated record.
+        sqlx::query!(
+            "UPDATE progress SET populated = populated + 1 WHERE media_id = ?",
+            episodes[0]
+        )
+        .execute(&mut tx)
+        .await
+        .unwrap();
+
+        let progress = get_tv_progress(&mut tx, tv, &user).await.unwrap();
+        assert_eq!(progress["play_btn_id"], episodes[1]);
+        assert_eq!(progress["progress"], 7);
+    }
 }
