@@ -27,7 +27,7 @@ if [[ ! -x "$DIM_BINARY" ]]; then
         DIM_BOOTSTRAP_SUFFIX=" --release"
     fi
     echo "Dim has not been built at $DIM_BINARY." >&2
-    echo "Run ./scripts/bootstrap.sh$DIM_BOOTSTRAP_SUFFIX first." >&2
+    echo "Run yarn build$DIM_BOOTSTRAP_SUFFIX first." >&2
     exit 1
 fi
 

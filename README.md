@@ -45,15 +45,15 @@ From a fresh clone:
 ```sh
 git clone https://github.com/Dusk-Labs/dim.git
 cd dim
-./scripts/bootstrap.sh
-./scripts/run.sh
+yarn build
+yarn dev
 ```
 
-Open [http://localhost:8000](http://localhost:8000) after Dim starts. To build and run an optimized binary, pass `--release` to both scripts:
+Open [http://localhost:8000](http://localhost:8000) after Dim starts. To build and run an optimized binary, pass `--release` to both commands:
 
 ```sh
-./scripts/bootstrap.sh --release
-./scripts/run.sh --release
+yarn build --release
+yarn dev --release
 ```
 
 The bootstrap script installs the locked frontend dependencies, builds the embedded web UI, links the system FFmpeg tools under `utils/`, and builds the Rust workspace. It never overwrites existing FFmpeg binaries in `utils/`.

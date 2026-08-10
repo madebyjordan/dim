@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "./scripts/bootstrap.sh",
+    "dev": "./scripts/run.sh"
+  }
+}

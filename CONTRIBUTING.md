@@ -19,8 +19,8 @@ without any additional terms or conditions.
 Follow the source prerequisites in [README.md](README.md), then bootstrap a development build with:
 
 ```sh
-./scripts/bootstrap.sh
-./scripts/run.sh
+yarn build
+yarn dev
 ```
 
 Before submitting a change, run:
