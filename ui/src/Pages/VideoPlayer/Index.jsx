@@ -53,6 +53,7 @@ function VideoPlayer() {
   const location = useLocation();
   const navigate = useNavigate();
   const [player, setPlayer] = useState();
+  const [remoteMedia, setRemoteMedia] = useState(null);
 
   const { error, manifest, audioTracks, videoTracks, video, auth, settings } =
     useSelector(
@@ -327,8 +328,9 @@ function VideoPlayer() {
       })
     );
 
-    videoRef.current.play();
-  }, [dispatch, videoRef]);
+    if (remoteMedia) void remoteMedia.play();
+    else void videoRef.current.play();
+  }, [dispatch, remoteMedia, videoRef]);
 
   const pause = useCallback(() => {
     dispatch(
@@ -336,8 +338,9 @@ function VideoPlayer() {
         idleCount: 0,
       })
     );
-    videoRef.current.pause();
-  }, [dispatch, videoRef]);
+    if (remoteMedia) remoteMedia.pause();
+    else videoRef.current.pause();
+  }, [dispatch, remoteMedia, videoRef]);
 
   const togglePlayer = useCallback(
     (e) => {
@@ -349,14 +352,20 @@ function VideoPlayer() {
       )
         return;
 
-      videoRef.current.paused ? play() : pause();
+      (remoteMedia ? remoteMedia.paused : videoRef.current.paused)
+        ? play()
+        : pause();
     },
-    [play, pause, videoRef]
+    [play, pause, remoteMedia, videoRef]
   );
 
   const seekTo = useCallback(
     (newTime) => {
-      player.seek(newTime);
+      if (remoteMedia) {
+        remoteMedia.currentTime = newTime;
+      } else {
+        player.seek(newTime);
+      }
 
       dispatch(
         updateVideo({
@@ -365,8 +374,15 @@ function VideoPlayer() {
         })
       );
     },
-    [dispatch, player]
+    [dispatch, player, remoteMedia]
   );
+
+  const playbackController = {
+    play: () => (remoteMedia ? remoteMedia.play() : player?.play()),
+    pause: () => (remoteMedia ? remoteMedia.pause() : player?.pause()),
+    isPaused: () => (remoteMedia ? remoteMedia.paused : (player?.isPaused() ?? true)),
+    duration: () => (remoteMedia ? remoteMedia.duration : (player?.duration() ?? 0)),
+  };
 
   const changeVideoQuality = useCallback(
     async (trackIndex) => {
@@ -427,6 +443,9 @@ function VideoPlayer() {
     overlay: overlay.current,
     seekTo,
     player,
+    remoteMedia,
+    setRemoteMedia,
+    playbackController,
     pendingVideoSwitch,
     changeVideoQuality,
   };

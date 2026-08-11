@@ -12,7 +12,7 @@ function VideoSeekBar(props) {
   const dispatch = useDispatch();
   const [saveProgress] = useSaveProgressMutation();
 
-  const { player } = useContext(VideoPlayerContext);
+  const { playbackController } = useContext(VideoPlayerContext);
 
   const video = useSelector((store) => store.video, shallowEqual);
 
@@ -57,12 +57,12 @@ function VideoSeekBar(props) {
 
       const rect = e.target.getBoundingClientRect();
       const percent = (e.clientX - rect.left) / rect.width;
-      const videoDuration = player.duration();
+      const videoDuration = playbackController.duration();
       const newTime = Math.floor(percent * videoDuration);
 
       seekTo(newTime);
     },
-    [dispatch, player, seekTo, video.seeking]
+    [dispatch, playbackController, seekTo, video.seeking]
   );
 
   return (

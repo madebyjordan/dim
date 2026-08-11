@@ -6,6 +6,14 @@ interface VideoPlayerContext {
   overlay: HTMLDivElement | null;
   seekTo: (newTime: number) => void;
   player: dashjs.MediaPlayerClass;
+  remoteMedia: HTMLVideoElement | null;
+  setRemoteMedia: React.Dispatch<React.SetStateAction<HTMLVideoElement | null>>;
+  playbackController: {
+    play: () => void;
+    pause: () => void;
+    isPaused: () => boolean;
+    duration: () => number;
+  };
   pendingVideoSwitch: React.MutableRefObject<{
     position: number;
     targetIndex: number;

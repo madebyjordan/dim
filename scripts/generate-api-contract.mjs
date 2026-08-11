@@ -9,6 +9,7 @@ const contract = JSON.parse(await readFile(source, "utf8"));
 
 function type(schema) {
   if (schema.$ref) return schema.$ref.split("/").at(-1);
+  if (schema.oneOf) return schema.oneOf.map(type).join(" | ");
   if (schema.const) return JSON.stringify(schema.const);
   if (schema.enum) return schema.enum.map(JSON.stringify).join(" | ");
   if (Array.isArray(schema.type)) return schema.type.map((value) => type({ ...schema, type: value })).join(" | ");

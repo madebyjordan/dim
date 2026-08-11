@@ -290,6 +290,7 @@ struct Session {
     created_at: Instant,
     last_activity: Instant,
     tracks: Vec<TrackState>,
+    remote_access_token: Option<String>,
 }
 #[derive(Debug)]
 struct Inner {
@@ -334,8 +335,54 @@ impl StreamTracking {
                         }
                     })
                     .collect(),
+                remote_access_token: None,
             },
         );
+    }
+
+    pub async fn enable_remote_access(
+        &self,
+        gid: &Uuid,
+        owner: i64,
+    ) -> Result<String, TrackingError> {
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get_mut(gid).ok_or(TrackingError::NotFound)?;
+        if session.owner != owner {
+            return Err(TrackingError::NotOwner);
+        }
+        let token = Uuid::new_v4().as_simple().to_string();
+        session.remote_access_token = Some(token.clone());
+        Ok(token)
+    }
+
+    pub async fn authenticate_remote(&self, gid: &Uuid, token: &str) -> Result<i64, TrackingError> {
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get_mut(gid).ok_or(TrackingError::NotFound)?;
+        if session.remote_access_token.as_deref() != Some(token) {
+            return Err(TrackingError::NotOwner);
+        }
+        session.last_activity = Instant::now();
+        Ok(session.owner)
+    }
+
+    pub async fn remote_track(
+        &self,
+        gid: &Uuid,
+        owner: i64,
+        public_id: &str,
+    ) -> Result<(VirtualManifest, Option<String>), TrackingError> {
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get_mut(gid).ok_or(TrackingError::NotFound)?;
+        if session.owner != owner {
+            return Err(TrackingError::NotOwner);
+        }
+        session.last_activity = Instant::now();
+        let track = session
+            .tracks
+            .iter()
+            .find(|track| track.plan.manifest.id == public_id)
+            .ok_or(TrackingError::NotFound)?;
+        Ok((track.plan.manifest.clone(), track.process_id.clone()))
     }
 
     pub async fn inspect(
@@ -940,6 +987,32 @@ mod tests {
         let inner = tracking.inner.read().await;
         assert!(inner.process_index.is_empty());
         assert!(inner.sessions[&gid].tracks[0].process_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_access_is_random_session_scoped_and_does_not_activate_tracks() {
+        let tracking = StreamTracking::with_policy(policy());
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        tracking
+            .create_session(first, 7, vec![planned_track()])
+            .await;
+        tracking
+            .create_session(second, 7, vec![planned_track()])
+            .await;
+        let token = tracking.enable_remote_access(&first, 7).await.unwrap();
+        assert_eq!(tracking.authenticate_remote(&first, &token).await, Ok(7));
+        assert_eq!(
+            tracking.authenticate_remote(&second, &token).await,
+            Err(TrackingError::NotOwner)
+        );
+        assert_eq!(
+            tracking.authenticate_remote(&first, "wrong").await,
+            Err(TrackingError::NotOwner)
+        );
+        let inner = tracking.inner.read().await;
+        assert!(inner.process_index.is_empty());
+        assert!(inner.sessions[&first].tracks[0].process_id.is_none());
     }
 
     #[tokio::test]

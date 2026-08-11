@@ -151,6 +151,8 @@ export type AudioPlaybackPlan = {
 };
 
 export type PlaybackPlan = {
+  target: "browser" | "airplay";
+  capability_evidence: string;
   preferred_strategy: "direct_play" | "transcode";
   direct_play_supported: boolean;
   decision_reason: string;
@@ -158,10 +160,13 @@ export type PlaybackPlan = {
   audio: Array<AudioPlaybackPlan>;
 };
 
+export type RemotePlaybackResource = { kind: "airplay"; url: string };
+
 export type PlaybackSession = {
   gid: string;
   tracks: Array<PlaybackTrack>;
   playback_plan: PlaybackPlan;
+  remote?: RemotePlaybackResource | null;
 };
 
 export type WebSocketAuthenticate = { type: "authenticate"; token: string };

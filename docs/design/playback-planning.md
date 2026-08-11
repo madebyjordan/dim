@@ -41,6 +41,25 @@ separate lazy FFmpeg jobs, so exposing all of them as an adaptive ladder would b
 different manifest model and spend admission, CPU, and memory on renditions the viewer may never
 use. Device-specific codec profiles also remain deferred playback work.
 
+## AirPlay target
+
+AirPlay is the first remote playback target. WebKit supplies route availability, the system target
+picker, and wireless-route state on an `HTMLMediaElement`; it does not expose the selected
+receiver's codec, HDR, resolution, or channel-layout capabilities. Local Safari codec queries are
+therefore never treated as receiver evidence. Until stronger target evidence is available, the
+planner takes the conservative Apple HLS compatibility path: H.264 High Profile SDR video and
+stereo AAC-LC audio. The existing source-aware recipes still decide which source streams must be
+changed and retain the existing source-bounded rendition ladder.
+
+The browser creates a separate, lazy AirPlay playback session and gives WebKit a native HLS URL.
+The URL contains a random token scoped to that playback session because the receiver fetches the
+HLS resource itself and cannot send Grin's browser authorization header. Every playlist, init
+segment, and media segment revalidates that token against the owning session. The multivariant and
+media playlists reuse the existing fMP4 jobs; no second compatibility or transcoding pipeline is
+introduced. Selecting a wireless route transfers play, pause, seek, progress, termination, and
+error ownership to the AirPlay media element, and disconnecting restores the position to local
+DASH playback.
+
 Nightfall remains vendored only as a narrow FFmpeg/fMP4 compatibility adapter. Dim owns planning,
 admission, ownership, TTL, and cleanup. Remaining replacement work is documented in
 `vendor/nightfall/DIM_PATCHES.md`.

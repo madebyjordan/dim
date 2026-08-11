@@ -11,7 +11,7 @@ import { updateVideo } from "../../../../actions/video";
 function VideoActionPlayPause() {
   const dispatch = useDispatch();
 
-  const { player } = useContext(VideoPlayerContext);
+  const { playbackController } = useContext(VideoPlayerContext);
 
   const { video } = useSelector(
     (store) => ({
@@ -27,8 +27,8 @@ function VideoActionPlayPause() {
       })
     );
 
-    player.play();
-  }, [dispatch, player]);
+    playbackController.play();
+  }, [dispatch, playbackController]);
 
   const pause = useCallback(() => {
     dispatch(
@@ -37,17 +37,17 @@ function VideoActionPlayPause() {
       })
     );
 
-    player.pause();
-  }, [dispatch, player]);
+    playbackController.pause();
+  }, [dispatch, playbackController]);
 
   const handleKeyDown = useCallback(
     (e) => {
       if (e.key !== " ") return;
       if (e.target !== document.body) return;
 
-      player.isPaused() ? play() : pause();
+      playbackController.isPaused() ? play() : pause();
     },
-    [pause, play, player]
+    [pause, play, playbackController]
   );
 
   useEffect(() => {

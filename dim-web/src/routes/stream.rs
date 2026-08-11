@@ -14,8 +14,8 @@ use dim_core::streaming::codec::{
 use dim_core::streaming::ffprobe::{FFPStream, FFProbeCtx};
 use dim_core::streaming::get_avc1_tag;
 use dim_core::streaming::planner::{
-    plan_audio, plan_video, AudioAction, AudioSource, BrowserCapabilities, BrowserVideoCapability,
-    PlaybackPlan, VideoSource,
+    plan_audio_for_target, plan_video_for_target, AudioAction, AudioSource, BrowserCapabilities,
+    BrowserVideoCapability, PlaybackPlan, PlaybackTargetKind, VideoSource,
 };
 use dim_core::utils::{bitrate_to_label, quality_to_label};
 use dim_database::mediafile::MediaFile;
@@ -44,6 +44,8 @@ pub struct VirtualManifestParams {
     video_capability: Option<String>,
     #[serde(default)]
     capabilities: Option<String>,
+    #[serde(default)]
+    target: PlaybackTargetKind,
 }
 
 pub async fn return_virtual_manifest(
@@ -81,14 +83,32 @@ pub async fn return_virtual_manifest(
                 .and_then(|value| serde_json::from_str::<BrowserVideoCapability>(value).ok()),
             audio: Vec::new(),
         });
-    let (tracks, plan) = build_tracks(&info, &media, &user.prefs, params.force_ass, &capabilities)?;
+    let target = params.target;
+    let (tracks, plan) = build_tracks(
+        &info,
+        &media,
+        &user.prefs,
+        params.force_ass,
+        &capabilities,
+        target,
+    )?;
     let gid = Uuid::new_v4();
     stream_tracking.create_session(gid, owner, tracks).await;
+    let remote = if target == PlaybackTargetKind::Airplay {
+        let token = stream_tracking.enable_remote_access(&gid, owner).await?;
+        Some(json!({
+            "kind": "airplay",
+            "url": format!("/api/v1/remote/{gid}/master.m3u8?token={token}"),
+        }))
+    } else {
+        None
+    };
     Ok(Json(json!({
         "tracks": stream_tracking.inspect(&gid, owner).await?,
         "gid": gid.to_string(),
         "playback_plan": plan,
         "probe_source": if reused_probe { "ingestion" } else { "fallback" },
+        "remote": remote,
     }))
     .into_response())
 }
@@ -204,6 +224,7 @@ fn build_tracks(
     prefs: &UserSettings,
     force_ass: bool,
     capabilities: &BrowserCapabilities,
+    target: PlaybackTargetKind,
 ) -> Result<(Vec<PlannedTrack>, PlaybackPlan), DimErrorWrapper> {
     let video = info
         .get_primary("video")
@@ -227,7 +248,7 @@ fn build_tracks(
     let frame_rate = video.frame_rate().unwrap_or(30);
     let source_codec_descriptor = codec_descriptor(&video);
     let source_is_hdr = is_hdr(&video);
-    let mut plan = plan_video(
+    let mut plan = plan_video_for_target(
         &VideoSource {
             codec: video.codec_name.clone(),
             profile: video.profile.clone(),
@@ -247,6 +268,7 @@ fn build_tracks(
             hdr: source_is_hdr,
         },
         capabilities,
+        target,
     );
     let mut tracks = Vec::new();
     let direct_is_default = direct_play_is_default(
@@ -374,7 +396,7 @@ fn build_tracks(
             .as_deref()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
-        let audio_plan = plan_audio(
+        let audio_plan = plan_audio_for_target(
             AudioSource {
                 stream_index: audio.index,
                 codec: audio.codec_name.clone(),
@@ -386,10 +408,21 @@ fn build_tracks(
                 remux_supported: audio_remux_supported(audio),
             },
             capabilities,
+            target,
         );
         let preserve = audio_plan.chosen_action == AudioAction::Preserve;
         plan.audio.push(audio_plan);
-        let output = browser_aac_output(source_channels, audio.channel_layout.as_deref());
+        let output = if target == PlaybackTargetKind::Airplay {
+            // WebKit does not expose the selected route's channel capabilities. Apple's HLS
+            // compatibility guidance identifies stereo AAC as the universal fallback.
+            BrowserAacOutput {
+                channels: 2,
+                layout: "stereo",
+                filter: None,
+            }
+        } else {
+            browser_aac_output(source_channels, audio.channel_layout.as_deref())
+        };
         let bitrate = if output.channels < source_channels {
             fallback_audio_bitrate(output.channels)
         } else {
@@ -585,6 +618,219 @@ fn direct_play_is_default(
             DefaultVideoQuality::DirectPlay => true,
             DefaultVideoQuality::Resolution(height, _) => *height >= source_height,
         }
+}
+
+#[derive(Deserialize)]
+pub struct RemoteAccessParams {
+    token: String,
+}
+
+fn compile_remote_master(
+    tracks: &[VirtualManifest],
+    gid: Uuid,
+    token: &str,
+) -> Result<String, dim_core::errors::StreamingErrors> {
+    let video = tracks
+        .iter()
+        .find(|track| track.content_type == ContentType::Video && track.is_default)
+        .or_else(|| {
+            tracks
+                .iter()
+                .find(|track| track.content_type == ContentType::Video)
+        })
+        .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+    let audio = tracks
+        .iter()
+        .find(|track| track.content_type == ContentType::Audio && track.is_default)
+        .or_else(|| {
+            tracks
+                .iter()
+                .find(|track| track.content_type == ContentType::Audio)
+        });
+    let audio_group = audio.map(|track| {
+        format!(
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{}\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"{}\",URI=\"/api/v1/remote/{gid}/{}/index.m3u8?token={token}\"\n",
+            track.label.replace('"', ""),
+            track.audio_channels.unwrap_or(2),
+            track.id,
+        )
+    });
+    let codecs = audio
+        .map(|track| format!("{},{}", video.codecs, track.codecs))
+        .unwrap_or_else(|| video.codecs.clone());
+    let bandwidth = video.bandwidth + audio.map(|track| track.bandwidth).unwrap_or(0);
+    let resolution = video
+        .args
+        .get("width")
+        .zip(video.args.get("height"))
+        .map(|(width, height)| format!(",RESOLUTION={width}x{height}"))
+        .unwrap_or_default();
+    let audio_attribute = audio.map(|_| ",AUDIO=\"audio\"").unwrap_or_default();
+    Ok(format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n{}#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codecs}\"{resolution}{audio_attribute}\n/api/v1/remote/{gid}/{}/index.m3u8?token={token}\n",
+        audio_group.unwrap_or_default(),
+        video.id,
+    ))
+}
+
+fn compile_remote_media_playlist(
+    track: &VirtualManifest,
+    gid: Uuid,
+    token: &str,
+) -> Result<String, dim_core::errors::StreamingErrors> {
+    let duration = track
+        .duration
+        .filter(|duration| *duration > 0)
+        .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)? as u64;
+    let segment_duration = u64::from(track.target_duration.max(1));
+    let segment_count = duration.div_ceil(segment_duration);
+    let mut body = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{segment_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"/api/v1/remote/{gid}/{}/init.mp4?token={token}\"\n",
+        track.id,
+    );
+    for index in 0..segment_count {
+        let elapsed = index * segment_duration;
+        let length = (duration - elapsed).min(segment_duration);
+        body.push_str(&format!(
+            "#EXTINF:{length}.000,\n/api/v1/remote/{gid}/{}/{index}.m4s?token={token}\n",
+            track.id,
+        ));
+    }
+    body.push_str("#EXT-X-ENDLIST\n");
+    Ok(body)
+}
+
+pub async fn return_remote_master(
+    State(AppState {
+        stream_tracking, ..
+    }): State<AppState>,
+    Path(gid): Path<String>,
+    Query(params): Query<RemoteAccessParams>,
+) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let gid =
+        Uuid::parse_str(&gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
+    let owner = stream_tracking
+        .authenticate_remote(&gid, &params.token)
+        .await?;
+    let tracks = stream_tracking.inspect(&gid, owner).await?;
+    let body = compile_remote_master(&tracks, gid, &params.token)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    ))
+}
+
+pub async fn return_remote_media_playlist(
+    State(AppState {
+        state,
+        stream_tracking,
+        ..
+    }): State<AppState>,
+    Path((gid, public_id)): Path<(String, String)>,
+    Query(params): Query<RemoteAccessParams>,
+) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let gid =
+        Uuid::parse_str(&gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
+    let owner = stream_tracking
+        .authenticate_remote(&gid, &params.token)
+        .await?;
+    let (_, process_id) = stream_tracking
+        .remote_track(&gid, owner, &public_id)
+        .await?;
+    if process_id.is_none() {
+        stream_tracking
+            .activate_public_track(&state, &public_id, owner)
+            .await?;
+    }
+    let (track, process_id) = stream_tracking
+        .remote_track(&gid, owner, &public_id)
+        .await?;
+    let _process_id = process_id.ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+    let body = compile_remote_media_playlist(&track, gid, &params.token)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    ))
+}
+
+async fn resolve_remote_process(
+    tracking: &StreamTracking,
+    gid: &str,
+    public_id: &str,
+    token: &str,
+) -> Result<(Uuid, i64, String), DimErrorWrapper> {
+    let gid = Uuid::parse_str(gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
+    let owner = tracking.authenticate_remote(&gid, token).await?;
+    let (_, process_id) = tracking.remote_track(&gid, owner, public_id).await?;
+    Ok((
+        gid,
+        owner,
+        process_id.ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?,
+    ))
+}
+
+pub async fn get_remote_init(
+    State(AppState {
+        state,
+        stream_tracking,
+        ..
+    }): State<AppState>,
+    Path((gid, public_id)): Path<(String, String)>,
+    Query(params): Query<RemoteAccessParams>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, DimErrorWrapper> {
+    let (gid, owner, process_id) =
+        resolve_remote_process(&stream_tracking, &gid, &public_id, &params.token).await?;
+    match timeout_segment(
+        || state.chunk_init_request(process_id.clone(), 0),
+        Duration::from_millis(100),
+        100,
+    )
+    .await
+    {
+        Ok(path) => Ok(reply_with_file(path, "video/mp4", &headers, true).await),
+        Err(error) => {
+            stop_failed_transcode(&state, &stream_tracking, gid, owner, &process_id, &error).await;
+            Err(error.into())
+        }
+    }
+}
+
+pub async fn get_remote_chunk(
+    State(AppState {
+        state,
+        stream_tracking,
+        ..
+    }): State<AppState>,
+    Path((gid, public_id, chunk)): Path<(String, String, String)>,
+    Query(params): Query<RemoteAccessParams>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, DimErrorWrapper> {
+    let chunk_num = chunk
+        .strip_suffix(".m4s")
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+    let (gid, owner, process_id) =
+        resolve_remote_process(&stream_tracking, &gid, &public_id, &params.token).await?;
+    match timeout_segment(
+        || state.chunk_request(process_id.clone(), chunk_num),
+        Duration::from_millis(100),
+        100,
+    )
+    .await
+    {
+        Ok(path) => Ok(reply_with_file(path, "video/iso.segment", &headers, true).await),
+        Err(error) => {
+            stop_failed_transcode(&state, &stream_tracking, gid, owner, &process_id, &error).await;
+            Err(error.into())
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -996,6 +1242,39 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=7-"), 10), Ok(Some((7, 9))));
         assert_eq!(parse_range(Some("bytes=-3"), 10), Ok(Some((7, 9))));
         assert!(parse_range(Some("bytes=12-14"), 10).is_err());
+    }
+
+    #[test]
+    fn airplay_hls_uses_selected_tracks_and_scoped_urls() {
+        let video = VirtualManifest::new("video".into(), ContentType::Video)
+            .set_mime("video/mp4")
+            .set_codecs("avc1.640028")
+            .set_bandwidth(10_000_000)
+            .set_duration(Some(12))
+            .set_args([("width", 1920), ("height", 800)])
+            .set_is_default(true);
+        let audio = VirtualManifest::new("audio".into(), ContentType::Audio)
+            .set_mime("audio/mp4")
+            .set_codecs("mp4a.40.2")
+            .set_bandwidth(128_000)
+            .set_duration(Some(12))
+            .set_audio_channels(Some(2))
+            .set_label("English (AAC Stereo)".into())
+            .set_is_default(true);
+        let gid = Uuid::nil();
+        let master = compile_remote_master(&[video.clone(), audio], gid, "secret").unwrap();
+        assert!(master.contains("CODECS=\"avc1.640028,mp4a.40.2\""));
+        assert!(master.contains("RESOLUTION=1920x800"));
+        assert!(master.contains("CHANNELS=\"2\""));
+        assert!(master.contains("/audio/index.m3u8?token=secret"));
+        assert!(master.contains("/video/index.m3u8?token=secret"));
+
+        let media = compile_remote_media_playlist(&video, gid, "secret").unwrap();
+        assert!(media.contains("#EXT-X-MAP:URI="));
+        assert_eq!(media.matches("#EXTINF:").count(), 3);
+        assert!(media.contains("#EXTINF:2.000,"));
+        assert!(media.ends_with("#EXT-X-ENDLIST\n"));
+        assert_eq!(media.matches("token=secret").count(), 4);
     }
 
     #[test]

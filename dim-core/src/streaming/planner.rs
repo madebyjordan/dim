@@ -4,6 +4,14 @@
 use super::{Quality, VIDEO_QUALITIES};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackTargetKind {
+    #[default]
+    Browser,
+    Airplay,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackStrategy {
@@ -118,6 +126,8 @@ pub struct AudioPlaybackPlan {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlaybackPlan {
+    pub target: PlaybackTargetKind,
+    pub capability_evidence: &'static str,
     pub preferred_strategy: PlaybackStrategy,
     pub direct_play_supported: bool,
     pub decision_reason: &'static str,
@@ -141,11 +151,23 @@ fn capability_is_inconclusive(
 }
 
 pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> PlaybackPlan {
+    plan_video_for_target(source, capabilities, PlaybackTargetKind::Browser)
+}
+
+pub fn plan_video_for_target(
+    source: &VideoSource,
+    capabilities: &BrowserCapabilities,
+    target: PlaybackTargetKind,
+) -> PlaybackPlan {
     let expected_content_type = source
         .codec_descriptor
         .as_ref()
         .map(|codec| format!("video/mp4; codecs=\"{codec}\""));
-    let capability = capabilities.video.as_ref();
+    // WebKit's AirPlay API exposes route availability and selection, but no receiver codec
+    // capabilities. Local Safari decode results are not evidence about the selected receiver.
+    let capability = (target == PlaybackTargetKind::Browser)
+        .then_some(capabilities.video.as_ref())
+        .flatten();
     let exact_source_match = capability
         .zip(expected_content_type.as_ref())
         .is_some_and(|(capability, expected)| capability.content_type == *expected);
@@ -177,8 +199,31 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
     let renditions = source_bounded_qualities(source.height, source.bitrate)
         .into_iter()
         .filter(|quality| !direct_play_supported || quality.height < source.height)
+        .map(|mut quality| {
+            // Apple's maximum-compatibility H.264 contract is High Profile Level 4.1. Keep
+            // anamorphic/wide sources inside a 1920-pixel encoded width while preserving aspect
+            // ratio; ordinary 16:9 1080p sources remain unchanged.
+            if target == PlaybackTargetKind::Airplay
+                && source.width.saturating_mul(quality.height)
+                    > 1920_u64.saturating_mul(source.height)
+            {
+                quality.height = source
+                    .height
+                    .saturating_mul(1920)
+                    .checked_div(source.width)
+                    .unwrap_or(quality.height)
+                    .max(2)
+                    & !1;
+            }
+            quality
+        })
         .collect();
     PlaybackPlan {
+        target,
+        capability_evidence: match target {
+            PlaybackTargetKind::Browser => "source_specific_browser_decode_query",
+            PlaybackTargetKind::Airplay => "webkit_route_availability_only",
+        },
         preferred_strategy: if direct_play_supported {
             PlaybackStrategy::DirectPlay
         } else {
@@ -210,15 +255,27 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
 }
 
 pub fn plan_audio(source: AudioSource, capabilities: &BrowserCapabilities) -> AudioPlaybackPlan {
+    plan_audio_for_target(source, capabilities, PlaybackTargetKind::Browser)
+}
+
+pub fn plan_audio_for_target(
+    source: AudioSource,
+    capabilities: &BrowserCapabilities,
+    target: PlaybackTargetKind,
+) -> AudioPlaybackPlan {
     let expected_content_type = source
         .codec_descriptor
         .as_ref()
         .map(|codec| format!("audio/mp4; codecs=\"{codec}\""));
-    let capability = capabilities
-        .audio
-        .iter()
-        .find(|capability| capability.stream_index == source.stream_index)
-        .cloned();
+    let capability = (target == PlaybackTargetKind::Browser)
+        .then(|| {
+            capabilities
+                .audio
+                .iter()
+                .find(|capability| capability.stream_index == source.stream_index)
+                .cloned()
+        })
+        .flatten();
     let exact_source_match = capability
         .as_ref()
         .zip(expected_content_type.as_ref())
@@ -392,6 +449,66 @@ mod tests {
             ..av1_source(true)
         };
         assert!(plan_video(&source, &supported(&source)).direct_play_supported);
+    }
+
+    #[test]
+    fn airplay_does_not_treat_local_webkit_decode_evidence_as_receiver_evidence() {
+        let source = VideoSource {
+            width: 3840,
+            height: 1600,
+            bitrate: 11_618_576,
+            level: Some(12),
+            color_space: Some("bt2020nc".into()),
+            color_transfer: Some("smpte2084".into()),
+            color_primaries: Some("bt2020".into()),
+            chroma_location: None,
+            codec_descriptor: Some("av01.0.12M.10.0.110.09.16.09.0".into()),
+            hdr: true,
+            ..av1_source(true)
+        };
+        let plan = plan_video_for_target(&source, &supported(&source), PlaybackTargetKind::Airplay);
+        assert_eq!(plan.target, PlaybackTargetKind::Airplay);
+        assert_eq!(plan.capability_evidence, "webkit_route_availability_only");
+        assert_eq!(plan.preferred_strategy, PlaybackStrategy::Transcode);
+        assert_eq!(plan.decision_reason, "client_capability_unavailable");
+        assert_eq!(
+            plan.renditions[0],
+            Quality {
+                height: 800,
+                bitrate: 10_000_000
+            }
+        );
+    }
+
+    #[test]
+    fn airplay_matrix_audio_falls_back_when_receiver_codec_support_is_unknown() {
+        let source = AudioSource {
+            stream_index: 1,
+            codec: "eac3".into(),
+            codec_descriptor: Some("ec-3".into()),
+            channels: 6,
+            channel_layout: Some("5.1(side)".into()),
+            bitrate: 576_000,
+            sample_rate: 48_000,
+            remux_supported: true,
+        };
+        let capabilities = BrowserCapabilities {
+            video: None,
+            audio: vec![BrowserAudioCapability {
+                stream_index: 1,
+                content_type: "audio/mp4; codecs=\"ec-3\"".into(),
+                can_play_type: true,
+                media_source: true,
+                supported: true,
+                smooth: true,
+                power_efficient: Some(true),
+                can_play_type_result: CanPlayTypeResult::Probably,
+                media_capabilities_result: MediaCapabilitiesResult::Supported,
+            }],
+        };
+        let plan = plan_audio_for_target(source, &capabilities, PlaybackTargetKind::Airplay);
+        assert_eq!(plan.chosen_action, AudioAction::TranscodeAac);
+        assert_eq!(plan.decision_reason, "client_capability_unavailable");
     }
 
     #[test]

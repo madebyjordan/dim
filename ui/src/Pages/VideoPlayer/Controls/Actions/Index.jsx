@@ -8,6 +8,7 @@ import SeekForward from "./SeekForward";
 import Subtitles from "./Subtitles";
 import Fullscreen from "./Fullscreen";
 import VideoActionSettings from "./Settings";
+import AirPlay from "./AirPlay";
 
 import NextVideo from "./NextVideo";
 import PrevVideo from "./PrevVideo";
@@ -81,6 +82,7 @@ function VideoActions(props) {
         <NextVideo />
       </section>
       <section className="right">
+        <AirPlay />
         <VideoActionSettings />
         <Subtitles />
         <Fullscreen />

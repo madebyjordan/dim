@@ -96,13 +96,15 @@ export const foundation = v1.injectEndpoints({
         fileId: string;
         forceAss: boolean;
         capabilities: BrowserCapabilities;
+        target?: "browser" | "airplay";
       }
     >({
-      query: ({ fileId, forceAss, capabilities }) => ({
+      query: ({ fileId, forceAss, capabilities, target = "browser" }) => ({
         url: `stream/${fileId}/manifest`,
         params: {
           force_ass: forceAss,
           capabilities: JSON.stringify(capabilities),
+          target,
         },
       }),
       invalidatesTags: ["Playback"],
