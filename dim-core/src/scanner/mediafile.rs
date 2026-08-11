@@ -259,6 +259,7 @@ impl MediafileCreator {
                 .map(ToString::to_string),
             file_size: Some(fingerprint.size as i64),
             modified_ns: Some(fingerprint.modified_ns.min(i64::MAX as u128) as i64),
+            probe_metadata: serde_json::to_string(&video_metadata).ok(),
             ..Default::default()
         })
     }

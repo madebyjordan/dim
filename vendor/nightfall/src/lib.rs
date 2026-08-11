@@ -19,11 +19,11 @@ use crate::patch::segment::patch_segment;
 use crate::profiles::*;
 use crate::session::Session;
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 use std::time::Instant;
-use async_trait::async_trait;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -138,15 +138,9 @@ impl StateManager {
         profile_args.output_ctx.outdir = format!("{}/{}", &self.outdir, session_id);
         profile_args.ffmpeg_bin = self.ffmpeg.clone();
 
-        info!(
-            "Session {} chain {}", &session_id, chain
-        );
+        info!("Session {} chain {}", &session_id, chain);
 
-        let new_session = Session::new(
-            session_id.clone(),
-            profile_chain,
-            profile_args,
-        );
+        let new_session = Session::new(session_id.clone(), profile_chain, profile_args);
 
         self.sessions.insert(session_id.clone(), new_session);
 
@@ -164,6 +158,7 @@ impl StateManager {
         // until we get something that works or we exhaust all our profiles.
         if let Some(status) = session.exit_status.take() {
             if !status.success() {
+                session.join().await;
                 if let Some(x) = session.next_profile() {
                     info!("Session {} chunk={} trying profile {}", &id, chunk, x);
                     session.reset_to(session.start_num());
@@ -177,7 +172,7 @@ impl StateManager {
             if session.start_num() != chunk {
                 session.join().await;
                 session.reset_to(chunk);
-                let _ = session.start().await;
+                session.start().await?;
 
                 let stat = self.stream_stats.entry(id).or_default();
                 stat.hard_seeked_at = chunk;
@@ -188,7 +183,7 @@ impl StateManager {
         }
 
         if !session.has_started() {
-            let _ = session.start().await;
+            session.start().await?;
         }
 
         if session.is_chunk_done(chunk) {
@@ -208,8 +203,22 @@ impl StateManager {
             .ok_or(NightfallError::SessionDoesntExist)?;
         let stats = self.stream_stats.entry(id.clone()).or_default();
 
+        if session.try_wait()
+            && session
+                .exit_status
+                .as_ref()
+                .is_some_and(|status| !status.success())
+        {
+            session.join().await;
+            if session.next_profile().is_some() {
+                session.reset_to(chunk);
+            } else {
+                return Err(NightfallError::ProfileChainExhausted);
+            }
+        }
+
         if !session.has_started() {
-            let _ = session.start().await;
+            session.start().await?;
         }
 
         if !session.is_chunk_done(chunk) {
@@ -232,7 +241,7 @@ impl StateManager {
             if should_hard_seek {
                 session.join().await;
                 session.reset_to(chunk);
-                let _ = session.start().await;
+                session.start().await?;
 
                 stats.last_hard_seek = Instant::now();
                 stats.hard_seeked_at = chunk;
@@ -261,21 +270,21 @@ impl StateManager {
                     if session.chunks_since_init >= 1 {
                         debug!("Got a partial segment, patching because the user has most likely seeked.");
 
-                match patch_init_segment(
-                    session.init_seg(),
-                    chunk_path.clone(),
-                    real_segment,
-                )
-                    .await
-                    {
-                        Ok(seq) => session.real_segment = seq,
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "Failed to patch init segment."
-                            )
+                        match patch_init_segment(
+                            session.init_seg(),
+                            chunk_path.clone(),
+                            real_segment,
+                        )
+                        .await
+                        {
+                            Ok(seq) => session.real_segment = seq,
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "Failed to patch init segment."
+                                )
+                            }
                         }
-                    }
                     }
                 }
                 Err(e) => {
@@ -335,27 +344,23 @@ impl StateManager {
 
     #[handler]
     async fn die(&mut self, id: String) -> Result<()> {
-        let session = self
+        let mut session = self
             .sessions
-            .get_mut(&id)
+            .remove(&id)
             .ok_or(NightfallError::SessionDoesntExist)?;
         info!("Killing session {}", id);
         session.join().await;
-        session.set_timeout();
+        self.exit_statuses
+            .insert(id.clone(), session.stderr().unwrap_or_default());
+        self.stream_stats.remove(&id);
+        session.delete_tmp();
 
         Ok(())
     }
 
     #[handler]
     async fn die_ignore_gc(&mut self, id: String) -> Result<()> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-        info!("Killing session {}", id);
-        session.join().await;
-
-        Ok(())
+        self.die(id).await
     }
 
     #[handler]
@@ -365,8 +370,22 @@ impl StateManager {
             .get_mut(&id)
             .ok_or(NightfallError::SessionDoesntExist)?;
 
+        if session.try_wait()
+            && session
+                .exit_status
+                .as_ref()
+                .is_some_and(|status| !status.success())
+        {
+            session.join().await;
+            if session.next_profile().is_some() {
+                session.reset_to(0);
+            } else {
+                return Err(NightfallError::ProfileChainExhausted);
+            }
+        }
+
         if !session.has_started() {
-            let _ = session.start().await;
+            session.start().await?;
         }
 
         session.subtitle(name).ok_or(NightfallError::ChunkNotDone)
@@ -374,12 +393,13 @@ impl StateManager {
 
     #[handler]
     async fn get_stderr(&mut self, id: String) -> Result<String> {
-        // TODO: Move this out of here, instead we should just return the log file.
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-        session.stderr().ok_or(NightfallError::Aborted)
+        if let Some(session) = self.sessions.get_mut(&id) {
+            return session.stderr().ok_or(NightfallError::Aborted);
+        }
+        self.exit_statuses
+            .get(&id)
+            .cloned()
+            .ok_or(NightfallError::SessionDoesntExist)
     }
 
     #[handler]
@@ -440,6 +460,7 @@ impl StateManager {
     async fn shutdown_all(&mut self) -> Result<()> {
         for session in self.sessions.values_mut() {
             session.join().await;
+            session.delete_tmp();
         }
         self.sessions.clear();
         self.stream_stats.clear();
@@ -468,13 +489,19 @@ impl StateManager {
 
     #[handler]
     async fn is_done(&self, id: String) -> Result<bool> {
-        let session = self.sessions.get(&id).ok_or(NightfallError::SessionDoesntExist)?;
+        let session = self
+            .sessions
+            .get(&id)
+            .ok_or(NightfallError::SessionDoesntExist)?;
         Ok(session.is_dead())
     }
 
     #[handler]
     async fn has_started(&self, id: String) -> Result<bool> {
-        let session = self.sessions.get(&id).ok_or(NightfallError::SessionDoesntExist)?;
+        let session = self
+            .sessions
+            .get(&id)
+            .ok_or(NightfallError::SessionDoesntExist)?;
         Ok(session.has_started())
     }
 }

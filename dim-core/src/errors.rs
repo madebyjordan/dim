@@ -110,6 +110,10 @@ pub enum StreamingErrors {
     GidParseError,
     /// The requested file does not exist on disk.
     FileDoesNotExist,
+    /// Transcoding capacity is currently exhausted: {0}
+    AdmissionLimited(String),
+    /// Invalid source metadata: {0}
+    InvalidMetadata(String),
 }
 
 impl From<sqlx::Error> for StreamingErrors {

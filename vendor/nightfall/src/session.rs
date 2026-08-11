@@ -100,11 +100,15 @@ impl Session {
     }
 
     pub async fn start(&mut self) -> Result<(), io::Error> {
-        // make sure we actually have a path to write files to.
-        self.has_started = true;
-        self.is_throttled = false;
-
-        let args = self.profile.build(self.profile_ctx.clone()).unwrap();
+        let args = self
+            .profile
+            .build(self.profile_ctx.clone())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FFmpeg profile rejected the source",
+                )
+            })?;
 
         let _ = std::fs::create_dir_all(&self.profile_ctx.output_ctx.outdir);
         let log_file = format!(
@@ -135,13 +139,15 @@ impl Session {
             .spawn()?;
 
         self.child_pid = process.id();
+        self.exit_status = None;
+        self.has_started = true;
+        self.is_throttled = false;
 
         debug!(pid = self.child_pid, ffmpeg = %self.profile_ctx.ffmpeg_bin, ?args, "Started ffmpeg");
 
         if !self.profile.is_stdio_stream() {
-            if let Some(stdout) = process.stdout.take() {
-                let stdout_parser_thread =
-                    StdoutParser::new(self.id.clone(), stdout, self.child_pid.clone().unwrap());
+            if let (Some(stdout), Some(pid)) = (process.stdout.take(), self.child_pid) {
+                let stdout_parser_thread = StdoutParser::new(self.id.clone(), stdout, pid);
 
                 self._process = Some(tokio::spawn(stdout_parser_thread.handle()));
             }
@@ -175,6 +181,9 @@ impl Session {
             process.abort();
             let _ = process.await;
         }
+        if let Ok(mut stats) = STREAMING_SESSION.write() {
+            stats.remove(&self.id);
+        }
     }
 
     pub fn stderr(&mut self) -> Option<String> {
@@ -191,7 +200,15 @@ impl Session {
             return Some(buf);
         }
 
-        Some(buf.split_off(buf.len() - 1000))
+        Some(
+            buf.chars()
+                .rev()
+                .take(1000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect(),
+        )
     }
 
     pub fn try_wait(&mut self) -> bool {
@@ -250,6 +267,7 @@ impl Session {
     }
 
     pub fn current_chunk(&self) -> u32 {
+        let frame_rate = self.profile_ctx.input_ctx.fps.max(1.0);
         let frame = match self.profile.stream_type() {
             StreamType::Audio { .. } => {
                 self.get_key("out_time_us")
@@ -257,7 +275,7 @@ impl Session {
                     .unwrap_or(0)
                     / 1000
                     / 1000
-                    * 24
+                    * frame_rate as u64
             }
             StreamType::Video { .. } => self
                 .get_key("frame")
@@ -267,9 +285,12 @@ impl Session {
         } as u32;
 
         match self.profile.stream_type() {
-            StreamType::Audio { .. } => (frame / (self.chunk_size * 24)).max(self.last_chunk),
+            StreamType::Audio { .. } => {
+                (frame / (self.chunk_size as f64 * frame_rate) as u32).max(self.last_chunk)
+            }
             StreamType::Video { .. } => {
-                frame / (self.chunk_size * 24) + self.profile_ctx.output_ctx.start_num
+                frame / (self.chunk_size as f64 * frame_rate) as u32
+                    + self.profile_ctx.output_ctx.start_num
             }
             _ => 0,
         }
@@ -346,8 +367,7 @@ impl Session {
     pub fn custom_init_seg(&self, start_num: u32) -> String {
         format!(
             "{}/{}_init.mp4",
-            self.profile_ctx.output_ctx.outdir,
-            start_num
+            self.profile_ctx.output_ctx.outdir, start_num
         )
     }
 
@@ -407,10 +427,14 @@ impl StdoutParser {
                 },
 
                 Some(Ok(v)) = stdio.next() => {
-                    let output: Vec<&str> = v.split('=').collect();
-
-                    // remove whitespace on both ends
-                    map.insert(output[0].into(), output[1].trim_start().trim_end().into());
+                    let Some((key, value)) = v.split_once('=') else {
+                        debug!(line = %v, "Ignoring malformed FFmpeg progress output");
+                        continue;
+                    };
+                    if key.is_empty() {
+                        continue;
+                    }
+                    map.insert(key.into(), value.trim().into());
 
                     {
                         let mut lock = STREAMING_SESSION.write().unwrap();
@@ -424,5 +448,123 @@ impl StdoutParser {
 
         let mut lock = STREAMING_SESSION.write().unwrap();
         let _ = lock.remove(&self.id);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::error::NightfallError;
+    use crate::profiles::{ProfileType, TranscodingProfile};
+
+    #[derive(Debug)]
+    struct ShellProfile;
+
+    impl TranscodingProfile for ShellProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+        fn build(&self, _: ProfileContext) -> Option<Vec<String>> {
+            Some(vec![
+                "-c".into(),
+                "echo malformed-progress; sleep 30".into(),
+            ])
+        }
+        fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
+            Ok(())
+        }
+        fn tag(&self) -> &str {
+            "shell"
+        }
+        fn name(&self) -> &str {
+            "shell"
+        }
+    }
+
+    static SHELL_PROFILE: ShellProfile = ShellProfile;
+
+    #[derive(Debug)]
+    struct FailingProfile;
+    impl TranscodingProfile for FailingProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+        fn build(&self, _: ProfileContext) -> Option<Vec<String>> {
+            Some(vec!["-c".into(), "exit 7".into()])
+        }
+        fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
+            Ok(())
+        }
+        fn tag(&self) -> &str {
+            "failing-shell"
+        }
+        fn name(&self) -> &str {
+            "failing-shell"
+        }
+    }
+    static FAILING_PROFILE: FailingProfile = FailingProfile;
+
+    fn context(outdir: &Path, binary: &str) -> ProfileContext {
+        ProfileContext {
+            ffmpeg_bin: binary.into(),
+            output_ctx: crate::profiles::OutputCtx {
+                outdir: outdir.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_does_not_mark_the_session_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "spawn-failure".into(),
+            vec![&SHELL_PROFILE],
+            context(temp.path(), "/missing/dim-ffmpeg"),
+        );
+        assert!(session.start().await.is_err());
+        assert!(!session.has_started());
+        assert!(session.real_process.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_reaps_process_and_malformed_progress_is_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "cancel".into(),
+            vec![&SHELL_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        session.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        session.join().await;
+        assert!(session.real_process.is_none());
+        assert!(session.child_pid.is_none());
+        assert!(STREAMING_SESSION.read().unwrap().get("cancel").is_none());
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_is_observed_for_profile_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "failure".into(),
+            vec![&FAILING_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        session.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(session.try_wait());
+        assert!(session
+            .exit_status
+            .as_ref()
+            .is_some_and(|status| !status.success()));
+        session.join().await;
     }
 }

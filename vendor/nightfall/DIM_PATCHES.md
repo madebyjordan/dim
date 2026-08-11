@@ -12,3 +12,9 @@ which corrupts FFmpeg 8 output and prevents DASH playback from starting.
 Nightfall's process-state helper calls a `psutil` status API that is not implemented on macOS. Dim
 uses the native Unix signal existence check on macOS so failed and completed FFmpeg sessions can be
 observed and cleaned up without panicking.
+
+Milestone 3 treats this vendor directory as a compatibility adapter. Dim owns playback planning,
+admission, ownership, and lifecycle outside Nightfall. The adapter propagates profile-build/spawn
+failures, observes nonzero exits, ignores malformed progress lines, and removes process statistics
+and output files during cancellation and shutdown. Remaining replacement work is to move fMP4
+patching and process signalling behind maintained platform-neutral components.

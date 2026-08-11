@@ -136,9 +136,15 @@ pub enum Role {
     User,
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
+#[derive(Copy, Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, sqlx::Type)]
 #[sqlx(transparent)]
 pub struct UserID(pub(crate) i64);
+
+impl UserID {
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(transparent)]

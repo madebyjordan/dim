@@ -60,6 +60,7 @@ pub struct MediaFile {
     /// Size and modification time captured when the file was accepted as stable.
     pub file_size: Option<i64>,
     pub modified_ns: Option<i64>,
+    pub probe_metadata: Option<String>,
     /// Metadata identity is intentionally nullable for pre-migration records.
     pub metadata_provider: Option<String>,
     pub provider_external_id: Option<String>,
@@ -275,6 +276,7 @@ pub struct InsertableMediaFile {
     pub audio_language: Option<String>,
     pub file_size: Option<i64>,
     pub modified_ns: Option<i64>,
+    pub probe_metadata: Option<String>,
     pub metadata_provider: Option<String>,
     pub provider_external_id: Option<String>,
     pub match_provenance: Option<String>,
@@ -312,8 +314,8 @@ impl InsertableMediaFile {
             r#"
             INSERT INTO mediafile (media_id, library_id, target_file, raw_name, raw_year, quality,
             codec, container, audio, original_resolution, duration, episode, season, corrupt, channels, profile, audio_language,
-            file_size, modified_ns, metadata_provider, provider_external_id, match_provenance, match_confidence, manual_override, missing_since)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+            file_size, modified_ns, probe_metadata, metadata_provider, provider_external_id, match_provenance, match_confidence, manual_override, missing_since)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
         "#,
             self.media_id,
             self.library_id,
@@ -334,6 +336,7 @@ impl InsertableMediaFile {
             self.audio_language,
             self.file_size,
             self.modified_ns,
+            self.probe_metadata,
             self.metadata_provider,
             self.provider_external_id,
             self.match_provenance,
@@ -368,6 +371,7 @@ pub struct UpdateMediaFile {
     pub audio_language: Option<String>,
     pub file_size: Option<i64>,
     pub modified_ns: Option<i64>,
+    pub probe_metadata: Option<String>,
     pub metadata_provider: Option<String>,
     pub provider_external_id: Option<String>,
     pub match_provenance: Option<String>,
@@ -415,6 +419,7 @@ impl UpdateMediaFile {
             "UPDATE mediafile SET audio_language = ? WHERE id = ?" => (self.audio_language, id),
             "UPDATE mediafile SET file_size = ? WHERE id = ?" => (self.file_size, id),
             "UPDATE mediafile SET modified_ns = ? WHERE id = ?" => (self.modified_ns, id),
+            "UPDATE mediafile SET probe_metadata = ? WHERE id = ?" => (self.probe_metadata, id),
             "UPDATE mediafile SET metadata_provider = ? WHERE id = ?" => (self.metadata_provider, id),
             "UPDATE mediafile SET provider_external_id = ? WHERE id = ?" => (self.provider_external_id, id),
             "UPDATE mediafile SET match_provenance = ? WHERE id = ?" => (self.match_provenance, id),

@@ -57,6 +57,8 @@ pub struct Stream {
     pub profile: Option<String>,
     pub codec_type: String,
     pub codec_time_base: Option<String>,
+    pub r_frame_rate: Option<String>,
+    pub avg_frame_rate: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
     pub coded_width: Option<i64>,
@@ -93,6 +95,19 @@ impl Stream {
 
     pub fn get_title(&self) -> Option<String> {
         self.tags.as_ref()?.title.clone()
+    }
+
+    pub fn frame_rate(&self) -> Option<u64> {
+        self.avg_frame_rate
+            .as_deref()
+            .or(self.r_frame_rate.as_deref())
+            .and_then(|rate| {
+                let (numerator, denominator) = rate.split_once('/')?;
+                let numerator = numerator.parse::<f64>().ok()?;
+                let denominator = denominator.parse::<f64>().ok()?;
+                (denominator > 0.0).then_some((numerator / denominator).round() as u64)
+            })
+            .filter(|rate| *rate > 0)
     }
 }
 

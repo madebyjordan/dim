@@ -1,4 +1,5 @@
 pub mod ffprobe;
+pub mod planner;
 
 use cfg_if::cfg_if;
 
@@ -59,14 +60,14 @@ pub fn ffcheck() -> Vec<Result<Box<str>, &'static str>> {
     results
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct Quality {
     pub height: u64,
     pub bitrate: u64,
 }
 
-pub fn get_qualities(_height: u64, _bitrate: u64) -> Vec<&'static Quality> {
-    VIDEO_QUALITIES.iter().collect()
+pub fn get_qualities(height: u64, bitrate: u64) -> Vec<Quality> {
+    planner::source_bounded_qualities(height, bitrate)
 }
 
 pub const VIDEO_QUALITIES: [Quality; 3] = [
@@ -113,7 +114,10 @@ pub fn get_avc1_tag(width: u64, height: u64, bitrate: u64, framerate: u64) -> Av
             && blocks_per_sec < x.macro_blocks_rate as f64
     });
 
-    avc1_levels.next().cloned().unwrap()
+    avc1_levels
+        .next()
+        .cloned()
+        .unwrap_or_else(|| AVC1_LEVELS.last().expect("AVC1 levels are defined").clone())
 }
 
 pub const AVC1_LEVELS: [Avc1Level; 20] = [

@@ -1,6 +1,7 @@
 use axum::response::IntoResponse;
 use axum::response::Response;
 use dim_core::errors::DimError;
+use dim_core::stream_tracking::TrackingError;
 use dim_database::DatabaseError;
 use http::StatusCode;
 
@@ -44,6 +45,29 @@ impl From<nightfall::error::NightfallError> for DimErrorWrapper {
     }
 }
 
+impl From<TrackingError> for DimErrorWrapper {
+    fn from(error: TrackingError) -> Self {
+        match error {
+            TrackingError::NotOwner => Self(DimError::Unauthorized),
+            TrackingError::NotFound => Self(DimError::StreamingError(
+                dim_core::errors::StreamingErrors::SessionDoesntExist,
+            )),
+            TrackingError::AdmissionLimited { .. } => Self(DimError::StreamingError(
+                dim_core::errors::StreamingErrors::AdmissionLimited(error.to_string()),
+            )),
+            TrackingError::InvalidMetadata => Self(DimError::StreamingError(
+                dim_core::errors::StreamingErrors::InvalidMetadata(error.to_string()),
+            )),
+            TrackingError::InvalidSelection => Self(DimError::StreamingError(
+                dim_core::errors::StreamingErrors::InvalidRequest,
+            )),
+            TrackingError::Transcoder(_) => Self(DimError::StreamingError(
+                dim_core::errors::StreamingErrors::ProcFailed,
+            )),
+        }
+    }
+}
+
 impl IntoResponse for DimErrorWrapper {
     fn into_response(self) -> Response {
         let status_code = match &self.0 {
@@ -59,6 +83,18 @@ impl IntoResponse for DimErrorWrapper {
             DimError::UsernameNotAvailable => StatusCode::CONFLICT,
             DimError::UploadFailed => StatusCode::INTERNAL_SERVER_ERROR,
             DimError::DatabaseError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            DimError::StreamingError(dim_core::errors::StreamingErrors::SessionDoesntExist) => {
+                StatusCode::NOT_FOUND
+            }
+            DimError::StreamingError(dim_core::errors::StreamingErrors::InvalidRequest) => {
+                StatusCode::BAD_REQUEST
+            }
+            DimError::StreamingError(dim_core::errors::StreamingErrors::AdmissionLimited(_)) => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+            DimError::StreamingError(dim_core::errors::StreamingErrors::InvalidMetadata(_)) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             DimError::StreamingError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DimError::ScannerError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DimError::CookieError(_) => StatusCode::BAD_REQUEST,

@@ -191,9 +191,16 @@ function VideoPlayer() {
       })
     );
 
-    const includes = `${videoTracks.list
-      .map((track) => track.id)
-      .join(",")},${audioTracks.list.map((track) => track.id).join(",")}`;
+    // Manifest selection is also the backend's process admission boundary. Start only the
+    // preferred video/audio tracks; alternate renditions remain inspectable but lazy.
+    const preferredTrack = (tracks) =>
+      tracks.find((track) => track.is_default) || tracks[0];
+    const includes = [
+      preferredTrack(videoTracks.list)?.id,
+      preferredTrack(audioTracks.list)?.id,
+    ]
+      .filter(Boolean)
+      .join(",");
     const url = `/api/v1/stream/${video.gid}/manifest.mpd?start_num=0&should_kill=false&includes=${includes}`;
     const mediaPlayer = MediaPlayer().create();
 

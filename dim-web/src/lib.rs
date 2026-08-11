@@ -311,6 +311,22 @@ pub async fn start_webserver(
 
     let event_repeater_handle = tokio::spawn(event_repeater.into_future());
 
+    let cleanup_tracking = stream_tracking.clone();
+    let cleanup_state = state.clone();
+    let cleanup_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let cleaned = cleanup_tracking.cleanup_expired(&cleanup_state).await;
+            if cleaned > 0 {
+                tracing::info!(cleaned, "Expired inactive playback sessions");
+            }
+        }
+    });
+
+    let shutdown_tracking = stream_tracking.clone();
+    let shutdown_state = state.clone();
     let app = AppState::new(conn, socket_tx, event_tx, state, stream_tracking)
         .with_library_workers(library_workers);
     let router = build_router(app);
@@ -321,6 +337,10 @@ pub async fn start_webserver(
     if let Err(error) = result {
         tracing::error!(?error, "HTTP server stopped with an error");
     }
+
+    cleanup_handle.abort();
+    let _ = cleanup_handle.await;
+    shutdown_tracking.shutdown(&shutdown_state).await;
 
     event_repeater_handle.abort();
     let _ = event_repeater_handle.await;
