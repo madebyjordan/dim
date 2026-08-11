@@ -70,6 +70,10 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
         && source.bitrate <= 6_300_000
         && source.frame_rate <= 24;
     let direct_play_supported = h264_supported || verified_av1_supported;
+    let renditions = source_bounded_qualities(source.height, source.bitrate)
+        .into_iter()
+        .filter(|quality| !direct_play_supported || quality.height < source.height)
+        .collect();
     PlaybackPlan {
         preferred_strategy: if direct_play_supported {
             PlaybackStrategy::DirectPlay
@@ -84,7 +88,7 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
         } else {
             "source_codec_not_verified_for_client"
         },
-        renditions: source_bounded_qualities(source.height, source.bitrate),
+        renditions,
     }
 }
 
@@ -131,6 +135,13 @@ mod tests {
         );
         assert_eq!(plan.preferred_strategy, PlaybackStrategy::DirectPlay);
         assert!(plan.direct_play_supported);
+        assert_eq!(
+            plan.renditions
+                .iter()
+                .map(|quality| quality.height)
+                .collect::<Vec<_>>(),
+            vec![720, 480]
+        );
     }
 
     fn verified_av1_source() -> VideoSource {
@@ -167,6 +178,28 @@ mod tests {
         assert_eq!(
             plan.decision_reason,
             "client_verified_av1_main10_bt709_1080p24_fmp4"
+        );
+        assert_eq!(
+            plan.renditions
+                .iter()
+                .map(|quality| quality.height)
+                .collect::<Vec<_>>(),
+            vec![720, 480]
+        );
+    }
+
+    #[test]
+    fn keeps_source_resolution_transcode_when_direct_play_is_unavailable() {
+        let mut source = verified_av1_source();
+        source.codec = "hevc".into();
+        let plan = plan_video(&source, &BrowserCapabilities::default());
+        assert!(!plan.direct_play_supported);
+        assert_eq!(
+            plan.renditions
+                .iter()
+                .map(|quality| quality.height)
+                .collect::<Vec<_>>(),
+            vec![1080, 720, 480]
         );
     }
 

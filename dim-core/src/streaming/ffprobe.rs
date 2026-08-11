@@ -85,7 +85,11 @@ pub struct Stream {
 
 impl Stream {
     pub fn get_bitrate(&self) -> Option<u64> {
-        self.tags.as_ref()?.bps_eng.as_ref()?.parse::<u64>().ok()
+        self.bit_rate
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| self.tags.as_ref()?.bps_eng.as_deref()?.parse::<u64>().ok())
+            .filter(|bitrate| *bitrate > 0)
     }
 
     pub fn get_codec(&self) -> &str {
@@ -347,6 +351,32 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(file.path(), permissions).unwrap();
         file.into_temp_path()
+    }
+
+    #[test]
+    fn reads_standard_stream_level_bitrate() {
+        let stream = Stream {
+            bit_rate: Some("6277855".into()),
+            ..Default::default()
+        };
+        assert_eq!(stream.get_bitrate(), Some(6_277_855));
+    }
+
+    #[test]
+    fn falls_back_to_matroska_stream_statistics_bitrate() {
+        let stream = Stream {
+            tags: Some(Tags {
+                bps_eng: Some("5000000".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(stream.get_bitrate(), Some(5_000_000));
+    }
+
+    #[test]
+    fn does_not_invent_a_stream_bitrate() {
+        assert_eq!(Stream::default().get_bitrate(), None);
     }
 
     #[tokio::test]

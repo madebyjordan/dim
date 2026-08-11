@@ -16,54 +16,71 @@ const video = {
     video: {
       current: 0,
       list: [
-        { label: "1080p", set_id: "loaded-video" },
-        { label: "720p", set_id: "absent-video" },
+        { label: "Direct Play (1080p)", set_id: "loaded-video" },
+        { label: "720p · 5 Mb/s", set_id: "absent-video" },
+        { label: "480p · 1 Mb/s", set_id: "low-video" },
       ],
     },
     audio: { current: 0, list: [] },
   },
 };
 
-function renderSettings(player, dispatch = vi.fn()) {
+function renderSettings(
+  player,
+  dispatch = vi.fn(),
+  changeVideoQuality = vi.fn()
+) {
   useDispatch.mockReturnValue(dispatch);
   useSelector.mockImplementation((selector) => selector({ video }));
 
   render(
-    <VideoPlayerContext.Provider value={{ player }}>
+    <VideoPlayerContext.Provider value={{ changeVideoQuality, player }}>
       <VideoMenuSettings />
     </VideoPlayerContext.Provider>
   );
 
-  return dispatch;
+  return { changeVideoQuality, dispatch };
 }
 
-it("does not report success when a planned video track is absent from the manifest", () => {
+it("requests lazy activation without reporting success immediately", () => {
   const player = {
     getTracksFor: vi.fn().mockReturnValue([{ id: "loaded-video" }]),
     setCurrentTrack: vi.fn(),
   };
-  const dispatch = renderSettings(player);
+  const { changeVideoQuality, dispatch } = renderSettings(player);
 
   userEvent.click(screen.getByText("Video tracks"));
-  userEvent.click(screen.getByText("720p"));
+  userEvent.click(screen.getByText("720p · 5 Mb/s"));
 
   expect(player.setCurrentTrack).not.toHaveBeenCalled();
+  expect(changeVideoQuality).toHaveBeenCalledWith(1);
   expect(dispatch).not.toHaveBeenCalled();
-  expect(screen.getByText("1080p").parentElement).toHaveClass("active");
-  expect(screen.getByText("720p").parentElement).not.toHaveClass("active");
+  expect(screen.getByText("Direct Play (1080p)").parentElement).toHaveClass(
+    "active"
+  );
+  expect(screen.getByText("720p · 5 Mb/s").parentElement).not.toHaveClass(
+    "active"
+  );
+  expect(screen.getByText("480p · 1 Mb/s")).toBeInTheDocument();
+  expect(screen.queryByText("1080p · 10 Mb/s")).not.toBeInTheDocument();
 });
 
-it("updates the selected video track after dash.js confirms it is loaded", () => {
-  const loadedTrack = { id: "absent-video" };
+it("keeps direct dash.js track switching for audio", () => {
+  video.tracks.audio.list = [
+    { label: "English", set_id: "loaded-audio" },
+    { label: "French", set_id: "french-audio" },
+  ];
   const player = {
-    getTracksFor: vi.fn().mockReturnValue([loadedTrack]),
+    getTracksFor: vi
+      .fn()
+      .mockReturnValue([{ id: "loaded-audio" }, { id: "french-audio" }]),
     setCurrentTrack: vi.fn(),
   };
-  const dispatch = renderSettings(player);
+  const { dispatch } = renderSettings(player);
 
-  userEvent.click(screen.getByText("Video tracks"));
-  userEvent.click(screen.getByText("720p"));
+  userEvent.click(screen.getByText("Audio tracks"));
+  userEvent.click(screen.getByText("French"));
 
-  expect(player.setCurrentTrack).toHaveBeenCalledWith(loadedTrack);
+  expect(player.setCurrentTrack).toHaveBeenCalledWith({ id: "french-audio" });
   expect(dispatch).toHaveBeenCalledTimes(1);
 });

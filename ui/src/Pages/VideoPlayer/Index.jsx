@@ -27,6 +27,7 @@ import SsaSubtitles from "./SsaSubtitles";
 import NextVideo from "./NextVideo/Index";
 import BackButton from "./BackButton";
 import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
+import { buildPlaybackManifestUrl } from "./QualitySwitch";
 import { createPlaybackState } from "./Navigation";
 import { supportsVerifiedAv1Playback } from "./VideoCapabilities";
 import {
@@ -67,6 +68,7 @@ function VideoPlayer() {
   const videoPlayer = useRef(null);
   const overlay = useRef(null);
   const videoRef = useRef(null);
+  const pendingVideoSwitch = useRef(null);
 
   const { data: media } = useGetMediaQuery(
     video.mediaID ? video.mediaID : skipToken
@@ -227,7 +229,12 @@ function VideoPlayer() {
     ]
       .filter(Boolean)
       .join(",");
-    const url = `/api/v1/stream/${video.gid}/manifest.mpd?start_num=0&should_kill=false&includes=${includes}`;
+    const [videoId, audioId] = includes.split(",");
+    const url = buildPlaybackManifestUrl({
+      audioId,
+      gid: video.gid,
+      videoId,
+    });
     const mediaPlayer = MediaPlayer().create();
 
     let settings = {
@@ -353,6 +360,61 @@ function VideoPlayer() {
     [dispatch, player]
   );
 
+  const changeVideoQuality = useCallback(
+    async (trackIndex) => {
+      if (!player || pendingVideoSwitch.current) return;
+      if (trackIndex === videoTracks.current) return;
+      const target = videoTracks.list[trackIndex];
+      if (!target) return;
+      const audio =
+        audioTracks.list[audioTracks.current] ||
+        audioTracks.list.find((track) => track.is_default) ||
+        audioTracks.list[0];
+      const url = buildPlaybackManifestUrl({
+        audioId: audio?.id,
+        gid: video.gid,
+        replaceVideo: true,
+        videoId: target.id,
+      });
+      const pending = {
+        position: videoRef.current?.currentTime || 0,
+        targetIndex: trackIndex,
+        targetSetId: target.set_id,
+        wasPaused: videoRef.current?.paused ?? false,
+      };
+      pendingVideoSwitch.current = pending;
+
+      try {
+        // Preflight activation keeps the current rendition playing if admission or profile
+        // creation fails. The same URL is then loaded by dash.js to make the prepared rendition
+        // effective.
+        const response = await fetch(url, {
+          headers: { Authorization: auth.token },
+        });
+        if (!response.ok) {
+          throw new Error(`quality activation failed (${response.status})`);
+        }
+        dispatch(updateVideo({ waiting: true }));
+        player.attachSource(url);
+      } catch (error) {
+        pendingVideoSwitch.current = null;
+        dispatch(updateVideo({ waiting: false }));
+        console.error(
+          "[video] quality switch failed; continuing current rendition",
+          error
+        );
+      }
+    },
+    [
+      audioTracks,
+      auth.token,
+      dispatch,
+      player,
+      video.gid,
+      videoTracks,
+    ]
+  );
+
   useEffect(() => {
     if (video.showSubSwitcher) return;
     dispatch(incIdleCount());
@@ -364,6 +426,8 @@ function VideoPlayer() {
     overlay: overlay.current,
     seekTo,
     player,
+    pendingVideoSwitch,
+    changeVideoQuality,
   };
 
   const showNextVideoAfter = (media && media.chapters?.credits) || 0;

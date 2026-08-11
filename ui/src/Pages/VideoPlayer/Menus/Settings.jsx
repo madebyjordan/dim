@@ -11,7 +11,7 @@ import ChevronRightIcon from "../../../assets/Icons/ChevronRight";
 function VideoMenuSettings() {
   const dispatch = useDispatch();
 
-  const { player } = useContext(VideoPlayerContext);
+  const { changeVideoQuality, player } = useContext(VideoPlayerContext);
 
   const { video } = useSelector(
     (store) => ({
@@ -46,10 +46,11 @@ function VideoMenuSettings() {
 
   const changeTrack = useCallback(
     (trackType, i) => {
-      const tracks =
-        trackType === "video"
-          ? video.tracks.video.list
-          : video.tracks.audio.list;
+      if (trackType === "video") {
+        void changeVideoQuality(parseInt(i));
+        return;
+      }
+      const tracks = video.tracks.audio.list;
 
       const playerTracks = player.getTracksFor(trackType);
       const selectedTrack = playerTracks.find(
@@ -74,7 +75,7 @@ function VideoMenuSettings() {
         })
       );
     },
-    [dispatch, player, video]
+    [changeVideoQuality, dispatch, player, video]
   );
 
   useEffect(() => {

@@ -559,6 +559,103 @@ impl StreamTracking {
         compile_manifest(&manifests, start_num)
     }
 
+    /// Replace the active video recipe without accumulating inactive video processes.
+    ///
+    /// The replacement is admitted against the post-swap process count. Creating a Nightfall
+    /// session does not start FFmpeg; the new process starts only when dash.js requests its init
+    /// segment. If planning the replacement fails, the previous video remains registered.
+    pub async fn replace_video_and_compile(
+        &self,
+        state: &StateManager,
+        gid: &Uuid,
+        owner: i64,
+        start_num: u64,
+        includes: Vec<String>,
+    ) -> Result<String, TrackingError> {
+        let selected = includes.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get(gid).ok_or(TrackingError::NotFound)?;
+        if session.owner != owner {
+            return Err(TrackingError::NotOwner);
+        }
+        let selected_video_count = session
+            .tracks
+            .iter()
+            .filter(|track| {
+                selected.contains(track.plan.manifest.id.as_str())
+                    && track.plan.manifest.content_type == ContentType::Video
+            })
+            .count();
+        let selects_unstarted_non_video = session.tracks.iter().any(|track| {
+            selected.contains(track.plan.manifest.id.as_str())
+                && track.plan.manifest.content_type != ContentType::Video
+                && track.process_id.is_none()
+        });
+        if selected_video_count != 1 || selects_unstarted_non_video {
+            return Err(TrackingError::InvalidSelection);
+        }
+
+        // Manifest compilation is deterministic apart from process IDs. Validate it before
+        // changing admission state so malformed metadata cannot strand the previous rendition.
+        let prospective_manifests = session
+            .tracks
+            .iter()
+            .filter(|track| selected.contains(track.plan.manifest.id.as_str()))
+            .map(|track| {
+                track
+                    .plan
+                    .manifest
+                    .activated(track.process_id.as_deref().unwrap_or("pending"))
+            })
+            .collect::<Vec<_>>();
+        compile_manifest(&prospective_manifests, start_num)?;
+
+        let retiring = session
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| {
+                track.plan.manifest.content_type == ContentType::Video
+                    && !selected.contains(track.plan.manifest.id.as_str())
+            })
+            .filter_map(|(index, track)| Some((index, track.process_id.clone()?)))
+            .collect::<Vec<_>>();
+
+        // Temporarily remove the old video from admission accounting. Nightfall's create call is
+        // lazy, so no replacement FFmpeg process exists concurrently with the retiring process.
+        for (index, process_id) in &retiring {
+            inner.process_index.remove(process_id);
+            inner.sessions.get_mut(gid).unwrap().tracks[*index].process_id = None;
+        }
+        if let Err(error) = self
+            .activate_locked(state, &mut inner, *gid, owner, &includes)
+            .await
+        {
+            for (index, process_id) in &retiring {
+                inner.process_index.insert(process_id.clone(), *gid);
+                inner.sessions.get_mut(gid).unwrap().tracks[*index].process_id =
+                    Some(process_id.clone());
+            }
+            return Err(error);
+        }
+
+        let manifests = inner.sessions[gid]
+            .tracks
+            .iter()
+            .filter(|track| selected.contains(track.plan.manifest.id.as_str()))
+            .filter_map(|track| Some(track.plan.manifest.activated(track.process_id.as_deref()?)))
+            .collect::<Vec<_>>();
+        let manifest = compile_manifest(&manifests, start_num)?;
+        drop(inner);
+
+        for (_, process_id) in retiring {
+            if let Err(error) = state.die(process_id.clone()).await {
+                tracing::warn!(session_id = %gid, owner, process_id, %error, "Retired video process cleanup failed");
+            }
+        }
+        Ok(manifest)
+    }
+
     pub async fn active_manifests(
         &self,
         gid: &Uuid,
@@ -750,6 +847,27 @@ mod tests {
             profile: PlannedProfile::Video,
         }
     }
+
+    fn direct_video(id: &str) -> PlannedTrack {
+        let mut context = ProfileContext::default();
+        context.input_ctx.codec = "h264".into();
+        context.output_ctx.codec = "h264".into();
+        PlannedTrack {
+            manifest: VirtualManifest::new(id.into(), ContentType::Video).set_duration(Some(60)),
+            context,
+            profile: PlannedProfile::DirectVideo,
+        }
+    }
+
+    fn audio_track(id: &str) -> PlannedTrack {
+        let mut context = ProfileContext::default();
+        context.output_ctx.codec = "aac".into();
+        PlannedTrack {
+            manifest: VirtualManifest::new(id.into(), ContentType::Audio).set_duration(Some(60)),
+            context,
+            profile: PlannedProfile::Audio,
+        }
+    }
     #[test]
     fn representative_manifest_has_valid_adaptation_sets_and_channels() {
         let manifest = VirtualManifest::new("audio".into(), ContentType::Audio)
@@ -806,6 +924,92 @@ mod tests {
         let inner = tracking.inner.read().await;
         assert!(inner.process_index.is_empty());
         assert!(inner.sessions[&gid].tracks[0].process_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn video_replacement_uses_post_swap_admission_and_retires_the_old_recipe() {
+        nightfall::profiles::profiles_init("/bin/false".into());
+        let tracking = StreamTracking::with_policy(TranscodePolicy {
+            global_limit: 2,
+            per_user_limit: 2,
+            per_session_limit: 2,
+            session_ttl: Duration::from_secs(60),
+        });
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session(
+                gid,
+                7,
+                vec![
+                    direct_video("video-a"),
+                    direct_video("video-b"),
+                    audio_track("audio"),
+                ],
+            )
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateManager::new(
+            &mut Tokio::Global,
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        tracking
+            .activate_and_compile(&state, &gid, 7, 0, vec!["video-a".into(), "audio".into()])
+            .await
+            .unwrap();
+
+        let xml = tracking
+            .replace_video_and_compile(&state, &gid, 7, 0, vec!["video-b".into(), "audio".into()])
+            .await
+            .unwrap();
+        assert!(xml.contains("video-b"));
+        assert!(!xml.contains("video-a"));
+        let active = tracking.active_manifests(&gid, 7).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|(track, _)| track.id == "video-b"));
+        assert!(active.iter().any(|(track, _)| track.id == "audio"));
+    }
+
+    #[tokio::test]
+    async fn rejected_video_replacement_keeps_the_current_recipe_active() {
+        nightfall::profiles::profiles_init("/bin/false".into());
+        let tracking = StreamTracking::with_policy(TranscodePolicy {
+            global_limit: 2,
+            per_user_limit: 2,
+            per_session_limit: 2,
+            session_ttl: Duration::from_secs(60),
+        });
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session(gid, 7, vec![direct_video("video-a"), audio_track("audio")])
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateManager::new(
+            &mut Tokio::Global,
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        tracking
+            .activate_and_compile(&state, &gid, 7, 0, vec!["video-a".into(), "audio".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tracking
+                .replace_video_and_compile(
+                    &state,
+                    &gid,
+                    7,
+                    0,
+                    vec!["missing-video".into(), "audio".into()],
+                )
+                .await,
+            Err(TrackingError::InvalidSelection)
+        );
+        let active = tracking.active_manifests(&gid, 7).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|(track, _)| track.id == "video-a"));
+        assert!(active.iter().any(|(track, _)| track.id == "audio"));
     }
 
     #[tokio::test]

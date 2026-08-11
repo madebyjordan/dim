@@ -346,29 +346,43 @@ macro_rules! json_expect_expr_comma {
 }
 
 pub fn quality_to_label(q_bitrate: u64, q_height: u64, brate: Option<u64>) -> String {
-    let bandwidth_ident = if brate.unwrap_or(q_bitrate) > 1_000_000 {
-        "Mb/s"
-    } else {
-        "kb/s"
-    };
+    format!(
+        "{}p · {}",
+        q_height,
+        bitrate_to_label(brate.unwrap_or(q_bitrate))
+    )
+}
 
-    let bandwidth_norm = if brate.unwrap_or(q_bitrate) > 1_000_000 {
-        q_bitrate / 1_000_000
+pub fn bitrate_to_label(bitrate: u64) -> String {
+    if bitrate >= 1_000_000 {
+        let value = bitrate as f64 / 1_000_000.0;
+        let value = if bitrate % 1_000_000 == 0 {
+            format!("{value:.0}")
+        } else {
+            format!("{value:.2}")
+        };
+        format!("{value} Mb/s")
     } else {
-        q_bitrate / 1_000
-    };
-
-    format!("{}p@{}{}", q_height, bandwidth_norm, bandwidth_ident)
+        format!("{} kb/s", bitrate / 1_000)
+    }
 }
 
 #[cfg(test)]
 mod quality_label_tests {
-    use super::quality_to_label;
+    use super::{bitrate_to_label, quality_to_label};
 
     #[test]
-    fn labels_bit_rates_as_bits_per_second() {
-        assert_eq!(quality_to_label(6_277_855, 1080, None), "1080p@6Mb/s");
-        assert_eq!(quality_to_label(1_000_000, 480, None), "480p@1000kb/s");
+    fn labels_configured_quality_as_resolution_and_bitrate() {
+        assert_eq!(quality_to_label(5_000_000, 720, None), "720p · 5 Mb/s");
+        assert_eq!(
+            quality_to_label(1_000_000, 480, Some(1_000_000)),
+            "480p · 1 Mb/s"
+        );
+    }
+
+    #[test]
+    fn retains_useful_precision_for_non_round_stream_bitrates() {
+        assert_eq!(bitrate_to_label(6_277_855), "6.28 Mb/s");
     }
 }
 

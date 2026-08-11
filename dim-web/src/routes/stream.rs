@@ -8,11 +8,9 @@ use dim_core::stream_tracking::{
     ContentType, PlannedProfile, PlannedTrack, StreamTracking, VirtualManifest,
 };
 use dim_core::streaming::ffprobe::{FFPStream, FFProbeCtx};
-use dim_core::streaming::planner::{
-    plan_video, BrowserCapabilities, PlaybackPlan, PlaybackStrategy, VideoSource,
-};
-use dim_core::streaming::{get_avc1_tag, get_qualities, level_to_tag};
-use dim_core::utils::quality_to_label;
+use dim_core::streaming::planner::{plan_video, BrowserCapabilities, PlaybackPlan, VideoSource};
+use dim_core::streaming::{get_avc1_tag, level_to_tag};
+use dim_core::utils::{bitrate_to_label, quality_to_label};
 use dim_database::mediafile::MediaFile;
 use dim_database::user::{DefaultVideoQuality, User, UserSettings};
 use futures::stream;
@@ -158,8 +156,8 @@ fn build_tracks(
         .ok_or_else(|| {
             dim_core::errors::StreamingErrors::InvalidMetadata("video width is missing".into())
         })?;
-    let bitrate = video
-        .get_bitrate()
+    let stream_bitrate = video.get_bitrate();
+    let bitrate = stream_bitrate
         .or_else(|| info.get_container_bitrate())
         .filter(|value| *value > 0)
         .ok_or_else(|| {
@@ -191,6 +189,11 @@ fn build_tracks(
         capabilities,
     );
     let mut tracks = Vec::new();
+    let direct_is_default = direct_play_is_default(
+        &prefs.default_video_quality,
+        height,
+        plan.direct_play_supported,
+    );
 
     if plan.direct_play_supported {
         let id = Uuid::new_v4().to_string();
@@ -224,19 +227,15 @@ fn build_tracks(
                 .set_codecs(codec_tag)
                 .set_bandwidth(bitrate)
                 .set_args([("width", width), ("height", height)])
-                .set_is_default(matches!(
-                    prefs.default_video_quality,
-                    DefaultVideoQuality::DirectPlay
-                ))
+                .set_is_default(direct_is_default)
                 .set_target_duration(10)
-                .set_label(format!("{height}p (Direct Play)")),
+                .set_label(direct_play_label(height, stream_bitrate)),
             context,
             profile: PlannedProfile::DirectVideo,
         });
     }
 
-    let mut assigned_default = plan.preferred_strategy == PlaybackStrategy::DirectPlay
-        && matches!(prefs.default_video_quality, DefaultVideoQuality::DirectPlay);
+    let mut assigned_default = direct_is_default;
     let preferred_resolution_available = match prefs.default_video_quality {
         DefaultVideoQuality::Resolution(resolution, _) => plan
             .renditions
@@ -244,7 +243,7 @@ fn build_tracks(
             .any(|quality| quality.height == resolution),
         DefaultVideoQuality::DirectPlay => plan.direct_play_supported,
     };
-    for quality in get_qualities(height, bitrate) {
+    for quality in plan.renditions.iter().copied() {
         let target_width =
             ((width as f64 * quality.height as f64 / height as f64).round() as u64).max(2) & !1;
         let is_preferred_resolution = matches!(prefs.default_video_quality, DefaultVideoQuality::Resolution(res, _) if res == quality.height);
@@ -392,12 +391,36 @@ fn fallback_audio_bitrate(channels: u64) -> u64 {
     channels.saturating_mul(64_000).max(128_000)
 }
 
+fn direct_play_label(height: u64, stream_bitrate: Option<u64>) -> String {
+    match stream_bitrate {
+        Some(bitrate) => format!(
+            "Direct Play ({height}p, {})",
+            bitrate_to_label(bitrate).replace(' ', "")
+        ),
+        None => format!("Direct Play ({height}p)"),
+    }
+}
+
+fn direct_play_is_default(
+    preference: &DefaultVideoQuality,
+    source_height: u64,
+    direct_play_supported: bool,
+) -> bool {
+    direct_play_supported
+        && match preference {
+            DefaultVideoQuality::DirectPlay => true,
+            DefaultVideoQuality::Resolution(height, _) => *height >= source_height,
+        }
+}
+
 #[derive(Deserialize)]
 pub struct ManifestParams {
     start_num: Option<u64>,
     #[allow(dead_code)]
     should_kill: Option<bool>,
     includes: Option<String>,
+    #[serde(default)]
+    replace_video: bool,
 }
 
 pub async fn return_manifest(
@@ -429,15 +452,27 @@ pub async fn return_manifest(
                 .map(|track| track.id.clone())
                 .collect()
         });
-    let manifest = stream_tracking
-        .activate_and_compile(
-            &state,
-            &gid,
-            user.id.get(),
-            params.start_num.unwrap_or(0),
-            includes,
-        )
-        .await?;
+    let manifest = if params.replace_video {
+        stream_tracking
+            .replace_video_and_compile(
+                &state,
+                &gid,
+                user.id.get(),
+                params.start_num.unwrap_or(0),
+                includes,
+            )
+            .await?
+    } else {
+        stream_tracking
+            .activate_and_compile(
+                &state,
+                &gid,
+                user.id.get(),
+                params.start_num.unwrap_or(0),
+                includes,
+            )
+            .await?
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "application/dash+xml"),
@@ -795,6 +830,34 @@ mod tests {
         assert_eq!(fallback_audio_bitrate(2), 128_000);
         assert_eq!(fallback_audio_bitrate(6), 384_000);
         assert_eq!(fallback_audio_bitrate(8), 512_000);
+    }
+
+    #[test]
+    fn direct_play_label_uses_only_reliable_stream_bitrate() {
+        assert_eq!(direct_play_label(1080, None), "Direct Play (1080p)");
+        assert_eq!(
+            direct_play_label(1080, Some(6_277_855)),
+            "Direct Play (1080p, 6.28Mb/s)"
+        );
+    }
+
+    #[test]
+    fn source_resolution_preference_uses_non_redundant_direct_play() {
+        assert!(direct_play_is_default(
+            &DefaultVideoQuality::Resolution(1080, 10_000_000),
+            1080,
+            true
+        ));
+        assert!(!direct_play_is_default(
+            &DefaultVideoQuality::Resolution(720, 5_000_000),
+            1080,
+            true
+        ));
+        assert!(!direct_play_is_default(
+            &DefaultVideoQuality::DirectPlay,
+            1080,
+            false
+        ));
     }
 
     #[test]

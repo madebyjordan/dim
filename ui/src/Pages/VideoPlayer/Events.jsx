@@ -4,6 +4,7 @@ import { MediaPlayer } from "dashjs";
 
 import { VideoPlayerContext } from "./Context";
 import { consumeRetryPosition, stopFailedPlayback } from "./PlaybackFailure";
+import { effectiveTrackIndex } from "./QualitySwitch";
 
 import {
   setManifestState,
@@ -13,7 +14,8 @@ import {
 
 function VideoEvents() {
   const dispatch = useDispatch();
-  const { player } = useContext(VideoPlayerContext);
+  const { pendingVideoSwitch, player, videoRef } =
+    useContext(VideoPlayerContext);
   const failureHandled = useRef(false);
 
   const { token, video } = useSelector(
@@ -35,18 +37,40 @@ function VideoEvents() {
     );
   }, [dispatch]);
 
+  const confirmVideoSwitch = useCallback(() => {
+    const pending = pendingVideoSwitch.current;
+    if (!pending) return false;
+    const effectiveIndex = effectiveTrackIndex(
+      video.tracks.video.list,
+      player.getCurrentTrackFor("video")
+    );
+    if (
+      effectiveIndex !== pending.targetIndex ||
+      String(video.tracks.video.list[effectiveIndex]?.set_id) !==
+        String(pending.targetSetId)
+    ) {
+      return false;
+    }
+
+    pendingVideoSwitch.current = null;
+    dispatch(updateTrack("video", { current: effectiveIndex }));
+    dispatch(
+      updateVideo({
+        currentTime: videoRef.current?.currentTime || pending.position,
+        waiting: false,
+      })
+    );
+    if (pending.wasPaused) videoRef.current?.pause();
+    return true;
+  }, [dispatch, pendingVideoSwitch, player, video.tracks.video.list, videoRef]);
+
   const eCanPlay = useCallback(() => {
     console.log("[VIDEO] can play");
 
     // we need to do all this shit so that the UI selects the correct tracks.
-    const videoQualityIndex = player.getQualityFor("video");
-    const videoQuality =
-      player.getBitrateInfoListFor("video")[videoQualityIndex];
-
-    const playerVideoTrackIdx = video.tracks.video.list.filter(
-      (track) =>
-        track.bandwidth === videoQuality.bitrate &&
-        parseInt(track.height) === videoQuality.height
+    const effectiveVideoIndex = effectiveTrackIndex(
+      video.tracks.video.list,
+      player.getCurrentTrackFor("video")
     );
 
     const audioTrack = player.getCurrentTrackFor("audio");
@@ -54,11 +78,10 @@ function VideoEvents() {
       (track) => track.set_id === audioTrack.id
     );
 
-    dispatch(
-      updateTrack("video", {
-        current: video.tracks.video.list.indexOf(playerVideoTrackIdx[0]),
-      })
-    );
+    const pending = pendingVideoSwitch.current;
+    if (!pending && effectiveVideoIndex >= 0) {
+      dispatch(updateTrack("video", { current: effectiveVideoIndex }));
+    }
 
     dispatch(
       updateTrack("audio", {
@@ -67,17 +90,34 @@ function VideoEvents() {
     );
 
     const retryPosition = consumeRetryPosition(sessionStorage);
-    if (retryPosition !== null) player.seek(retryPosition);
+    const restoredPosition = pending?.position ?? retryPosition;
+    if (restoredPosition !== null && restoredPosition > 0.25) {
+      if (pending?.wasPaused) videoRef.current?.pause();
+      player.seek(restoredPosition);
+    } else if (pending) {
+      confirmVideoSwitch();
+    }
 
     dispatch(
       updateVideo({
         canPlay: true,
-        waiting: false,
+        waiting: pending !== null,
         duration: Math.round(player.duration()) | 0,
-        ...(retryPosition !== null && { currentTime: retryPosition }),
+        ...(restoredPosition !== null && { currentTime: restoredPosition }),
       })
     );
-  }, [dispatch, player, video]);
+  }, [
+    confirmVideoSwitch,
+    dispatch,
+    pendingVideoSwitch,
+    player,
+    video,
+    videoRef,
+  ]);
+
+  const ePlaybackSeeked = useCallback(() => {
+    confirmVideoSwitch();
+  }, [confirmVideoSwitch]);
 
   const ePlayBackPaused = useCallback(() => {
     console.log("[VIDEO] paused");
@@ -121,6 +161,7 @@ function VideoEvents() {
     (e) => {
       if (failureHandled.current) return;
       failureHandled.current = true;
+      pendingVideoSwitch.current = null;
 
       (async () => {
         const error = await stopFailedPlayback({
@@ -144,7 +185,7 @@ function VideoEvents() {
         );
       })();
     },
-    [dispatch, token, video.gid]
+    [dispatch, pendingVideoSwitch, token, video.gid]
   );
 
   const ePlayBackNotAllowed = useCallback(
@@ -182,11 +223,11 @@ function VideoEvents() {
         updateVideo({
           currentTime: newTime,
           buffer: Math.round(player.getBufferLength()),
-          waiting: false,
+          waiting: pendingVideoSwitch.current !== null,
         })
       );
     },
-    [dispatch, player, video.prevSeekTo]
+    [dispatch, pendingVideoSwitch, player, video.prevSeekTo]
   );
 
   const eQualityChange = useCallback(
@@ -194,6 +235,7 @@ function VideoEvents() {
       console.log("[video] quality changing ", e);
 
       if (e.mediaType !== "video") return;
+      if (pendingVideoSwitch.current) return;
 
       const tracks =
         e.mediaType === "video"
@@ -214,7 +256,7 @@ function VideoEvents() {
         })
       );
     },
-    [dispatch, player, video]
+    [dispatch, pendingVideoSwitch, player, video]
   );
 
   const eTrackChange = useCallback(
@@ -262,7 +304,8 @@ function VideoEvents() {
     player.on(MediaPlayer.events.PLAYBACK_TIME_UPDATED, ePlayBackTimeUpdated);
     player.on(MediaPlayer.events.PLAYBACK_NOT_ALLOWED, ePlayBackNotAllowed);
     player.on(MediaPlayer.events.PLAYBACK_ENDED, ePlayBackEnded);
-    player.on(MediaPlayer.events.QUALITY_CHANGE_REQUESTED, eQualityChange);
+    player.on(MediaPlayer.events.PLAYBACK_SEEKED, ePlaybackSeeked);
+    player.on(MediaPlayer.events.QUALITY_CHANGE_RENDERED, eQualityChange);
     player.on(MediaPlayer.events.TRACK_CHANGE_RENDERED, eTrackChange);
 
     return () => {
@@ -275,7 +318,8 @@ function VideoEvents() {
       );
       player.off(MediaPlayer.events.PLAYBACK_NOT_ALLOWED, ePlayBackNotAllowed);
       player.off(MediaPlayer.events.PLAYBACK_ENDED, ePlayBackEnded);
-      player.off(MediaPlayer.events.QUALITY_CHANGE_REQUESTED, eQualityChange);
+      player.off(MediaPlayer.events.PLAYBACK_SEEKED, ePlaybackSeeked);
+      player.off(MediaPlayer.events.QUALITY_CHANGE_RENDERED, eQualityChange);
       player.off(MediaPlayer.events.TRACK_CHANGE_RENDERED, eTrackChange);
     };
   }, [
@@ -283,6 +327,7 @@ function VideoEvents() {
     ePlayBackNotAllowed,
     ePlayBackPaused,
     ePlayBackPlaying,
+    ePlaybackSeeked,
     ePlayBackTimeUpdated,
     ePlayBackWaiting,
     eQualityChange,
