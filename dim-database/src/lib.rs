@@ -19,6 +19,7 @@ pub mod compact_mediafile;
 pub mod episode;
 pub mod error;
 pub mod genre;
+pub mod ingestion;
 pub mod library;
 pub mod media;
 pub mod mediafile;

@@ -24,3 +24,12 @@ async fn test_walkdir() {
 
     assert_eq!(files, expected);
 }
+
+#[test]
+fn mixed_discovery_keeps_unsupported_results_classifiable() {
+    let directory = super::temp_dir(vec!["Movie.mkv", "notes.txt"]);
+    let discovered = super::super::discover_files(std::iter::once(directory.path()));
+    assert_eq!(discovered.len(), 2);
+    assert_eq!(discovered.iter().filter(|file| file.supported).count(), 1);
+    assert_eq!(discovered.iter().filter(|file| !file.supported).count(), 1);
+}

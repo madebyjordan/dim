@@ -8,6 +8,10 @@ pub struct Asset {
     pub remote_url: Option<String>,
     pub local_path: String,
     pub file_ext: String,
+    pub download_status: String,
+    pub download_error: Option<String>,
+    pub downloaded_at: Option<String>,
+    pub orphaned_at: Option<String>,
 }
 impl Asset {
     pub async fn delete(
@@ -138,7 +142,7 @@ impl InsertableAsset {
         // NOTE: asset is guaranteed to be in the table if we get here
         let result = sqlx::query_as!(
             Asset,
-            r#"SELECT id as "id!", remote_url, local_path, file_ext FROM assets WHERE remote_url = ?"#,
+            r#"SELECT id as "id!", remote_url, local_path, file_ext, download_status, download_error, downloaded_at, orphaned_at FROM assets WHERE remote_url = ?"#,
             url
         )
         .fetch_one(&mut *conn)
@@ -164,7 +168,7 @@ impl InsertableAsset {
 
         let result = sqlx::query_as!(
             Asset,
-            r#"SELECT id as "id!", remote_url, local_path, file_ext FROM assets WHERE id = ?"#,
+            r#"SELECT id as "id!", remote_url, local_path, file_ext, download_status, download_error, downloaded_at, orphaned_at FROM assets WHERE id = ?"#,
             id
         )
         .fetch_one(&mut *conn)

@@ -1,14 +1,35 @@
 use serde_derive::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 use tracing::error;
 use tracing::trace;
 
-#[derive(Clone, Copy, Debug, displaydoc::Display, thiserror::Error)]
+#[derive(Clone, Debug, displaydoc::Display, thiserror::Error)]
 pub enum Error {
-    /// ffprobe exited early with an error.
-    FfprobeError,
+    /// ffprobe could not be started or read: {0}
+    Io(String),
+    /// ffprobe exceeded its configured deadline.
+    Timeout,
+    /// ffprobe rejected the input: {0}
+    InvalidMedia(String),
+    /// ffprobe returned malformed JSON: {0}
+    InvalidOutput(String),
+}
+
+impl Error {
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "probe_transient",
+            Self::Timeout => "probe_timeout",
+            Self::InvalidMedia(_) | Self::InvalidOutput(_) => "corrupt_media",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::Timeout)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +135,7 @@ pub struct Tags {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 struct Format {
     pub filename: String,
     pub nb_streams: i64,
@@ -138,7 +160,16 @@ impl FFProbeCtx {
     }
 
     #[tracing::instrument(skip(self, file))]
-    pub async fn get_meta(&self, file: impl ToString) -> Result<FFPStream, std::io::Error> {
+    pub async fn get_meta(&self, file: impl ToString) -> Result<FFPStream, Error> {
+        self.get_meta_with_timeout(file, Duration::from_secs(30))
+            .await
+    }
+
+    pub async fn get_meta_with_timeout(
+        &self,
+        file: impl ToString,
+        deadline: Duration,
+    ) -> Result<FFPStream, Error> {
         let mut probe = Command::new(self.ffprobe_bin.clone());
 
         probe
@@ -159,16 +190,24 @@ impl FFProbeCtx {
             "Spawning ffprobe."
         );
 
-        let output = probe.spawn()?.wait_with_output().await?;
+        let child = probe
+            .spawn()
+            .map_err(|error| Error::Io(error.to_string()))?;
+        let output = tokio::time::timeout(deadline, child.wait_with_output())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|error| Error::Io(error.to_string()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(output.stderr.as_slice());
             error!(status = ?output.status, stderr = %stderr, "ffprobe exited with an error status.");
+            return Err(Error::InvalidMedia(stderr.chars().take(512).collect()));
         }
 
         let json = String::from_utf8_lossy(output.stdout.as_slice());
 
-        let de = serde_json::from_str(&json).unwrap_or_default();
+        let de =
+            serde_json::from_str(&json).map_err(|error| Error::InvalidOutput(error.to_string()))?;
 
         Ok(de)
     }
@@ -276,4 +315,44 @@ pub struct Disposition {
     pub forced: i64,
     pub hearing_impaired: i64,
     pub visual_impaired: i64,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(body: &str) -> tempfile::TempPath {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = std::fs::metadata(file.path()).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(file.path(), permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[tokio::test]
+    async fn classifies_probe_timeout_as_retryable() {
+        let probe = script("sleep 2");
+        let context = FFProbeCtx {
+            ffprobe_bin: probe.to_string_lossy().into_owned(),
+        };
+        let error = context
+            .get_meta_with_timeout("file.mkv", Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Timeout));
+        assert!(error.retryable());
+    }
+
+    #[tokio::test]
+    async fn classifies_rejected_input_as_corrupt_not_transient() {
+        let probe = script("echo 'Invalid data found' >&2; exit 1");
+        let context = FFProbeCtx {
+            ffprobe_bin: probe.to_string_lossy().into_owned(),
+        };
+        let error = context.get_meta("file.mkv").await.unwrap_err();
+        assert!(matches!(error, Error::InvalidMedia(_)));
+        assert!(!error.retryable());
+    }
 }

@@ -7,6 +7,8 @@ use thiserror::Error;
 pub enum Error {
     /// Provided external id not found by provider.
     InvalidExternalId,
+    /// Metadata provider failed before a reliable no-match result was available.
+    MetadataProviderFailure,
     /// Movie scanner error: {0:?}
     MovieScanner(#[from] super::movie::Error),
     /// Tv show scanner error: {0:?}
@@ -19,8 +21,14 @@ pub enum Error {
     DatabaseError(
         #[from]
         #[serde(skip)]
-        Arc<sqlx::Error>,
+        dim_database::DatabaseError,
     ),
     /// Library supplied doesnt exist: {0:?}
     LibraryNotFound(#[serde(skip)] dim_database::DatabaseError),
+}
+
+impl From<sqlx::Error> for Error {
+    fn from(error: sqlx::Error) -> Self {
+        Self::DatabaseError(error.into())
+    }
 }

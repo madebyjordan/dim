@@ -57,6 +57,16 @@ pub struct MediaFile {
     pub profile: Option<String>,
     /// Primary audio language
     pub audio_language: Option<String>,
+    /// Size and modification time captured when the file was accepted as stable.
+    pub file_size: Option<i64>,
+    pub modified_ns: Option<i64>,
+    /// Metadata identity is intentionally nullable for pre-migration records.
+    pub metadata_provider: Option<String>,
+    pub provider_external_id: Option<String>,
+    pub match_provenance: Option<String>,
+    pub match_confidence: Option<f32>,
+    pub manual_override: bool,
+    pub missing_since: Option<String>,
 }
 
 impl MediaFile {
@@ -263,6 +273,14 @@ pub struct InsertableMediaFile {
     pub channels: Option<i64>,
     pub profile: Option<String>,
     pub audio_language: Option<String>,
+    pub file_size: Option<i64>,
+    pub modified_ns: Option<i64>,
+    pub metadata_provider: Option<String>,
+    pub provider_external_id: Option<String>,
+    pub match_provenance: Option<String>,
+    pub match_confidence: Option<f32>,
+    pub manual_override: bool,
+    pub missing_since: Option<String>,
 
     /***
      * Options specific to tv show scanner hence Option<T>
@@ -293,8 +311,9 @@ impl InsertableMediaFile {
         let id = sqlx::query!(
             r#"
             INSERT INTO mediafile (media_id, library_id, target_file, raw_name, raw_year, quality,
-            codec, container, audio, original_resolution, duration, episode, season, corrupt, channels, profile, audio_language)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            codec, container, audio, original_resolution, duration, episode, season, corrupt, channels, profile, audio_language,
+            file_size, modified_ns, metadata_provider, provider_external_id, match_provenance, match_confidence, manual_override, missing_since)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
         "#,
             self.media_id,
             self.library_id,
@@ -312,7 +331,15 @@ impl InsertableMediaFile {
             self.corrupt,
             self.channels,
             self.profile,
-            self.audio_language
+            self.audio_language,
+            self.file_size,
+            self.modified_ns,
+            self.metadata_provider,
+            self.provider_external_id,
+            self.match_provenance,
+            self.match_confidence,
+            self.manual_override,
+            self.missing_since
         )
         .execute(&mut *conn)
         .await?
@@ -339,6 +366,14 @@ pub struct UpdateMediaFile {
     pub channels: Option<i64>,
     pub profile: Option<String>,
     pub audio_language: Option<String>,
+    pub file_size: Option<i64>,
+    pub modified_ns: Option<i64>,
+    pub metadata_provider: Option<String>,
+    pub provider_external_id: Option<String>,
+    pub match_provenance: Option<String>,
+    pub match_confidence: Option<f32>,
+    pub manual_override: Option<bool>,
+    pub missing_since: Option<String>,
 
     /***
      * Options specific to tv show scanner hence Option<T>
@@ -377,7 +412,15 @@ impl UpdateMediaFile {
             "UPDATE mediafile SET corrupt = ? WHERE id = ?" => (self.corrupt, id),
             "UPDATE mediafile SET channels = ? WHERE id = ?" => (self.channels, id),
             "UPDATE mediafile SET profile = ? WHERE id = ?" => (self.profile, id),
-            "UPDATE mediafile SET audio_language = ? WHERE id = ?" => (self.audio_language, id)
+            "UPDATE mediafile SET audio_language = ? WHERE id = ?" => (self.audio_language, id),
+            "UPDATE mediafile SET file_size = ? WHERE id = ?" => (self.file_size, id),
+            "UPDATE mediafile SET modified_ns = ? WHERE id = ?" => (self.modified_ns, id),
+            "UPDATE mediafile SET metadata_provider = ? WHERE id = ?" => (self.metadata_provider, id),
+            "UPDATE mediafile SET provider_external_id = ? WHERE id = ?" => (self.provider_external_id, id),
+            "UPDATE mediafile SET match_provenance = ? WHERE id = ?" => (self.match_provenance, id),
+            "UPDATE mediafile SET match_confidence = ? WHERE id = ?" => (self.match_confidence, id),
+            "UPDATE mediafile SET manual_override = ? WHERE id = ?" => (self.manual_override, id),
+            "UPDATE mediafile SET missing_since = ? WHERE id = ?" => (self.missing_since, id)
         );
 
         Ok(1)

@@ -13,8 +13,9 @@ use dim_database::DbConnection;
 use displaydoc::Display;
 
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
@@ -46,8 +47,12 @@ pub enum Error {
     FailedToAcquireWriter(#[serde(skip)] SqlxError),
     /// File passed is non-unicode.
     NonUnicodeFile,
+    /// File is still changing and will be retried later.
+    FileUnstable,
+    /// File disappeared while it was being assessed.
+    FileMissing,
     /// Failed to extract media information with ffprobe: {0:?}
-    FfprobeError(#[serde(skip)] Arc<std::io::Error>),
+    FfprobeError(#[serde(skip)] Arc<crate::streaming::ffprobe::Error>),
     /// Failed to write mediafile to the database: {0:?}
     InsertFailed(#[serde(skip)] DatabaseError),
     /// Failed to select written mediafile from the database: {0:?}
@@ -56,6 +61,61 @@ pub enum Error {
     CommitFailed(#[serde(skip)] SqlxError),
     /// Failed to check if mediafile exists in the database: {0:?}
     ExistanceCheckFailed(#[serde(skip)] DatabaseError),
+}
+
+impl Error {
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::FileExists => "already_catalogued",
+            Self::FileUnstable => "incomplete_file",
+            Self::FileMissing => "missing_file",
+            Self::NonUnicodeFile => "unsupported_path",
+            Self::FfprobeError(error) => error.class(),
+            _ => "internal",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::FileUnstable | Self::FileMissing)
+            || matches!(self, Self::FfprobeError(error) if error.retryable())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileFingerprint {
+    pub size: u64,
+    pub modified_ns: u128,
+}
+
+async fn fingerprint(path: &Path) -> Result<FileFingerprint> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| Error::FileMissing)?;
+    if !metadata.is_file() {
+        return Err(Error::FileMissing);
+    }
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Ok(FileFingerprint {
+        size: metadata.len(),
+        modified_ns,
+    })
+}
+
+/// Require two identical observations. This avoids probing a path while a copy/rename is still
+/// publishing bytes, without guessing that a probe failure means corruption.
+pub async fn assess_file_stability(path: &Path, interval: Duration) -> Result<FileFingerprint> {
+    let first = fingerprint(path).await?;
+    tokio::time::sleep(interval).await;
+    let second = fingerprint(path).await?;
+    if first != second || second.size == 0 {
+        return Err(Error::FileUnstable);
+    }
+    Ok(second)
 }
 
 /// Struct is responsible for creating `InsertableMediaFile`'s and preparing them for insertions
@@ -139,12 +199,34 @@ impl MediafileCreator {
         // and does its scheduling. If a user ever needs to obtain the metadata, we can request it
         // and patch it immediately. This would add a initial cost to the API call, but subsequent
         // API calls will be cheap.
-        let video_metadata = match FFProbeCtx::new(&FFPROBE_BIN).get_meta(&target_file).await {
-            Ok(x) => x,
-            Err(error) => {
-                error!(?error, "Couldn't extract media information with ffprobe");
-                error!(file = &target_file, "Assuming file is corrupted.");
-                Default::default()
+        let fingerprint = assess_file_stability(&file, Duration::from_millis(250)).await?;
+        let probe = FFProbeCtx::new(&FFPROBE_BIN);
+        let mut probe_attempt = 0;
+        let video_metadata = loop {
+            probe_attempt += 1;
+            match probe
+                .get_meta_with_timeout(&target_file, Duration::from_secs(30))
+                .await
+            {
+                Ok(metadata) => break metadata,
+                Err(error) if error.retryable() && probe_attempt < 2 => {
+                    warn!(
+                        ?error,
+                        file = &target_file,
+                        probe_attempt,
+                        "Retrying transient ffprobe failure"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(error) => {
+                    error!(
+                        ?error,
+                        file = &target_file,
+                        probe_attempt,
+                        "Couldn't extract media information with ffprobe"
+                    );
+                    return Err(Error::FfprobeError(Arc::new(error)));
+                }
             }
         };
 
@@ -175,6 +257,9 @@ impl MediafileCreator {
                 .as_deref()
                 .and_then(crate::utils::lang_from_iso639)
                 .map(ToString::to_string),
+            file_size: Some(fingerprint.size as i64),
+            modified_ns: Some(fingerprint.modified_ns.min(i64::MAX as u128) as i64),
+            ..Default::default()
         })
     }
 
@@ -255,5 +340,30 @@ impl Handler<InsertBatch> for MediafileCreator {
         _: &mut Context<Self>,
     ) -> <InsertBatch as Message>::Result {
         self.insert_batch(batch.0.iter()).await
+    }
+}
+
+#[cfg(test)]
+mod stability_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn detects_file_that_is_still_being_copied() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("copying.mkv");
+        tokio::fs::write(&path, b"first").await.unwrap();
+        let writer_path = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(writer_path)
+                .await
+                .unwrap();
+            file.write_all(b"second").await.unwrap();
+        });
+        let result = assess_file_stability(&path, Duration::from_millis(75)).await;
+        assert!(matches!(result, Err(Error::FileUnstable)));
     }
 }

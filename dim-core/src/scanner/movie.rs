@@ -82,6 +82,7 @@ impl MovieMatcher {
         file: MediaFile,
         provided: ExternalMedia,
     ) -> Result<i64, Error> {
+        let provider_external_id = provided.external_id.clone();
         // TODO: Push posters and backdrops to download queue. Push CDC events.
         let posters = provided
             .posters
@@ -183,6 +184,9 @@ impl MovieMatcher {
             media_id: Some(media_id),
             raw_name: Some(media.name),
             raw_year: media.year,
+            metadata_provider: Some("tmdb".into()),
+            provider_external_id: Some(provider_external_id),
+            match_provenance: Some("automatic_filename".into()),
             ..Default::default()
         }
         .update(tx, file.id)
@@ -226,17 +230,25 @@ impl MediaMatcher for MovieMatcher {
         let metadata_futs = work
             .into_iter()
             .map(|WorkUnit(file, metadata)| async {
+                let mut provider_failed = false;
                 for meta in metadata {
                     match provider
                         .search(meta.name.as_ref(), meta.year.map(|x| x as _))
                         .await
                     {
-                        Ok(provided) => return Some((file, provided)),
-                        Err(e) => error!(?meta, error = ?e, "Failed to find a movie match."),
+                        Ok(provided) => return Ok(Some((file, provided))),
+                        Err(e) => {
+                            provider_failed |=
+                                !matches!(e, dim_extern_api::Error::NoResults { .. });
+                            error!(?meta, error = ?e, "Failed to find a movie match.");
+                        }
                     }
                 }
-
-                None
+                if provider_failed {
+                    Err(super::Error::MetadataProviderFailure)
+                } else {
+                    Ok(None)
+                }
             })
             .collect::<Vec<_>>();
 
@@ -244,6 +256,7 @@ impl MediaMatcher for MovieMatcher {
 
         // FIXME: Propagate errors.
         for meta in metadata.into_iter() {
+            let meta = meta?;
             if let Some((file, provided)) = meta {
                 if let Some(provided) = provided.first() {
                     self.match_to_result(tx, file, provided.clone())
@@ -264,6 +277,7 @@ impl MediaMatcher for MovieMatcher {
         external_id: &str,
     ) -> Result<(), super::Error> {
         let WorkUnit(file, _) = work;
+        let file_id = file.id;
 
         let provided = match provider.search_by_id(external_id).await {
             Ok(provided) => provided,
@@ -276,6 +290,18 @@ impl MediaMatcher for MovieMatcher {
         self.match_to_result(tx, file, provided)
             .await
             .inspect_err(|error| error!(?error, "failed to match file to external id."))?;
+
+        UpdateMediaFile {
+            metadata_provider: Some("tmdb".into()),
+            provider_external_id: Some(external_id.to_owned()),
+            match_provenance: Some("manual_external_id".into()),
+            match_confidence: Some(1.0),
+            manual_override: Some(true),
+            ..Default::default()
+        }
+        .update(tx, file_id)
+        .await
+        .map_err(Error::UpdateMediafile)?;
 
         Ok(())
     }
@@ -295,6 +321,74 @@ mod tests {
     use dim_database::mediafile::MediaFile;
     use dim_database::movie::Movie;
     use dim_database::rw_pool::write_tx;
+
+    #[derive(Debug)]
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl dim_extern_api::ExternalQuery for FailingProvider {
+        async fn search(
+            &self,
+            _: &str,
+            _: Option<i32>,
+        ) -> dim_extern_api::Result<Vec<dim_extern_api::ExternalMedia>> {
+            Err(dim_extern_api::Error::Timeout)
+        }
+        async fn search_by_id(
+            &self,
+            _: &str,
+        ) -> dim_extern_api::Result<dim_extern_api::ExternalMedia> {
+            Err(dim_extern_api::Error::Timeout)
+        }
+        async fn cast(
+            &self,
+            _: &str,
+        ) -> dim_extern_api::Result<Vec<dim_extern_api::ExternalActor>> {
+            Err(dim_extern_api::Error::Timeout)
+        }
+    }
+    impl dim_extern_api::IntoQueryShow for FailingProvider {}
+    impl dim_extern_api::ExternalQueryIntoShow for FailingProvider {}
+
+    #[tokio::test]
+    async fn provider_failure_is_not_reported_as_a_clean_no_match() {
+        use crate::scanner::{MediaMatcher, WorkUnit};
+        use dim_extern_api::filename::Metadata;
+
+        let mut conn = dim_database::get_conn_memory().await.unwrap();
+        let library = create_library(&mut conn).await;
+        let mut lock = conn.writer.lock_owned().await;
+        let mut tx = write_tx(&mut lock).await.unwrap();
+        let id = InsertableMediaFile {
+            library_id: library,
+            target_file: "provider-failure.mkv".into(),
+            raw_name: "Provider Failure".into(),
+            ..Default::default()
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let file = MediaFile::get_one(&mut tx, id).await.unwrap();
+        let result = MovieMatcher
+            .batch_match(
+                &mut tx,
+                std::sync::Arc::new(FailingProvider),
+                vec![WorkUnit(
+                    file,
+                    vec![Metadata {
+                        name: "Provider Failure".into(),
+                        year: None,
+                        season: None,
+                        episode: None,
+                    }],
+                )],
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::scanner::Error::MetadataProviderFailure)
+        ));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn match_to_movie() {

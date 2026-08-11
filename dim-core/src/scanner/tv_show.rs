@@ -91,6 +91,7 @@ impl TvMatcher {
     ) -> Result<(i64, i64, i64), Error> {
         // TODO: insert poster and backdrops.
         let (emedia, eseason, eepisode) = result;
+        let provider_external_id = emedia.external_id.clone();
 
         let posters = emedia
             .posters
@@ -173,6 +174,16 @@ impl TvMatcher {
         let episodeid = self
             .match_to_episode(tx, file.clone(), seasonid, eepisode)
             .await?;
+
+        UpdateMediaFile {
+            metadata_provider: Some("tmdb".into()),
+            provider_external_id: Some(provider_external_id),
+            match_provenance: Some("automatic_filename".into()),
+            ..Default::default()
+        }
+        .update(tx, file.id)
+        .await
+        .map_err(Error::UpdateMediafile)?;
 
         // If the mediafile used to belong to a different episode/season/show we want to
         // recursively search if we need to delete the parents. If the parents have 0 children, we
@@ -354,7 +365,8 @@ impl TvMatcher {
         provider: Arc<dyn ExternalQueryShow>,
         file: MediaFile,
         metadata: Vec<Metadata>,
-    ) -> Option<(MediaFile, (ExternalMedia, ExternalSeason, ExternalEpisode))> {
+    ) -> Result<Option<(MediaFile, (ExternalMedia, ExternalSeason, ExternalEpisode))>, super::Error>
+    {
         for meta in metadata {
             match provider
                 .search(meta.name.as_ref(), meta.year.map(|x| x as _))
@@ -408,13 +420,17 @@ impl TvMatcher {
                         continue;
                     };
 
-                    return Some((file, (first, season, episode)));
+                    return Ok(Some((file, (first, season, episode))));
                 }
-                Err(e) => error!(?meta, error = ?e, "Failed to find a movie match."),
+                Err(e) => {
+                    error!(?meta, error = ?e, "Failed to find a show match.");
+                    if !matches!(e, dim_extern_api::Error::NoResults { .. }) {
+                        return Err(super::Error::MetadataProviderFailure);
+                    }
+                }
             }
         }
-
-        None
+        Ok(None)
     }
 }
 
@@ -441,6 +457,7 @@ impl MediaMatcher for TvMatcher {
         let metadata = futures::future::join_all(metadata_futs).await;
 
         for meta in metadata.into_iter() {
+            let meta = meta?;
             if let Some((file, provided)) = meta {
                 self.match_to_result(tx, file, provided)
                     .await
@@ -463,6 +480,7 @@ impl MediaMatcher for TvMatcher {
             .expect("Scanner needs a show provider");
 
         let WorkUnit(file, metadata) = work;
+        let file_id = file.id;
 
         let provided = match provider.search_by_id(external_id).await {
             Ok(provided) => provided,
@@ -531,6 +549,18 @@ impl MediaMatcher for TvMatcher {
         self.match_to_result(tx, file, (provided, season_result, episode_result))
             .await
             .inspect_err(|error| error!(?error, "failed to match to result"))?;
+
+        UpdateMediaFile {
+            metadata_provider: Some("tmdb".into()),
+            provider_external_id: Some(external_id.to_owned()),
+            match_provenance: Some("manual_external_id".into()),
+            match_confidence: Some(1.0),
+            manual_override: Some(true),
+            ..Default::default()
+        }
+        .update(tx, file_id)
+        .await
+        .map_err(Error::UpdateMediafile)?;
 
         Ok(())
     }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -24,7 +24,6 @@ use dim_extern_api::tmdb::TMDBMetadataProvider;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use http::StatusCode;
-use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
@@ -39,17 +38,6 @@ enum LibraryScanStatus {
     Scanning,
     Complete,
     Failed,
-}
-
-static LIBRARY_SCAN_STATUS: Lazy<RwLock<HashMap<i64, LibraryScanStatus>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-fn set_scan_status(id: i64, status: LibraryScanStatus) {
-    LIBRARY_SCAN_STATUS.write().unwrap().insert(id, status);
-}
-
-fn get_scan_status(id: i64) -> Option<LibraryScanStatus> {
-    LIBRARY_SCAN_STATUS.read().unwrap().get(&id).copied()
 }
 
 fn metadata_provider(media_type: MediaType) -> Arc<dyn dim_extern_api::ExternalQueryIntoShow> {
@@ -68,18 +56,28 @@ async fn spawn_library_scan(
     id: i64,
     provider: Arc<dyn dim_extern_api::ExternalQueryIntoShow>,
 ) -> Result<(), &'static str> {
-    set_scan_status(id, LibraryScanStatus::Scanning);
-
+    let scan_id = {
+        let mut lock = state.conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock)
+            .await
+            .map_err(|_| "failed to persist scan request")?;
+        let scan_id = dim_database::ingestion::ScanRun::queue(&mut tx, id, "full")
+            .await
+            .map_err(|_| "failed to persist scan request")?;
+        tx.commit()
+            .await
+            .map_err(|_| "failed to persist scan request")?;
+        scan_id
+    };
     let mut conn = state.conn.clone();
     let scan_tx = state.event_tx.clone();
     let failure_tx = scan_tx.clone();
-    state
+    let spawn_result = state
         .library_workers
         .spawn(id, LibraryWorkerKind::Scanner, async move {
             match dim_core::scanner::start(&mut conn, id, scan_tx, provider).await {
-                Ok(()) => set_scan_status(id, LibraryScanStatus::Complete),
+                Ok(()) => {}
                 Err(error) => {
-                    set_scan_status(id, LibraryScanStatus::Failed);
                     tracing::error!(?error, library_id = id, "Library scan failed");
                     let _ = failure_tx.send(
                         dim_events::Message {
@@ -91,7 +89,21 @@ async fn spawn_library_scan(
                 }
             }
         })
-        .await
+        .await;
+    if spawn_result.is_err() {
+        let mut lock = state.conn.writer().lock_owned().await;
+        if let Ok(mut tx) = dim_database::write_tx(&mut lock).await {
+            let _ = dim_database::ingestion::ScanRun::finish(
+                &mut tx,
+                scan_id,
+                "failed",
+                Some("scanner worker was not started"),
+            )
+            .await;
+            let _ = tx.commit().await;
+        };
+    }
+    spawn_result
 }
 
 #[derive(Debug)]
@@ -290,6 +302,11 @@ pub async fn library_post(
         Arc::clone(&provider),
     );
 
+    if let Err(error) = spawn_library_scan(&state, id, Arc::clone(&provider)).await {
+        tracing::error!(?error, library_id = id, "Library scanner was not started");
+        return CreateLibraryError::Internal.into_response();
+    }
+
     if let Err(error) = state
         .library_workers
         .spawn(id, LibraryWorkerKind::Watcher, async move {
@@ -304,10 +321,6 @@ pub async fn library_post(
             library_id = id,
             "Filesystem watcher was not started"
         );
-        return CreateLibraryError::Internal.into_response();
-    }
-    if let Err(error) = spawn_library_scan(&state, id, provider).await {
-        tracing::error!(?error, library_id = id, "Library scanner was not started");
         return CreateLibraryError::Internal.into_response();
     }
 
@@ -327,7 +340,21 @@ pub async fn library_scan_status(State(state): State<AppState>, Path(id): Path<i
         return (StatusCode::NOT_FOUND, "Library not found.").into_response();
     }
 
-    let status = get_scan_status(id).unwrap_or(LibraryScanStatus::Complete);
+    let status = match dim_database::ingestion::ScanRun::latest(&mut tx, id).await {
+        Ok(Some(run)) if matches!(run.status.as_str(), "queued" | "running") => {
+            LibraryScanStatus::Scanning
+        }
+        Ok(Some(run)) if run.status == "failed" => LibraryScanStatus::Failed,
+        Ok(_) => LibraryScanStatus::Complete,
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                library_id = id,
+                "Failed to read durable scan status"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     Json(serde_json::json!({ "status": status })).into_response()
 }
 
@@ -336,14 +363,6 @@ pub async fn library_scan_retry(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Response {
-    if get_scan_status(id) == Some(LibraryScanStatus::Scanning) {
-        return (
-            StatusCode::CONFLICT,
-            "This library is already being scanned.",
-        )
-            .into_response();
-    }
-
     let mut tx = match state.conn.read().begin().await {
         Ok(tx) => tx,
         Err(error) => {
@@ -356,6 +375,15 @@ pub async fn library_scan_retry(
         Ok(library) => library,
         Err(_) => return (StatusCode::NOT_FOUND, "Library not found.").into_response(),
     };
+
+    if matches!(dim_database::ingestion::ScanRun::latest(&mut tx, id).await, Ok(Some(run)) if matches!(run.status.as_str(), "queued" | "running"))
+    {
+        return (
+            StatusCode::CONFLICT,
+            "This library is already being scanned.",
+        )
+            .into_response();
+    }
 
     if spawn_library_scan(&state, id, metadata_provider(library.media_type))
         .await
@@ -376,7 +404,6 @@ pub async fn library_delete(
     }): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, DimErrorWrapper> {
-    LIBRARY_SCAN_STATUS.write().unwrap().remove(&id);
     // First we mark the library as scheduled for deletion which will make the library and all its
     // content hidden. This is necessary because huge libraries take a long time to delete.
     {

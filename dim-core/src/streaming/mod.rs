@@ -14,7 +14,7 @@ lazy_static::lazy_static! {
     pub static ref FFPROBE_BIN: &'static str = {
         cfg_if! {
             if #[cfg(test)] {
-                "/usr/bin/ffprobe"
+                "ffprobe"
             } else {
                 Box::leak(ffpath("utils/ffprobe").into_boxed_str())
             }
