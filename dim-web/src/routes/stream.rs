@@ -7,9 +7,15 @@ use dim_core::core::StateManager;
 use dim_core::stream_tracking::{
     ContentType, PlannedProfile, PlannedTrack, StreamTracking, VirtualManifest,
 };
+use dim_core::streaming::codec::{
+    capability_request, codec_descriptor, has_exact_codec_configuration, hdr_peak_nits, is_hdr,
+    remux_supported,
+};
 use dim_core::streaming::ffprobe::{FFPStream, FFProbeCtx};
-use dim_core::streaming::planner::{plan_video, BrowserCapabilities, PlaybackPlan, VideoSource};
-use dim_core::streaming::{get_avc1_tag, level_to_tag};
+use dim_core::streaming::get_avc1_tag;
+use dim_core::streaming::planner::{
+    plan_video, BrowserCapabilities, BrowserVideoCapability, PlaybackPlan, VideoSource,
+};
 use dim_core::utils::{bitrate_to_label, quality_to_label};
 use dim_database::mediafile::MediaFile;
 use dim_database::user::{DefaultVideoQuality, User, UserSettings};
@@ -34,7 +40,7 @@ pub struct VirtualManifestParams {
     #[serde(default)]
     force_ass: bool,
     #[serde(default)]
-    av1_main10_bt709_1080p24_6_3mbps_fmp4: bool,
+    video_capability: Option<String>,
 }
 
 pub async fn return_virtual_manifest(
@@ -46,7 +52,6 @@ pub async fn return_virtual_manifest(
     Path(id): Path<i64>,
     Query(params): Query<VirtualManifestParams>,
     Extension(user): Extension<User>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
     let owner = user.id.get();
     if let Some(gid) = params.gid.and_then(|value| Uuid::parse_str(&value).ok()) {
@@ -63,12 +68,10 @@ pub async fn return_virtual_manifest(
 
     let (info, reused_probe) = load_probe(&media).await?;
     let capabilities = BrowserCapabilities {
-        av1_main10_bt709_1080p24_6_3mbps_fmp4: params.av1_main10_bt709_1080p24_6_3mbps_fmp4
-            && headers
-                .get(header::USER_AGENT)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(is_verified_chromium_151_macos),
-        ..BrowserCapabilities::default()
+        video: params
+            .video_capability
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<BrowserVideoCapability>(value).ok()),
     };
     let (tracks, plan) = build_tracks(&info, &media, &user.prefs, params.force_ass, &capabilities)?;
     let gid = Uuid::new_v4();
@@ -82,11 +85,50 @@ pub async fn return_virtual_manifest(
     .into_response())
 }
 
-fn is_verified_chromium_151_macos(user_agent: &str) -> bool {
-    user_agent.contains("Macintosh; Intel Mac OS X 10_15_7")
-        && user_agent.contains(" Chrome/151.")
-        && !user_agent.contains(" Edg/")
-        && !user_agent.contains(" OPR/")
+pub async fn return_playback_capabilities(
+    State(AppState { conn, .. }): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let mut tx = conn.read().begin().await?;
+    let media = MediaFile::get_one(&mut tx, id)
+        .await
+        .map_err(|error| dim_core::errors::StreamingErrors::NoMediaFileFound(error.to_string()))?;
+    if !path::Path::new(&media.target_file).exists() {
+        return Err(dim_core::errors::StreamingErrors::FileDoesNotExist.into());
+    }
+    let (info, reused_probe) = load_probe(&media).await?;
+    let video = info
+        .get_primary("video")
+        .ok_or(dim_core::errors::StreamingErrors::FileIsCorrupt)?;
+    let width = positive_metadata(video.width, "video width")?;
+    let height = positive_metadata(video.height, "video height")?;
+    let bitrate = video
+        .get_bitrate()
+        .or_else(|| info.get_container_bitrate())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            dim_core::errors::StreamingErrors::InvalidMetadata("video bitrate is missing".into())
+        })?;
+    let frame_rate = video.precise_frame_rate().ok_or_else(|| {
+        dim_core::errors::StreamingErrors::InvalidMetadata("video frame rate is missing".into())
+    })?;
+    let request = capability_request(video, width, height, bitrate, frame_rate);
+
+    Ok(Json(json!({
+        "video": request,
+        "server_remux_supported": remux_supported(video),
+        "probe_source": if reused_probe { "ingestion" } else { "fallback" },
+    }))
+    .into_response())
+}
+
+fn positive_metadata(value: Option<i64>, name: &str) -> Result<u64, DimErrorWrapper> {
+    value
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            dim_core::errors::StreamingErrors::InvalidMetadata(format!("{name} is missing")).into()
+        })
 }
 
 async fn load_probe(media: &MediaFile) -> Result<(FFPStream, bool), DimErrorWrapper> {
@@ -117,7 +159,9 @@ async fn load_probe(media: &MediaFile) -> Result<(FFPStream, bool), DimErrorWrap
             .as_deref()
             .and_then(|json| serde_json::from_str::<FFPStream>(json).ok())
         {
-            if info.get_primary("video").is_some()
+            if info
+                .get_primary("video")
+                .is_some_and(has_exact_codec_configuration)
                 && info.get_duration().is_some_and(|duration| duration > 0)
             {
                 return Ok((info, true));
@@ -142,20 +186,8 @@ fn build_tracks(
         .get_primary("video")
         .cloned()
         .ok_or(dim_core::errors::StreamingErrors::FileIsCorrupt)?;
-    let height = video
-        .height
-        .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            dim_core::errors::StreamingErrors::InvalidMetadata("video height is missing".into())
-        })?;
-    let width = video
-        .width
-        .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            dim_core::errors::StreamingErrors::InvalidMetadata("video width is missing".into())
-        })?;
+    let height = positive_metadata(video.height, "video height")?;
+    let width = positive_metadata(video.width, "video width")?;
     let stream_bitrate = video.get_bitrate();
     let bitrate = stream_bitrate
         .or_else(|| info.get_container_bitrate())
@@ -170,6 +202,8 @@ fn build_tracks(
             dim_core::errors::StreamingErrors::InvalidMetadata("duration is missing".into())
         })?;
     let frame_rate = video.frame_rate().unwrap_or(30);
+    let source_codec_descriptor = codec_descriptor(&video);
+    let source_is_hdr = is_hdr(&video);
     let plan = plan_video(
         &VideoSource {
             codec: video.codec_name.clone(),
@@ -185,6 +219,9 @@ fn build_tracks(
             height,
             bitrate,
             frame_rate,
+            codec_descriptor: source_codec_descriptor.clone(),
+            remux_supported: remux_supported(&video),
+            hdr: source_is_hdr,
         },
         capabilities,
     );
@@ -197,15 +234,16 @@ fn build_tracks(
 
     if plan.direct_play_supported {
         let id = Uuid::new_v4().to_string();
-        let (output_codec, codec_tag) = if video.codec_name == "av1" {
-            ("av1", "av01.0.08M.10.0.111.01.01.01.0".to_string())
+        let output_codec = if video.codec_name == "av1" {
+            "av1"
         } else {
-            let codec = video
-                .level
-                .and_then(level_to_tag)
-                .unwrap_or_else(|| get_avc1_tag(width, height, bitrate, frame_rate));
-            ("h264", codec.to_string())
+            "h264"
         };
+        let codec_tag = source_codec_descriptor.clone().ok_or_else(|| {
+            dim_core::errors::StreamingErrors::InvalidMetadata(
+                "direct-play codec descriptor is missing".into(),
+            )
+        })?;
         let mut input_ctx: nightfall::profiles::InputCtx = video.clone().into();
         input_ctx.fps = frame_rate as f64;
         let context = ProfileContext {
@@ -253,6 +291,7 @@ fn build_tracks(
         assigned_default |= is_default;
         let mut input_ctx: nightfall::profiles::InputCtx = video.clone().into();
         input_ctx.fps = frame_rate as f64;
+        let avc_level = get_avc1_tag(target_width, quality.height, quality.bitrate, frame_rate);
         let context = ProfileContext {
             file: media.target_file.clone(),
             input_ctx,
@@ -262,6 +301,17 @@ fn build_tracks(
                 bitrate: Some(quality.bitrate),
                 width: Some(target_width as i64),
                 height: Some(quality.height as i64),
+                video_profile: Some("high".into()),
+                video_level: Some(avc_level.level),
+                pixel_format: Some("yuv420p".into()),
+                color_range: Some("tv".into()),
+                color_space: Some("bt709".into()),
+                color_transfer: Some("bt709".into()),
+                color_primaries: Some("bt709".into()),
+                hdr_transfer: source_is_hdr
+                    .then(|| video.color_transfer.clone())
+                    .flatten(),
+                hdr_peak_nits: source_is_hdr.then(|| hdr_peak_nits(&video)).flatten(),
                 ..Default::default()
             },
             ..Default::default()
@@ -270,10 +320,7 @@ fn build_tracks(
             manifest: VirtualManifest::new(Uuid::new_v4().to_string(), ContentType::Video)
                 .set_mime("video/mp4")
                 .set_duration(Some(duration))
-                .set_codecs(
-                    get_avc1_tag(target_width, quality.height, quality.bitrate, frame_rate)
-                        .to_string(),
-                )
+                .set_codecs(avc_level.to_string())
                 .set_bandwidth(quality.bitrate)
                 .set_args([("width", target_width), ("height", quality.height)])
                 .set_is_default(is_default)
@@ -861,20 +908,11 @@ mod tests {
     }
 
     #[test]
-    fn av1_client_evidence_is_limited_to_the_verified_browser_runtime() {
-        let verified = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-            AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
-        assert!(is_verified_chromium_151_macos(verified));
-        assert!(!is_verified_chromium_151_macos(
-            &verified.replace("Chrome/151", "Chrome/152")
-        ));
-        assert!(!is_verified_chromium_151_macos(&verified.replace(
-            "Macintosh; Intel Mac OS X 10_15_7",
-            "Windows NT 10.0"
-        )));
-        assert!(!is_verified_chromium_151_macos(&format!(
-            "{verified} Edg/151.0"
-        )));
+    fn invalid_dimensions_are_rejected_before_capability_planning() {
+        assert!(positive_metadata(Some(3840), "video width").is_ok());
+        assert!(positive_metadata(Some(0), "video width").is_err());
+        assert!(positive_metadata(Some(-1), "video width").is_err());
+        assert!(positive_metadata(None, "video width").is_err());
     }
 
     #[tokio::test]

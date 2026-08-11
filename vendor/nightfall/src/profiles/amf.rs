@@ -33,13 +33,20 @@ impl TranscodingProfile for AmfTranscodeProfile {
             "-ss".into(),
             (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
             "-i".into(),
-            ctx.file,
+            ctx.file.clone(),
             "-copyts".into(),
             "-map".into(),
             stream,
             "-c:0".into(),
             "h264_amf".into(),
         ];
+
+        args.extend(["-pix_fmt".into(), "yuv420p".into()]);
+        super::video::append_h264_output_signalling(&mut args, &ctx);
+
+        if let Some(bitrate) = ctx.output_ctx.bitrate {
+            args.extend(["-b:v".into(), bitrate.to_string()]);
+        }
 
         args.append(&mut vec![
             "-start_at_zero".into(),
@@ -99,14 +106,7 @@ impl TranscodingProfile for AmfTranscodeProfile {
     /// This profile technically could work on any codec since the codec is just `copy` here, but
     /// the container doesnt support it, so we will be constricting it down.
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
-        if ctx.output_ctx.codec == "h264" {
-            return Ok(());
-        }
-
-        Err(NightfallError::ProfileNotSupported(format!(
-            "Got output codec {} but profile only supports `h264`.",
-            ctx.output_ctx.codec
-        )))
+        super::video::hardware_h264_contract_supported(ctx)
     }
 
     fn tag(&self) -> &str {

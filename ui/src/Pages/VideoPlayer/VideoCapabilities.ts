@@ -1,42 +1,93 @@
-export const VERIFIED_AV1_CONTENT_TYPE =
-  'video/mp4; codecs="av01.0.08M.10.0.111.01.01.01.0"';
+export interface VideoCapabilityRequest {
+  content_type: string;
+  codec: string;
+  codec_descriptor: string;
+  width: number;
+  height: number;
+  bitrate: number;
+  frame_rate: number;
+  hdr: boolean;
+  hdr_metadata_type?: "smpteSt2086" | "smpteSt2094-10" | "smpteSt2094-40";
+  color_gamut?: "srgb" | "p3" | "rec2020";
+  transfer_function?: "srgb" | "pq" | "hlg";
+}
 
-export const supportsVerifiedAv1Playback = async () => {
-  // Runtime evidence currently covers Chrome/Chromium 151 only. Other engines and versions
-  // retain the conservative server fallback until they are independently verified.
-  const verifiedChromium =
-    /Macintosh; Intel Mac OS X 10_15_7/.test(navigator.userAgent) &&
-    / Chrome\/151\./.test(navigator.userAgent) &&
-    !/ (?:Edg|OPR)\//.test(navigator.userAgent);
-  if (
-    !verifiedChromium ||
-    typeof MediaSource === "undefined" ||
-    !navigator.mediaCapabilities
-  ) {
-    return false;
-  }
+export interface PlaybackCapabilityInspection {
+  video: VideoCapabilityRequest | null;
+  server_remux_supported: boolean;
+  probe_source: "ingestion" | "fallback";
+}
+
+export interface BrowserVideoCapability {
+  content_type: string;
+  can_play_type: boolean;
+  media_source: boolean;
+  supported: boolean;
+  smooth: boolean;
+  power_efficient: boolean | null;
+  hdr_display: boolean | null;
+}
+
+export const determineVideoPlaybackCapability = async (
+  source: VideoCapabilityRequest | null | undefined
+): Promise<BrowserVideoCapability | null> => {
+  if (!source) return null;
+
+  const result: BrowserVideoCapability = {
+    content_type: source.content_type,
+    can_play_type: false,
+    media_source: false,
+    supported: false,
+    smooth: false,
+    power_efficient: null,
+    hdr_display: source.hdr
+      ? typeof matchMedia === "function" &&
+        matchMedia("(dynamic-range: high)").matches
+      : true,
+  };
 
   const video = document.createElement("video");
+  result.can_play_type = video.canPlayType(source.content_type) === "probably";
+  result.media_source =
+    typeof MediaSource !== "undefined" &&
+    MediaSource.isTypeSupported(source.content_type);
+
   if (
-    video.canPlayType(VERIFIED_AV1_CONTENT_TYPE) !== "probably" ||
-    !MediaSource.isTypeSupported(VERIFIED_AV1_CONTENT_TYPE)
+    !result.can_play_type ||
+    !result.media_source ||
+    !navigator.mediaCapabilities
   ) {
-    return false;
+    return result;
   }
 
+  const configuration: MediaDecodingConfiguration = {
+    type: "media-source",
+    video: {
+      contentType: source.content_type,
+      width: source.width,
+      height: source.height,
+      bitrate: source.bitrate,
+      framerate: source.frame_rate,
+      ...(source.hdr_metadata_type && {
+        hdrMetadataType: source.hdr_metadata_type,
+      }),
+      ...(source.color_gamut && { colorGamut: source.color_gamut }),
+      ...(source.transfer_function && {
+        transferFunction: source.transfer_function,
+      }),
+    },
+  };
+
   try {
-    const result = await navigator.mediaCapabilities.decodingInfo({
-      type: "media-source",
-      video: {
-        contentType: VERIFIED_AV1_CONTENT_TYPE,
-        width: 1920,
-        height: 1080,
-        bitrate: 6_300_000,
-        framerate: 24,
-      },
-    });
-    return result.supported && result.smooth;
+    const capability = await navigator.mediaCapabilities.decodingInfo(
+      configuration
+    );
+    result.supported = capability.supported;
+    result.smooth = capability.smooth;
+    result.power_efficient = capability.powerEfficient;
   } catch {
-    return false;
+    // The absence of complete capability evidence is intentionally a conservative fallback.
   }
+
+  return result;
 };

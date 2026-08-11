@@ -1,7 +1,7 @@
 use serde_derive::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::error;
 use tracing::trace;
@@ -83,6 +83,9 @@ pub struct Stream {
     pub color_transfer: Option<String>,
     pub color_primaries: Option<String>,
     pub chroma_location: Option<String>,
+    pub extradata: Option<String>,
+    #[serde(default)]
+    pub side_data_list: Vec<SideData>,
     pub disposition: Option<Disposition>,
 }
 
@@ -91,7 +94,14 @@ impl Stream {
         self.bit_rate
             .as_deref()
             .and_then(|value| value.parse::<u64>().ok())
-            .or_else(|| self.tags.as_ref()?.bps_eng.as_deref()?.parse::<u64>().ok())
+            .or_else(|| {
+                let tags = self.tags.as_ref()?;
+                tags.bps_eng
+                    .as_deref()
+                    .or(tags.bps.as_deref())?
+                    .parse::<u64>()
+                    .ok()
+            })
             .filter(|bitrate| *bitrate > 0)
     }
 
@@ -119,6 +129,45 @@ impl Stream {
             })
             .filter(|rate| *rate > 0)
     }
+
+    pub fn precise_frame_rate(&self) -> Option<f64> {
+        self.avg_frame_rate
+            .as_deref()
+            .or(self.r_frame_rate.as_deref())
+            .and_then(|rate| {
+                let (numerator, denominator) = rate.split_once('/')?;
+                let numerator = numerator.parse::<f64>().ok()?;
+                let denominator = denominator.parse::<f64>().ok()?;
+                (denominator > 0.0).then_some(numerator / denominator)
+            })
+            .filter(|rate| rate.is_finite() && *rate > 0.0)
+    }
+
+    pub fn extradata_bytes(&self) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for line in self.extradata.as_deref()?.lines() {
+            let Some((_, encoded)) = line.split_once(':') else {
+                continue;
+            };
+            for token in encoded.split_whitespace() {
+                if token.len() != 4 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    break;
+                }
+                bytes.push(u8::from_str_radix(&token[0..2], 16).ok()?);
+                bytes.push(u8::from_str_radix(&token[2..4], 16).ok()?);
+            }
+        }
+        (!bytes.is_empty()).then_some(bytes)
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SideData {
+    pub side_data_type: String,
+    pub max_content: Option<u64>,
+    pub max_average: Option<u64>,
+    pub max_luminance: Option<String>,
 }
 
 impl From<Stream> for nightfall::profiles::InputCtx {
@@ -130,7 +179,13 @@ impl From<Stream> for nightfall::profiles::InputCtx {
             profile: stream.profile.unwrap_or_default(),
             bitrate: stream
                 .tags
-                .and_then(|x| x.bps_eng?.parse::<u64>().ok())
+                .and_then(|tags| {
+                    tags.bps_eng
+                        .as_deref()
+                        .or(tags.bps.as_deref())?
+                        .parse::<u64>()
+                        .ok()
+                })
                 .unwrap_or_default(),
             bframes: stream.has_b_frames,
             audio_channels: stream.channels.unwrap_or(2) as u64,
@@ -145,6 +200,8 @@ pub struct Tags {
     pub title: Option<String>,
     #[serde(rename = "BPS-eng")]
     pub bps_eng: Option<String>,
+    #[serde(rename = "BPS")]
+    pub bps: Option<String>,
     #[serde(rename = "DURATION-eng")]
     duration_eng: Option<String>,
     #[serde(rename = "NUMBER_OF_FRAMES-eng")]
@@ -173,6 +230,18 @@ struct Format {
     pub bit_rate: String,
 }
 
+#[derive(Default, Deserialize)]
+struct ExtradataProbe {
+    #[serde(default)]
+    streams: Vec<ExtradataStream>,
+}
+
+#[derive(Default, Deserialize)]
+struct ExtradataStream {
+    index: i64,
+    extradata: Option<String>,
+}
+
 pub struct FFProbeCtx {
     ffprobe_bin: String,
 }
@@ -195,11 +264,13 @@ impl FFProbeCtx {
         file: impl ToString,
         deadline: Duration,
     ) -> Result<FFPStream, Error> {
+        let started = Instant::now();
+        let file = file.to_string();
         let mut probe = Command::new(self.ffprobe_bin.clone());
 
         probe
             .kill_on_drop(true)
-            .arg(file.to_string())
+            .arg(&file)
             .arg("-v")
             .arg("error")
             .arg("-print_format")
@@ -231,8 +302,51 @@ impl FFProbeCtx {
 
         let json = String::from_utf8_lossy(output.stdout.as_slice());
 
-        let de =
+        let mut de: FFPStream =
             serde_json::from_str(&json).map_err(|error| Error::InvalidOutput(error.to_string()))?;
+
+        // `-show_data` also dumps attachment payloads. Probe only the primary video stream so
+        // embedded fonts and artwork never inflate persisted metadata.
+        let remaining = deadline
+            .checked_sub(started.elapsed())
+            .ok_or(Error::Timeout)?;
+        let mut config_probe = Command::new(self.ffprobe_bin.clone());
+        config_probe
+            .kill_on_drop(true)
+            .arg(&file)
+            .arg("-v")
+            .arg("error")
+            .arg("-print_format")
+            .arg("json")
+            .arg("-select_streams")
+            .arg("v:0")
+            .arg("-show_entries")
+            .arg("stream=index,extradata")
+            .arg("-show_data")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let config_child = config_probe
+            .spawn()
+            .map_err(|error| Error::Io(error.to_string()))?;
+        let config_output = tokio::time::timeout(remaining, config_child.wait_with_output())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|error| Error::Io(error.to_string()))?;
+        if !config_output.status.success() {
+            let stderr = String::from_utf8_lossy(config_output.stderr.as_slice());
+            return Err(Error::InvalidMedia(stderr.chars().take(512).collect()));
+        }
+        let config: ExtradataProbe = serde_json::from_slice(&config_output.stdout)
+            .map_err(|error| Error::InvalidOutput(error.to_string()))?;
+        for config_stream in config.streams {
+            if let Some(stream) = de
+                .streams
+                .iter_mut()
+                .find(|stream| stream.index == config_stream.index)
+            {
+                stream.extradata = config_stream.extradata;
+            }
+        }
 
         Ok(de)
     }
@@ -375,6 +489,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stream.get_bitrate(), Some(5_000_000));
+    }
+
+    #[test]
+    fn reads_non_language_qualified_matroska_bitrate() {
+        let stream = Stream {
+            tags: Some(Tags {
+                bps: Some("11618576".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(stream.get_bitrate(), Some(11_618_576));
     }
 
     #[test]

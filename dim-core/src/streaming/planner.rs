@@ -2,7 +2,7 @@
 //! management so decisions can be inspected without starting FFmpeg.
 
 use super::{Quality, VIDEO_QUALITIES};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -11,21 +11,20 @@ pub enum PlaybackStrategy {
     Transcode,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BrowserCapabilities {
-    pub h264: bool,
-    pub aac: bool,
-    pub av1_main10_bt709_1080p24_6_3mbps_fmp4: bool,
+    pub video: Option<BrowserVideoCapability>,
 }
 
-impl Default for BrowserCapabilities {
-    fn default() -> Self {
-        Self {
-            h264: true,
-            aac: true,
-            av1_main10_bt709_1080p24_6_3mbps_fmp4: false,
-        }
-    }
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct BrowserVideoCapability {
+    pub content_type: String,
+    pub can_play_type: bool,
+    pub media_source: bool,
+    pub supported: bool,
+    pub smooth: bool,
+    pub power_efficient: Option<bool>,
+    pub hdr_display: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +42,9 @@ pub struct VideoSource {
     pub height: u64,
     pub bitrate: u64,
     pub frame_rate: u64,
+    pub codec_descriptor: Option<String>,
+    pub remux_supported: bool,
+    pub hdr: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -54,22 +56,26 @@ pub struct PlaybackPlan {
 }
 
 pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> PlaybackPlan {
-    let h264_supported = capabilities.h264 && matches!(source.codec.as_str(), "h264" | "avc1");
-    let verified_av1_supported = capabilities.av1_main10_bt709_1080p24_6_3mbps_fmp4
-        && source.codec == "av1"
-        && source.profile.as_deref() == Some("Main")
-        && source.pixel_format.as_deref() == Some("yuv420p10le")
-        && source.level == Some(8)
-        && source.color_range.as_deref() == Some("tv")
-        && source.color_space.as_deref() == Some("bt709")
-        && source.color_transfer.as_deref() == Some("bt709")
-        && source.color_primaries.as_deref() == Some("bt709")
-        && source.chroma_location.as_deref() == Some("left")
-        && source.width <= 1920
-        && source.height <= 1080
-        && source.bitrate <= 6_300_000
-        && source.frame_rate <= 24;
-    let direct_play_supported = h264_supported || verified_av1_supported;
+    let expected_content_type = source
+        .codec_descriptor
+        .as_ref()
+        .map(|codec| format!("video/mp4; codecs=\"{codec}\""));
+    let capability = capabilities.video.as_ref();
+    let exact_source_match = capability
+        .zip(expected_content_type.as_ref())
+        .is_some_and(|(capability, expected)| capability.content_type == *expected);
+    let browser_decode_supported = capability.is_some_and(|capability| {
+        capability.can_play_type
+            && capability.media_source
+            && capability.supported
+            && capability.smooth
+    });
+    let hdr_output_supported =
+        !source.hdr || capability.is_some_and(|capability| capability.hdr_display == Some(true));
+    let direct_play_supported = source.remux_supported
+        && exact_source_match
+        && browser_decode_supported
+        && hdr_output_supported;
     let renditions = source_bounded_qualities(source.height, source.bitrate)
         .into_iter()
         .filter(|quality| !direct_play_supported || quality.height < source.height)
@@ -81,12 +87,20 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
             PlaybackStrategy::Transcode
         },
         direct_play_supported,
-        decision_reason: if h264_supported {
-            "h264_browser_default"
-        } else if verified_av1_supported {
-            "client_verified_av1_main10_bt709_1080p24_fmp4"
+        decision_reason: if direct_play_supported {
+            "client_verified_source_and_fmp4_remux"
+        } else if !source.remux_supported || source.codec_descriptor.is_none() {
+            "source_not_fmp4_remux_eligible"
+        } else if capability.is_none() {
+            "client_capability_unavailable"
+        } else if !exact_source_match {
+            "client_capability_does_not_match_source"
+        } else if !browser_decode_supported {
+            "client_rejected_source_configuration"
+        } else if !hdr_output_supported {
+            "client_hdr_output_unavailable"
         } else {
-            "source_codec_not_verified_for_client"
+            "source_not_verified_for_direct_play"
         },
         renditions,
     }
@@ -113,38 +127,7 @@ pub fn source_bounded_qualities(height: u64, bitrate: u64) -> Vec<Quality> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn prefers_direct_play_for_browser_compatible_h264() {
-        let plan = plan_video(
-            &VideoSource {
-                codec: "h264".into(),
-                profile: None,
-                pixel_format: None,
-                level: None,
-                color_range: None,
-                color_space: None,
-                color_transfer: None,
-                color_primaries: None,
-                chroma_location: None,
-                width: 1920,
-                height: 1080,
-                bitrate: 8_000_000,
-                frame_rate: 30,
-            },
-            &BrowserCapabilities::default(),
-        );
-        assert_eq!(plan.preferred_strategy, PlaybackStrategy::DirectPlay);
-        assert!(plan.direct_play_supported);
-        assert_eq!(
-            plan.renditions
-                .iter()
-                .map(|quality| quality.height)
-                .collect::<Vec<_>>(),
-            vec![720, 480]
-        );
-    }
-
-    fn verified_av1_source() -> VideoSource {
+    fn av1_source(hdr: bool) -> VideoSource {
         VideoSource {
             codec: "av1".into(),
             profile: Some("Main".into()),
@@ -159,25 +142,44 @@ mod tests {
             height: 1080,
             bitrate: 6_277_855,
             frame_rate: 24,
+            codec_descriptor: Some("av01.0.08M.10.0.111.01.01.01.0".into()),
+            remux_supported: true,
+            hdr,
+        }
+    }
+
+    fn supported(source: &VideoSource) -> BrowserCapabilities {
+        BrowserCapabilities {
+            video: Some(BrowserVideoCapability {
+                content_type: format!(
+                    "video/mp4; codecs=\"{}\"",
+                    source.codec_descriptor.as_deref().unwrap()
+                ),
+                can_play_type: true,
+                media_source: true,
+                supported: true,
+                smooth: true,
+                power_efficient: Some(true),
+                hdr_display: Some(true),
+            }),
         }
     }
 
     #[test]
     fn av1_requires_explicit_client_evidence() {
-        let plan = plan_video(&verified_av1_source(), &BrowserCapabilities::default());
+        let plan = plan_video(&av1_source(false), &BrowserCapabilities::default());
         assert_eq!(plan.preferred_strategy, PlaybackStrategy::Transcode);
-        assert_eq!(plan.decision_reason, "source_codec_not_verified_for_client");
+        assert_eq!(plan.decision_reason, "client_capability_unavailable");
     }
 
     #[test]
-    fn exact_verified_av1_envelope_can_be_remuxed() {
-        let mut capabilities = BrowserCapabilities::default();
-        capabilities.av1_main10_bt709_1080p24_6_3mbps_fmp4 = true;
-        let plan = plan_video(&verified_av1_source(), &capabilities);
+    fn exact_sdr_av1_source_can_be_remuxed() {
+        let source = av1_source(false);
+        let plan = plan_video(&source, &supported(&source));
         assert_eq!(plan.preferred_strategy, PlaybackStrategy::DirectPlay);
         assert_eq!(
             plan.decision_reason,
-            "client_verified_av1_main10_bt709_1080p24_fmp4"
+            "client_verified_source_and_fmp4_remux"
         );
         assert_eq!(
             plan.renditions
@@ -190,8 +192,10 @@ mod tests {
 
     #[test]
     fn keeps_source_resolution_transcode_when_direct_play_is_unavailable() {
-        let mut source = verified_av1_source();
+        let mut source = av1_source(false);
         source.codec = "hevc".into();
+        source.codec_descriptor = None;
+        source.remux_supported = false;
         let plan = plan_video(&source, &BrowserCapabilities::default());
         assert!(!plan.direct_play_supported);
         assert_eq!(
@@ -204,25 +208,55 @@ mod tests {
     }
 
     #[test]
-    fn verified_av1_capability_does_not_cover_hdr_or_higher_rate_sources() {
-        let mut capabilities = BrowserCapabilities::default();
-        capabilities.av1_main10_bt709_1080p24_6_3mbps_fmp4 = true;
-        for source in [
-            VideoSource {
-                color_transfer: Some("smpte2084".into()),
-                ..verified_av1_source()
-            },
-            VideoSource {
-                frame_rate: 60,
-                ..verified_av1_source()
-            },
-            VideoSource {
-                bitrate: 6_300_001,
-                ..verified_av1_source()
-            },
-        ] {
-            assert!(!plan_video(&source, &capabilities).direct_play_supported);
-        }
+    fn exact_4k_hdr_av1_source_direct_plays_when_supported() {
+        let source = VideoSource {
+            width: 3840,
+            height: 1600,
+            bitrate: 11_618_576,
+            level: Some(12),
+            color_space: Some("bt2020nc".into()),
+            color_transfer: Some("smpte2084".into()),
+            color_primaries: Some("bt2020".into()),
+            chroma_location: None,
+            codec_descriptor: Some("av01.0.12M.10.0.110.09.16.09.0".into()),
+            hdr: true,
+            ..av1_source(true)
+        };
+        assert!(plan_video(&source, &supported(&source)).direct_play_supported);
+    }
+
+    #[test]
+    fn unsupported_or_inconclusive_source_capability_falls_back() {
+        let source = av1_source(false);
+        let mut capabilities = supported(&source);
+        capabilities.video.as_mut().unwrap().smooth = false;
+        let plan = plan_video(&source, &capabilities);
+        assert!(!plan.direct_play_supported);
+        assert_eq!(plan.decision_reason, "client_rejected_source_configuration");
+    }
+
+    #[test]
+    fn hdr_direct_play_requires_hdr_output_evidence() {
+        let source = av1_source(true);
+        let mut capabilities = supported(&source);
+        capabilities.video.as_mut().unwrap().hdr_display = Some(false);
+        let plan = plan_video(&source, &capabilities);
+        assert!(!plan.direct_play_supported);
+        assert_eq!(plan.decision_reason, "client_hdr_output_unavailable");
+    }
+
+    #[test]
+    fn stale_capability_evidence_cannot_enable_another_source() {
+        let source = av1_source(false);
+        let mut capabilities = supported(&source);
+        capabilities.video.as_mut().unwrap().content_type =
+            "video/mp4; codecs=\"av01.0.12M.10\"".into();
+        let plan = plan_video(&source, &capabilities);
+        assert!(!plan.direct_play_supported);
+        assert_eq!(
+            plan.decision_reason,
+            "client_capability_does_not_match_source"
+        );
     }
 
     #[test]

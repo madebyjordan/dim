@@ -1,3 +1,4 @@
+pub mod codec;
 pub mod ffprobe;
 pub mod planner;
 
@@ -105,13 +106,13 @@ pub fn level_to_tag(level: i64) -> Option<Avc1Level> {
 }
 
 pub fn get_avc1_tag(width: u64, height: u64, bitrate: u64, framerate: u64) -> Avc1Level {
-    let macro_blocks = (width as f64 / 16.0) * (height as f64 / 16.0);
-    let blocks_per_sec = macro_blocks * framerate as f64;
+    let macro_blocks = width.div_ceil(16) * height.div_ceil(16);
+    let blocks_per_sec = macro_blocks.saturating_mul(framerate);
 
     let mut avc1_levels = AVC1_LEVELS.iter().filter(|&x| {
-        x.max_bitrate > bitrate
-            && (macro_blocks as u64) < x.max_frame_size
-            && blocks_per_sec < x.macro_blocks_rate as f64
+        x.max_bitrate >= bitrate
+            && macro_blocks <= x.max_frame_size
+            && blocks_per_sec <= x.macro_blocks_rate
     });
 
     avc1_levels
@@ -245,6 +246,7 @@ pub const AVC1_LEVELS: [Avc1Level; 20] = [
 
 #[cfg(test)]
 mod compatibility_tests {
+    use super::get_avc1_tag;
     use nightfall::profiles::{
         AacTranscodeProfile, H264TranscodeProfile, H264TransmuxProfile, ProfileContext,
         TranscodingProfile,
@@ -295,7 +297,7 @@ mod compatibility_tests {
 
         assert!(args
             .windows(2)
-            .any(|args| args == ["-vf", "scale=1920:1080"]));
+            .any(|args| args[0] == "-vf" && args[1].starts_with("scale=1920:1080,")));
     }
 
     #[test]
@@ -310,5 +312,12 @@ mod compatibility_tests {
             .expect("AV1 remux profile should generate FFmpeg arguments");
         assert!(args.windows(2).any(|args| args == ["-c:0", "copy"]));
         assert!(args.iter().any(|arg| arg == "-hls_segment_type"));
+    }
+
+    #[test]
+    fn h264_manifest_level_is_derived_from_the_target_rendition() {
+        let level = get_avc1_tag(1920, 1080, 10_000_000, 24);
+        assert_eq!(level.level, 40);
+        assert_eq!(level.to_string(), "avc1.640028");
     }
 }

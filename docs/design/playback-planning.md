@@ -12,14 +12,24 @@ Deployments can make narrow operational overrides with `DIM_TRANSCODE_GLOBAL_LIM
 `DIM_STREAM_SESSION_TTL_SECS`. These are intentionally not part of the broader runtime settings
 redesign planned for Milestone 4.
 
-The initial capability model is conservative and browser-oriented: H.264 and verified compatible
-AV1 can use stream-copy DASH, while other video codecs transcode to H.264 and audio is normalized
-to AAC. The plan response makes that choice inspectable. Manual quality changes replace the active
-video recipe lazily: the requested recipe is admitted and prepared, dash.js reloads a manifest
-containing that video and the current audio, and the UI changes its selected quality only after
-dash.js reports the requested video adaptation as effective. The previous video recipe is retired
-instead of accumulating processes, and playback position and paused state are restored after the
-reload.
+Capability negotiation is source-specific and conservative. The server derives an RFC 6381 codec
+descriptor and the exact dimensions, bitrate, frame rate, bit depth, and colour/HDR characteristics
+from ffprobe metadata. The browser checks that configuration with `canPlayType`, MSE, and Media
+Capabilities, and returns structured evidence to the planner. Direct Play requires both a matching
+positive browser result and independent server-side fMP4 remux eligibility; missing, stale, or
+inconclusive evidence falls back to transcoding. No browser family or machine model is encoded in
+the policy.
+
+The browser H.264 fallback is an explicit output contract: High profile, an RFC 6381 level derived
+from the selected rendition, 8-bit 4:2:0, limited-range BT.709. PQ and HLG sources are converted to
+linear light, tone mapped, converted to BT.709, and stripped of source HDR side data. Hardware
+profiles are used only for verified 8-bit SDR inputs; sources needing unverified bit-depth or HDR
+conversion fall through to the software profile. Audio is normalized to AAC. The plan response
+makes the choice inspectable. Manual quality changes replace the active video recipe lazily: the
+requested recipe is admitted and prepared, dash.js reloads a manifest containing that video and
+the current audio, and the UI changes its selected quality only after dash.js reports the requested
+video adaptation as effective. The previous video recipe is retired instead of accumulating
+processes, and playback position and paused state are restored after the reload.
 
 When Direct Play is available, it is the source-resolution option and source-height transcodes are
 omitted as redundant; only lower, non-upscaled ladder entries are offered. Its label includes a

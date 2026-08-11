@@ -183,6 +183,10 @@ fn stream_routes(
 ) -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/stream/:id/capabilities",
+            get(routes::stream::return_playback_capabilities),
+        )
+        .route(
             "/api/v1/stream/:id/manifest",
             get(routes::stream::return_virtual_manifest),
         )

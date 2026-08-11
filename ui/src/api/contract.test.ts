@@ -20,6 +20,7 @@ const migratedOperations = [
   "rematchMedia",
   "saveProgress",
   "searchExternalMedia",
+  "inspectPlaybackCapabilities",
   "createPlaybackSession",
   "getPlaybackFailure",
   "killPlaybackSession",

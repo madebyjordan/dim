@@ -91,6 +91,38 @@ export type RematchMedia = { external_id: string; media_type: "movie" | "tv" };
 
 export type ExternalMedia = Record<string, unknown>;
 
+export type VideoCapabilityRequest = {
+  content_type: string;
+  codec: string;
+  codec_descriptor: string;
+  width: number;
+  height: number;
+  bitrate: number;
+  frame_rate: number;
+  hdr: boolean;
+  hdr_metadata_type?: string;
+  color_gamut?: string;
+  transfer_function?: string;
+};
+
+export type PlaybackCapabilityInspection = {
+  video: {
+    content_type?: string;
+    codec?: string;
+    codec_descriptor?: string;
+    width?: number;
+    height?: number;
+    bitrate?: number;
+    frame_rate?: number;
+    hdr?: boolean;
+    hdr_metadata_type?: string;
+    color_gamut?: string;
+    transfer_function?: string;
+  } | null;
+  server_remux_supported: boolean;
+  probe_source: "ingestion" | "fallback";
+};
+
 export type PlaybackTrack = {
   id: string;
   content_type: "video" | "audio" | "subtitle";
@@ -152,6 +184,7 @@ export interface ApiOperations {
   rematchMedia: "/media/{id}/rematch";
   saveProgress: "/media/{id}/progress";
   searchExternalMedia: "/media/tmdb_search";
+  inspectPlaybackCapabilities: "/stream/{id}/capabilities";
   createPlaybackSession: "/stream/{id}/manifest";
   getPlaybackFailure: "/stream/{gid}/state/get_stderr";
   killPlaybackSession: "/stream/{gid}/state/kill";

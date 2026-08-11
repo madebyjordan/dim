@@ -29,7 +29,7 @@ import BackButton from "./BackButton";
 import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
 import { buildPlaybackManifestUrl } from "./QualitySwitch";
 import { createPlaybackState } from "./Navigation";
-import { supportsVerifiedAv1Playback } from "./VideoCapabilities";
+import { determineVideoPlaybackCapability } from "./VideoCapabilities";
 import {
   reclaimPlaybackSession,
   setPlaybackSession,
@@ -38,6 +38,7 @@ import {
 import {
   useCreatePlaybackSessionMutation,
   useKillPlaybackSessionMutation,
+  useLazyInspectPlaybackCapabilitiesQuery,
 } from "../../api/v1/foundation";
 
 import "./Index.scss";
@@ -47,6 +48,8 @@ function VideoPlayer() {
   const dispatch = useDispatch();
   const [createPlaybackSession] = useCreatePlaybackSessionMutation();
   const [killPlaybackSession] = useKillPlaybackSessionMutation();
+  const [inspectPlaybackCapabilities] =
+    useLazyInspectPlaybackCapabilitiesQuery();
   const location = useLocation();
   const navigate = useNavigate();
   const [player, setPlayer] = useState();
@@ -136,11 +139,17 @@ function VideoPlayer() {
         await reclaimPlaybackSession(removeSession);
         if (cancelled) return;
 
-        const av1Main10Bt7091080p24Fmp4 = await supportsVerifiedAv1Playback();
+        const inspection = await inspectPlaybackCapabilities(
+          params.fileID
+        ).unwrap();
+        if (cancelled) return;
+        const videoCapability = await determineVideoPlaybackCapability(
+          inspection.video
+        );
         const payload = await createPlaybackSession({
           fileId: params.fileID,
           forceAss: force_ass,
-          av1Main10Bt7091080p24Fmp4,
+          videoCapability,
         }).unwrap();
         if (!payload.gid || !Array.isArray(payload.tracks)) {
           throw new Error("Manifest response was incomplete");
@@ -203,6 +212,7 @@ function VideoPlayer() {
     createPlaybackSession,
     dispatch,
     killPlaybackSession,
+    inspectPlaybackCapabilities,
     params.fileID,
     video.gid,
   ]);
@@ -405,14 +415,7 @@ function VideoPlayer() {
         );
       }
     },
-    [
-      audioTracks,
-      auth.token,
-      dispatch,
-      player,
-      video.gid,
-      videoTracks,
-    ]
+    [audioTracks, auth.token, dispatch, player, video.gid, videoTracks]
   );
 
   useEffect(() => {

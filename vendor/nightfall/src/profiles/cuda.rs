@@ -63,8 +63,10 @@ impl TranscodingProfile for CudaTranscodeProfile {
         if let Some(height) = ctx.output_ctx.height {
             let width = ctx.output_ctx.width.unwrap_or(-2); // defaults to scaling by 2
             args.push("-vf".into());
-            args.push(format!("scale_cuda={}:{}", height, width));
+            args.push(format!("scale_cuda={}:{}", width, height));
         }
+
+        super::video::append_h264_output_signalling(&mut args, &ctx);
 
         if let Some(bitrate) = ctx.output_ctx.bitrate {
             args.push("-b:v".into());
@@ -139,9 +141,9 @@ impl TranscodingProfile for CudaTranscodeProfile {
 
     /// This profile technically could work on any codec since the codec is just `copy` here, but
     /// the container doesnt support it, so we will be constricting it down.
-    fn supports(&self, _ctx: &ProfileContext) -> Result<(), NightfallError> {
+    fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
         // TODO: At runtime check which file formats are supported by the current gpu for enc/dec.
-        Ok(())
+        super::video::hardware_h264_contract_supported(ctx)
     }
 
     fn tag(&self) -> &str {

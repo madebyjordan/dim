@@ -13,6 +13,10 @@ import type {
   RematchMedia,
   ScanStatus,
 } from "../generated";
+import type {
+  BrowserVideoCapability,
+  PlaybackCapabilityInspection,
+} from "../../Pages/VideoPlayer/VideoCapabilities";
 
 export const foundation = v1.injectEndpoints({
   endpoints: (build) => ({
@@ -80,19 +84,27 @@ export const foundation = v1.injectEndpoints({
       }),
       invalidatesTags: (_result, _error, { id }) => [{ type: "Media", id }],
     }),
+    inspectPlaybackCapabilities: build.query<
+      PlaybackCapabilityInspection,
+      string
+    >({
+      query: (fileId) => ({ url: `stream/${fileId}/capabilities` }),
+    }),
     createPlaybackSession: build.mutation<
       PlaybackSession,
       {
         fileId: string;
         forceAss: boolean;
-        av1Main10Bt7091080p24Fmp4: boolean;
+        videoCapability: BrowserVideoCapability | null;
       }
     >({
-      query: ({ fileId, forceAss, av1Main10Bt7091080p24Fmp4 }) => ({
+      query: ({ fileId, forceAss, videoCapability }) => ({
         url: `stream/${fileId}/manifest`,
         params: {
           force_ass: forceAss,
-          av1_main10_bt709_1080p24_6_3mbps_fmp4: av1Main10Bt7091080p24Fmp4,
+          ...(videoCapability && {
+            video_capability: JSON.stringify(videoCapability),
+          }),
         },
       }),
       invalidatesTags: ["Playback"],
@@ -113,6 +125,7 @@ export const {
   useLazySearchExternalMediaQuery,
   useRematchMediaMutation,
   useSaveProgressMutation,
+  useLazyInspectPlaybackCapabilitiesQuery,
   useCreatePlaybackSessionMutation,
   useKillPlaybackSessionMutation,
 } = foundation;

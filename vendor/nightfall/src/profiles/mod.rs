@@ -231,6 +231,15 @@ pub struct OutputCtx {
     pub width: Option<i64>,
     pub audio_channels: u64,
     pub target_gop: u32,
+    pub video_profile: Option<String>,
+    pub video_level: Option<u64>,
+    pub pixel_format: Option<String>,
+    pub color_range: Option<String>,
+    pub color_space: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_primaries: Option<String>,
+    pub hdr_transfer: Option<String>,
+    pub hdr_peak_nits: Option<f64>,
 }
 
 impl Default for OutputCtx {
@@ -245,6 +254,15 @@ impl Default for OutputCtx {
             width: None,
             audio_channels: 2,
             target_gop: 5,
+            video_profile: None,
+            video_level: None,
+            pixel_format: None,
+            color_range: None,
+            color_space: None,
+            color_transfer: None,
+            color_primaries: None,
+            hdr_transfer: None,
+            hdr_peak_nits: None,
         }
     }
 }

@@ -212,6 +212,8 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             }
         }
 
+        super::video::append_h264_output_signalling(&mut args, &ctx);
+
         args.append(&mut vec![
             "-vsync".into(),
             "passthrough".into(),
@@ -283,6 +285,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
     /// This profile technically could work on any codec since the codec is just `copy` here, but
     /// the container doesnt support it, so we will be constricting it down.
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
+        super::video::hardware_h264_contract_supported(ctx)?;
         let decode_entrypoint = "VAEntrypointVLD".to_string();
 
         if !["h264", "hevc"].contains(&ctx.input_ctx.codec.as_str()) {
