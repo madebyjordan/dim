@@ -108,7 +108,7 @@ async fn spawn_library_scan(
     spawn_result
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 enum CreateLibraryError {
     InvalidName,
     MissingLocations,
@@ -164,7 +164,17 @@ impl IntoResponse for CreateLibraryError {
             ),
         };
 
-        (status, message).into_response()
+        let code = match self {
+            Self::InvalidName => "invalid_library_name",
+            Self::MissingLocations => "missing_library_locations",
+            Self::InvalidLocation => "invalid_library_location",
+            Self::LocationNotFound => "library_location_not_found",
+            Self::LocationNotDirectory => "library_location_not_directory",
+            Self::PermissionDenied => "library_location_forbidden",
+            Self::InvalidMediaType => "invalid_media_type",
+            Self::Internal => "internal_error",
+        };
+        crate::error::api_error(status, code, message)
     }
 }
 

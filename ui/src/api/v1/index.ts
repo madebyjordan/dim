@@ -1,20 +1,10 @@
-import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
-import { RootState } from "../../store";
+import { createApi } from "@reduxjs/toolkit/query/react";
+import { baseQuery } from "../transport";
 
 export const v1 = createApi({
   reducerPath: "v1",
-  baseQuery: fetchBaseQuery({
-    baseUrl: `${window.location.protocol}//${window.location.host}/api/v1/`,
-    prepareHeaders: (headers, { getState }) => {
-      const token = (getState() as RootState).auth.token;
-
-      if (token) {
-        headers.set("Authorization", token);
-      }
-
-      return headers;
-    },
-  }),
+  baseQuery,
+  tagTypes: ["Library", "Media", "Playback"],
   endpoints: () => ({}),
 });
 

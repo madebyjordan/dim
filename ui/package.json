@@ -22,11 +22,13 @@
     "sass": "^1.67.0"
   },
   "scripts": {
+    "contract:generate": "node ../scripts/generate-api-contract.mjs",
+    "contract:check": "node ../scripts/generate-api-contract.mjs --check",
     "start": "vite",
     "build": "vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "yarn contract:check && tsc --noEmit",
     "lint": "eslint src",
     "prepare": "cd .. && husky install ui/.husky",
     "fmt": "prettier -w --check ./src"

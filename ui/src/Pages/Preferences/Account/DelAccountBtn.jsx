@@ -1,32 +1,19 @@
-import { useCallback, useEffect, useState } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useCallback, useState } from "react";
+import { useDispatch } from "react-redux";
 
 import InputConfirmationBox from "../../../Modals/InputConfirmationBox";
-import { delAccount, logout } from "../../../actions/auth.js";
+import { logout } from "../../../actions/auth.js";
 import Button from "../../../Components/Misc/Button";
+import { useDeleteAccountMutation } from "../../../api/v1/foundation";
+import { addNotification } from "../../../slices/notifications";
 
 function DelAccountBtn() {
-  const deleteAccount = useSelector((store) => store.auth.deleteAccount);
+  const [deleteAccount] = useDeleteAccountMutation();
 
   const [pass, setPass] = useState("");
   const [passErr, setPassErr] = useState("");
 
   const dispatch = useDispatch();
-
-  useEffect(() => {
-    if (deleteAccount.error) {
-      setPassErr(deleteAccount.error);
-    }
-  }, [deleteAccount.error]);
-
-  useEffect(() => {
-    (async () => {
-      if (deleteAccount.deleted && !deleteAccount.error) {
-        await dispatch(logout());
-        window.location.href = "/";
-      }
-    })();
-  }, [deleteAccount, dispatch]);
 
   const confirmDel = useCallback(async () => {
     if (pass.length === 0) {
@@ -34,8 +21,21 @@ function DelAccountBtn() {
       return false;
     }
 
-    await dispatch(delAccount(pass));
-  }, [dispatch, pass]);
+    try {
+      await deleteAccount({ password: pass }).unwrap();
+      dispatch(
+        addNotification({
+          msg: "Your account has been deleted, you have been logged out.",
+        })
+      );
+      await dispatch(logout());
+      window.location.href = "/";
+      return true;
+    } catch (failure) {
+      setPassErr(failure?.message || "Unable to delete the account.");
+      return false;
+    }
+  }, [deleteAccount, dispatch, pass]);
 
   return (
     <InputConfirmationBox

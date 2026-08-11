@@ -5,10 +5,14 @@ on:
   push:
     paths:
     - "ui/**"
+    - "api-contract/**"
+    - "scripts/generate-api-contract.mjs"
     - ".nvmrc"
   pull_request:
     paths:
     - "ui/**"
+    - "api-contract/**"
+    - "scripts/generate-api-contract.mjs"
     - ".nvmrc"
     branches:
     - master
@@ -36,8 +40,14 @@ jobs:
         run: yarn install --immutable --mode=skip-build
       - name: Prettier
         run: yarn run prettier --check --ignore-unknown src
+      - name: API contract drift
+        run: yarn contract:check
+      - name: TypeScript
+        run: yarn typecheck
       - name: ESLint
         run: yarn lint
+      - name: Tests
+        run: yarn test
       - name: Build webui
         run: yarn build
       - name: Upload artifacts

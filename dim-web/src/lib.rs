@@ -292,6 +292,7 @@ pub fn build_router(app: AppState) -> Router {
         .route("/ws", get(ws_handler))
         .merge(protected)
         .with_state(app)
+        .layer(axum::middleware::from_fn(middleware::request_id))
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 

@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useLocation } from "react-router";
 
 import { updateAuthToken } from "../actions/auth.js";
+import { logout } from "../actions/auth.js";
+import { SESSION_EXPIRED_EVENT } from "../api/transport";
 import { useAppDispatch, useAppSelector } from "../hooks/store";
 
 const AUTH_COOKIE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
@@ -27,8 +29,19 @@ export const AuthSessionController = () => {
     if (!loggedIn || !token || loginError || cookieToken) return;
 
     const expires = new Date(Date.now() + AUTH_COOKIE_LIFETIME_MS);
-    document.cookie = `token=${token};expires=${expires.toUTCString()};samesite=lax;`;
+    document.cookie = `token=${token};expires=${expires.toUTCString()};path=/;samesite=lax;`;
   }, [cookieToken, loggedIn, loginError, token]);
+
+  useEffect(() => {
+    const expire = () => {
+      dispatch(logout());
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.replace("/login?reason=expired");
+      }
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expire);
+  }, [dispatch]);
 
   return null;
 };

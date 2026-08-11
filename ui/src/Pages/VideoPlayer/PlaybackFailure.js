@@ -1,7 +1,7 @@
 export const PLAYBACK_ERROR_MESSAGE =
   "Dim could not prepare this video for playback. You can retry or return to the library.";
 
-export const RETRY_POSITION_KEY = "playbackRetryPosition";
+export const RETRY_POSITION_KEY = "dim:playback:retry-position";
 
 export const consumeRetryPosition = (storage) => {
   const value = Number(storage.getItem(RETRY_POSITION_KEY));

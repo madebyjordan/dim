@@ -77,7 +77,6 @@ function VideoMenuSettings() {
     };
   }, [handleClick]);
 
-  window.video = video;
   return (
     <div className="menu" ref={menuRef}>
       <div className="heading">

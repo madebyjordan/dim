@@ -67,18 +67,36 @@ pub enum Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         match self {
-            Self::NotFoundError => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            Self::ExternalSearchError(_) => {
-                (StatusCode::NOT_FOUND, self.to_string()).into_response()
+            Self::NotFoundError => crate::error::api_error(
+                StatusCode::NOT_FOUND,
+                "media_not_found",
+                "The requested media was not found.",
+            ),
+            Self::ExternalSearchError(error) => {
+                tracing::warn!(%error, "External media search failed");
+                crate::error::api_error(
+                    StatusCode::NOT_FOUND,
+                    "external_media_not_found",
+                    "No matching media was found.",
+                )
             }
-            Self::InvalidMediaType => {
-                (StatusCode::NOT_ACCEPTABLE, self.to_string()).into_response()
-            }
-            Self::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
-            }
-            Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            Self::InvalidMediaType => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_media_type",
+                "Choose a supported media type.",
+            ),
+            Self::InvalidCredentials => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "session_expired",
+                "Sign in to continue.",
+            ),
+            Self::Database(error) => {
+                tracing::error!(?error, "Media API database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }

@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router";
+import { skipToken } from "@reduxjs/toolkit/query/react";
 
 import Card from "../../Components/Card/Index";
 import { fetchLibraryScanStatus, rescanLibrary } from "../../actions/library";
 import useWebSocket from "../../hooks/ws";
 import Dropdown from "./Dropdown";
 import LibraryState from "./LibraryState";
+import { useGetLibraryMediaQuery } from "../../api/v1/foundation";
 
 import "./Cards.scss";
 
@@ -16,7 +18,6 @@ function Cards() {
   const ws = useWebSocket();
   const refreshTimer = useRef();
 
-  const auth = useSelector((store) => store.auth);
   const canRescan = useSelector((store) =>
     store.user.info.roles?.includes("owner")
   );
@@ -24,58 +25,33 @@ function Cards() {
   const scanState = useSelector((store) => store.library.scan_status[id]);
   const library = libraries.find((item) => String(item.id) === String(id));
 
-  const [cards, setCards] = useState([]);
-  const [mediaState, setMediaState] = useState("loading");
-  const [responseTitle, setResponseTitle] = useState("");
   const [scanStarting, setScanStarting] = useState(false);
+  const {
+    data: media,
+    isError,
+    isLoading,
+    isFetching,
+    refetch,
+  } = useGetLibraryMediaQuery(id ?? skipToken);
+  const responseTitle = media ? Object.keys(media)[0] : "";
+  const cards = media ? Object.values(media)[0] || [] : [];
+  const mediaState = isError
+    ? "error"
+    : (isLoading || isFetching) && !media
+    ? "loading"
+    : cards.length > 0
+    ? "results"
+    : "empty";
 
   const title = library?.name || responseTitle || "Library";
 
-  const fetchCards = useCallback(
-    async (showLoading = false) => {
-      if (showLoading) setMediaState("loading");
-
-      try {
-        const res = await fetch(`/api/v1/library/${id}/media`, {
-          headers: { authorization: auth.token },
-        });
-
-        if (res.status === 404) {
-          setCards([]);
-          setMediaState("empty");
-          return;
-        }
-
-        if (!res.ok) {
-          setMediaState("error");
-          return;
-        }
-
-        const payload = await res.json();
-        const payloadTitle = Object.keys(payload)[0];
-        const nextCards = Object.values(payload)[0] || [];
-
-        setResponseTitle(payloadTitle || "");
-        setCards(nextCards);
-        setMediaState(nextCards.length > 0 ? "results" : "empty");
-      } catch (_) {
-        setMediaState("error");
-      }
-    },
-    [auth.token, id]
-  );
-
   useEffect(() => {
-    setCards([]);
-    setResponseTitle("");
-    setMediaState("loading");
     dispatch(fetchLibraryScanStatus(id));
-    fetchCards();
-  }, [dispatch, fetchCards, id]);
+  }, [dispatch, id]);
 
   useEffect(() => {
-    if (scanState === "complete") fetchCards();
-  }, [fetchCards, scanState]);
+    if (scanState === "complete") refetch();
+  }, [refetch, scanState]);
 
   useEffect(() => {
     if (scanState !== "scanning") return undefined;
@@ -98,9 +74,9 @@ function Cards() {
       }
 
       clearTimeout(refreshTimer.current);
-      refreshTimer.current = setTimeout(() => fetchCards(), 500);
+      refreshTimer.current = setTimeout(() => refetch(), 500);
     },
-    [fetchCards, id]
+    [id, refetch]
   );
 
   useEffect(() => {

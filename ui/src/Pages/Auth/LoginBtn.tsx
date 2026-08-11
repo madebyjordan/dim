@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect } from "react";
 
-import { useAppDispatch, useAppSelector } from "hooks/store";
-import { authenticate } from "actions/auth.js";
+import { useAppDispatch } from "hooks/store";
+import { AUTH_LOGIN_OK } from "actions/types.js";
+import { useLoginMutation } from "api/v1/foundation";
+import type { ClientError } from "api/transport";
 
 interface Props {
   credentials: [string, string];
@@ -13,7 +15,7 @@ interface Props {
 
 function LoginBtn(props: Props) {
   const dispatch = useAppDispatch();
-  const auth = useAppSelector((store) => store.auth);
+  const [login, { isLoading }] = useLoginMutation();
 
   const { credentials, error } = props;
 
@@ -21,7 +23,7 @@ function LoginBtn(props: Props) {
   const [setUsernameErr, setPasswordErr] = error;
 
   const authorize = useCallback(async () => {
-    if (auth.login.logging_in) return;
+    if (isLoading) return;
 
     const allowedChars = /^[a-zA-Z0-9_.-]*$/;
 
@@ -43,10 +45,21 @@ function LoginBtn(props: Props) {
       return;
     }
 
-    dispatch(authenticate(username, password));
+    try {
+      const payload = await login({ username, password }).unwrap();
+      if ("BroadcastChannel" in window) {
+        const channel = new BroadcastChannel("dim");
+        channel.postMessage("login");
+        channel.close();
+      }
+      dispatch({ type: AUTH_LOGIN_OK, payload });
+    } catch (error) {
+      setPasswordErr((error as ClientError).message ?? "Unable to sign in.");
+    }
   }, [
-    auth.login.logging_in,
     dispatch,
+    isLoading,
+    login,
     password,
     setPasswordErr,
     setUsernameErr,
@@ -71,7 +84,7 @@ function LoginBtn(props: Props) {
   }, [onKeyDown]);
 
   return (
-    <button className={`${auth.login.logging_in}`} onClick={authorize}>
+    <button className={`${isLoading}`} onClick={authorize} disabled={isLoading}>
       Login
     </button>
   );

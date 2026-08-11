@@ -22,6 +22,15 @@ import {
 
 import { addNotification } from "../slices/notifications";
 
+const responseError = async (response, fallback) => {
+  try {
+    const body = await response.text();
+    return JSON.parse(body)?.error?.message || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
 export const authenticate = (username, password) => async (dispatch) => {
   dispatch({ type: AUTH_LOGIN_START });
 
@@ -42,7 +51,7 @@ export const authenticate = (username, password) => async (dispatch) => {
     if (res.status !== 200) {
       return dispatch({
         type: AUTH_LOGIN_ERR,
-        payload: res.statusText,
+        payload: await responseError(res, "Unable to sign in."),
       });
     }
 
@@ -75,7 +84,8 @@ export const authenticate = (username, password) => async (dispatch) => {
 };
 
 export const logout = () => async (dispatch) => {
-  document.cookie = "token=;expires=Thu, 01 Jan 1970 00:00:00 GMT";
+  document.cookie =
+    "token=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;samesite=lax";
 
   if ("BroadcastChannel" in window) {
     const bc = new BroadcastChannel("dim");
@@ -116,7 +126,7 @@ export const register = (username, password, invite) => async (dispatch) => {
     if (res.status !== 200) {
       return dispatch({
         type: AUTH_REGISTER_ERR,
-        payload: res.statusText,
+        payload: payload?.error?.message || "Unable to register.",
       });
     } else if (!!payload.error) {
       return dispatch({
@@ -199,7 +209,7 @@ export const delAccount = (password) => async (dispatch, getState) => {
     if (res.status !== 200) {
       dispatch({
         type: DEL_ACCOUNT_ERR,
-        payload: res.statusText,
+        payload: await responseError(res, "Unable to delete the account."),
       });
 
       return;
@@ -227,7 +237,7 @@ export const checkAdminExists = () => async (dispatch) => {
     if (res.status !== 200) {
       return dispatch({
         type: AUTH_CHECK_ADMIN_ERR,
-        payload: res.statusText,
+        payload: await responseError(res, "Unable to check Dim setup."),
       });
     }
 
@@ -263,7 +273,7 @@ export const createNewInvite = () => async (dispatch, getState) => {
     if (res.status !== 200) {
       return dispatch({
         type: CREATE_NEW_INVITE_ERR,
-        payload: res.statusText,
+        payload: await responseError(res, "Unable to create an invite."),
       });
     }
 
@@ -340,7 +350,7 @@ export const fetchInvites = () => async (dispatch, getState) => {
     if (res.status !== 200) {
       return dispatch({
         type: FETCH_INVITES_ERR,
-        payload: res.statusText,
+        payload: await responseError(res, "Unable to load invites."),
       });
     }
 

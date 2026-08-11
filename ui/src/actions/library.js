@@ -23,8 +23,12 @@ import { addNotification } from "../slices/notifications";
 
 const responseError = async (response, fallback) => {
   try {
-    const message = await response.text();
-    return message || fallback;
+    const body = await response.text();
+    try {
+      return JSON.parse(body)?.error?.message || fallback;
+    } catch {
+      return body || fallback;
+    }
   } catch (_) {
     return fallback;
   }

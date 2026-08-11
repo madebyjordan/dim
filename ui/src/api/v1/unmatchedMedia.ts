@@ -1,22 +1,11 @@
 import v1 from "./";
+import type {
+  UnmatchedFiles,
+  UnmatchedMediaFile as ContractUnmatchedMediaFile,
+} from "../generated";
 
-export interface UnmatchedMediaFiles {
-  count: number;
-  files: Array<UnmatchedMediaFile>;
-}
-
-export interface UnmatchedMediaFile {
-  id?: number;
-  name?: string;
-  folder?: string;
-  duration?: number;
-  file?: string;
-  files?: Array<UnmatchedMediaFile>;
-
-  // If the type is "directory", only the `files` and `folder` fields will be accessible.
-  // Otherwise, all the other fields will be accessible, with `duration` remaining optional.
-  type: "directory" | "file";
-}
+export type UnmatchedMediaFiles = UnmatchedFiles;
+export type UnmatchedMediaFile = ContractUnmatchedMediaFile;
 
 export const media = v1.injectEndpoints({
   endpoints: (build) => ({

@@ -159,6 +159,17 @@ async fn enforces_the_application_security_boundary() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("errors include a request ID")
+            .to_owned();
+        let error: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).unwrap();
+        assert_eq!(error["request_id"], request_id, "{uri}");
+        assert_eq!(error["error"]["code"], "session_expired", "{uri}");
+        assert!(error["error"]["message"].as_str().is_some(), "{uri}");
     }
 
     let response = test

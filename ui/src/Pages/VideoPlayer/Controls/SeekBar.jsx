@@ -6,19 +6,15 @@ import { VideoPlayerContext } from "../Context";
 
 import "./SeekBar.scss";
 import { updateVideo } from "../../../actions/video";
+import { useSaveProgressMutation } from "../../../api/v1/foundation";
 
 function VideoSeekBar(props) {
   const dispatch = useDispatch();
+  const [saveProgress] = useSaveProgressMutation();
 
   const { player } = useContext(VideoPlayerContext);
 
-  const { auth, video } = useSelector(
-    (store) => ({
-      auth: store.auth,
-      video: store.video,
-    }),
-    shallowEqual
-  );
+  const video = useSelector((store) => store.video, shallowEqual);
 
   const seekBar = useRef(null);
 
@@ -26,30 +22,15 @@ function VideoSeekBar(props) {
   const bufferBar = useRef(null);
 
   const { seekTo } = props;
-  const { token } = auth;
-
   // save progress every 15 seconds
   useEffect(() => {
     if (video.currentTime % 15 !== 0 || video.currentTime === 0) return;
 
-    (async () => {
-      const config = {
-        method: "POST",
-        headers: {
-          authorization: token,
-        },
-      };
-
-      console.log("[VIDEO] saving progress at", video.currentTime);
-
-      await fetch(
-        `/api/v1/media/${video.episode?.id || video.mediaID}/progress?offset=${
-          video.currentTime
-        }`,
-        config
-      );
-    })();
-  }, [video.currentTime, token, video.episode?.id, video.mediaID]);
+    saveProgress({
+      id: video.episode?.id || video.mediaID,
+      offset: video.currentTime,
+    });
+  }, [saveProgress, video.currentTime, video.episode?.id, video.mediaID]);
 
   // current time
   useEffect(() => {

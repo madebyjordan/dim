@@ -5,6 +5,8 @@ import { checkAdminExists } from "../actions/auth.js";
 import { fetchUser } from "../actions/user.js";
 import { useAppDispatch, useAppSelector } from "../hooks/store";
 import { getAuthTokenCookie } from "./SessionControllers";
+import { apiRequest } from "../api/transport";
+import { clearPlaybackSession, getPlaybackSession } from "../storage";
 
 function PrivateRoute() {
   const dispatch = useAppDispatch();
@@ -19,16 +21,16 @@ function PrivateRoute() {
   useEffect(() => {
     if (location.pathname.includes("/play/")) return;
 
-    const GID = sessionStorage.getItem("GID");
+    const GID = getPlaybackSession();
 
     if (!GID) return;
 
     (async () => {
-      await fetch(`/api/v1/stream/${GID}/state/kill`, {
+      await apiRequest(`stream/${GID}/state/kill`, {
         method: "DELETE",
-        headers: { Authorization: token },
-      });
-      sessionStorage.clear();
+        token,
+      }).catch(() => undefined);
+      clearPlaybackSession();
     })();
   }, [location.pathname, token]);
 
@@ -43,10 +45,24 @@ function PrivateRoute() {
   if (!token && !tokenInCookie) {
     if (adminExists === true) return <Navigate to="/login" replace />;
     if (adminExists === false) return <Navigate to="/register" replace />;
-    return null;
+    return <div className="appLoad">Checking Dim setup…</div>;
   }
 
-  return userFetched && !userError && token ? <Outlet /> : null;
+  if (userError) {
+    return (
+      <div className="appLoad error">
+        <h2>Unable to load your session</h2>
+        <p>Dim may be unavailable, or your session may have expired.</p>
+        <button onClick={() => window.location.reload()}>Try again</button>
+      </div>
+    );
+  }
+
+  return userFetched && token ? (
+    <Outlet />
+  ) : (
+    <div className="appLoad">Loading your account…</div>
+  );
 }
 
 export default PrivateRoute;

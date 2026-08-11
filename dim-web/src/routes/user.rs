@@ -36,15 +36,33 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         match self {
-            Self::UsernameNotAvailable => {
-                (StatusCode::BAD_REQUEST, self.to_string()).into_response()
-            }
-            Self::UnsupportedFile => (StatusCode::NOT_ACCEPTABLE, self.to_string()).into_response(),
-            Self::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
-            }
-            Self::UploadFailed | Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            Self::UsernameNotAvailable => crate::error::api_error(
+                StatusCode::CONFLICT,
+                "username_unavailable",
+                "That username is not available.",
+            ),
+            Self::UnsupportedFile => crate::error::api_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_file",
+                "This file type is not supported.",
+            ),
+            Self::InvalidCredentials => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_credentials",
+                "The supplied credentials are incorrect.",
+            ),
+            Self::UploadFailed => crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload_failed",
+                "The upload could not be completed.",
+            ),
+            Self::Database(error) => {
+                tracing::error!(?error, "Account API database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }

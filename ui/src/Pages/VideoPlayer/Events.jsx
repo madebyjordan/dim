@@ -38,7 +38,6 @@ function VideoEvents() {
   const eCanPlay = useCallback(() => {
     console.log("[VIDEO] can play");
 
-    window.video = video;
     // we need to do all this shit so that the UI selects the correct tracks.
     const videoQualityIndex = player.getQualityFor("video");
     const videoQuality =

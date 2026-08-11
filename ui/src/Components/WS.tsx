@@ -1,8 +1,7 @@
-import { createContext, useEffect, useState, useCallback } from "react";
+import { createContext, useEffect, useRef, useState } from "react";
 
-import { addNotification } from "../slices/notifications";
-import { useAppDispatch, useAppSelector } from "../hooks/store";
-import { wsConnect, wsShowReconnect } from "../actions/ws";
+import { useAppSelector } from "../hooks/store";
+import { DimWebSocket, type ConnectionState } from "../api/websocket";
 import DimLogo from "../assets/DimLogo";
 import Bar from "../Components/Load/Bar";
 
@@ -10,139 +9,60 @@ import "./WS.scss";
 
 export const WebSocketContext = createContext<WebSocket | null>(null);
 
-// initialize websocket connection for entire app
-function WS(props: React.PropsWithChildren<{}>) {
-  const dispatch = useAppDispatch();
-
-  const ws = useAppSelector((state) => state.ws);
-  const auth = useAppSelector((state) => state.auth);
-
-  const [conn, setConn] = useState<WebSocket | null>(null);
-  const [tryingAgainIn, setTryingAgainIn] = useState(5);
-  const [silentConnect, setSilentConnect] = useState(false);
-  const [intervalID, setIntervalID] = useState<number>();
-  const [msg, setMsg] = useState("Connection failed");
-  const [tries, setTries] = useState(0);
-
-  const onNewSocket = (newSocket: WebSocket) => {
-    setConn(newSocket);
-  };
-
-  const retry = useCallback(() => {
-    dispatch(wsConnect(onNewSocket));
-    setMsg("Connection failed");
-    setTries((count) => count + 1);
-    setTryingAgainIn(5);
-    clearInterval(intervalID);
-    setIntervalID(undefined);
-  }, [dispatch, intervalID]);
-
-  const handleClose = useCallback(
-    (e: CloseEvent) => {
-      if (e.wasClean) return;
-
-      dispatch(
-        addNotification({
-          msg: "Connection to server lost, some actions might not work.",
-        })
-      );
-
-      dispatch(wsShowReconnect());
-
-      setTries(0);
-      setSilentConnect(true);
-      dispatch(wsConnect(onNewSocket));
-    },
-    [dispatch]
-  );
-
-  const handleOpen = useCallback(() => {
-    if (!silentConnect) return;
-    setSilentConnect(false);
-  }, [silentConnect]);
+function WS({ children }: React.PropsWithChildren) {
+  const token = useAppSelector((state) => state.auth.token);
+  const [socket, setSocket] = useState<WebSocket | null>(null);
+  const [state, setState] = useState<ConnectionState>("connecting");
+  const [retryInMs, setRetryInMs] = useState<number>();
+  const manager = useRef<DimWebSocket | undefined>(undefined);
 
   useEffect(() => {
-    if (ws.error && !intervalID) {
-      const id = window.setInterval(() => {
-        setTryingAgainIn((state) => state - 1);
-      }, 1000);
+    const connection = new DimWebSocket({
+      onSocket: setSocket,
+      onState: (next, retry) => {
+        setState(next);
+        setRetryInMs(retry);
+      },
+    });
+    manager.current = connection;
+    connection.start(null);
+    return () => connection.stop();
+  }, []);
 
-      setIntervalID(id);
-    }
+  useEffect(() => manager.current?.setToken(token), [token]);
 
-    return () => {
-      if (!intervalID) return;
-      clearInterval(intervalID);
-    };
-  }, [intervalID, ws.error]);
-
-  useEffect(() => {
-    if (tryingAgainIn <= 0) {
-      retry();
-    }
-  }, [intervalID, retry, tryingAgainIn]);
-
-  useEffect(() => {
-    dispatch(wsConnect(onNewSocket));
-  }, [dispatch]);
-
-  useEffect(() => {
-    if (!conn) return;
-
-    conn.addEventListener("open", handleOpen);
-    conn.addEventListener("close", handleClose);
-
-    return () => {
-      conn.removeEventListener("open", handleOpen);
-      conn.removeEventListener("close", handleClose);
-    };
-  }, [conn, handleClose, handleOpen]);
-
-  useEffect(() => {
-    if (!auth.token || !conn) return;
-
-    const payload = {
-      type: "authenticate",
-      token: auth.token,
-    };
-
-    conn.send(JSON.stringify(payload));
-  }, [auth.token, conn]);
-
-  if (!silentConnect && (ws.connecting || ws.error)) {
+  const initialFailure = !socket && ["offline", "reconnecting"].includes(state);
+  if (initialFailure) {
     return (
       <div className="appLoad showAfter100ms">
         <DimLogo />
-        {ws.error && (
-          <div className="error">
-            <h2>{msg}</h2>
-            {tries > 0 && <p>Seems like maybe the server is offline</p>}
-            <button onClick={retry}>Try reconnect ({tryingAgainIn})</button>
-          </div>
-        )}
-        {!ws.error && (
-          <>
-            <h2>Connecting to server</h2>
-            <Bar />
-          </>
-        )}
+        <div className="error">
+          <h2>
+            {state === "offline" ? "Server unavailable" : "Connection lost"}
+          </h2>
+          <p>Dim will keep trying with a bounded backoff.</p>
+          <button onClick={() => manager.current?.retryNow()}>
+            Reconnect now{retryInMs ? ` (${Math.ceil(retryInMs / 1000)}s)` : ""}
+          </button>
+        </div>
       </div>
     );
   }
 
-  if ((ws.connected && !ws.error) || silentConnect) {
+  if (!socket && state === "connecting") {
     return (
-      <WebSocketContext.Provider value={conn}>
-        {props.children}
-      </WebSocketContext.Provider>
+      <div className="appLoad showAfter100ms">
+        <DimLogo />
+        <h2>Connecting to server</h2>
+        <Bar />
+      </div>
     );
   }
 
   return (
-    <div className="appLoad showAfter100ms">
-      <DimLogo />
-      <Bar />
-    </div>
+    <WebSocketContext.Provider value={socket}>
+      {children}
+    </WebSocketContext.Provider>
   );
 }
 

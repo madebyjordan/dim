@@ -14,6 +14,7 @@ import {
 } from "./Routes/SessionControllers";
 import MainLayout from "./Layouts/MainLayout";
 import Notifications from "./Components/Notifications";
+import AppErrorBoundary from "./Components/AppErrorBoundary";
 
 import Dashboard from "./Pages/Dashboard/Index";
 import Library from "./Pages/Library/Index";
@@ -51,12 +52,14 @@ const App = () => (
     <ThemeController />
     <FaviconController />
     <WS>
-      <BrowserRouter>
-        <AuthSessionController />
-        <CrossTabAuthController />
-        <ScrollToTop />
-        <ApplicationRoutes />
-      </BrowserRouter>
+      <AppErrorBoundary>
+        <BrowserRouter>
+          <AuthSessionController />
+          <CrossTabAuthController />
+          <ScrollToTop />
+          <ApplicationRoutes />
+        </BrowserRouter>
+      </AppErrorBoundary>
       <Notifications />
     </WS>
   </>

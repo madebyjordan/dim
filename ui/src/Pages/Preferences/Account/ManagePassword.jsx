@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDispatch } from "react-redux";
 
-import { changePassword } from "../../../actions/auth";
+import { useChangePasswordMutation } from "../../../api/v1/foundation";
+import { addNotification } from "../../../slices/notifications";
 import Button from "../../../Components/Misc/Button";
 import Field from "../../Auth/Field";
 
 function ManagePassword() {
   const dispatch = useDispatch();
+  const [changePassword] = useChangePasswordMutation();
 
   const [oldPass, setOldPass] = useState("");
   const [oldPassErr, setOldPassErr] = useState("");
@@ -23,11 +25,20 @@ function ManagePassword() {
       return;
     }
 
-    await dispatch(changePassword(oldPass, newPass));
+    try {
+      await changePassword({
+        old_password: oldPass,
+        new_password: newPass,
+      }).unwrap();
+      dispatch(addNotification({ msg: "Your password has now been updated." }));
+    } catch (failure) {
+      setOldPassErr(failure?.message || "Failed to change password.");
+      return;
+    }
 
     setOldPass("");
     setNewPass("");
-  }, [dispatch, newPass, oldPass, valid]);
+  }, [changePassword, dispatch, newPass, oldPass, valid]);
 
   const cancelChangePass = useCallback(async () => {
     setOldPass("");

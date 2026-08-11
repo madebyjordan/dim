@@ -28,12 +28,19 @@ import NextVideo from "./NextVideo/Index";
 import BackButton from "./BackButton";
 import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
 import { createPlaybackState } from "./Navigation";
+import { clearPlaybackSession, setPlaybackSession } from "../../storage";
+import {
+  useCreatePlaybackSessionMutation,
+  useKillPlaybackSessionMutation,
+} from "../../api/v1/foundation";
 
 import "./Index.scss";
 
 function VideoPlayer() {
   const params = useParams();
   const dispatch = useDispatch();
+  const [createPlaybackSession] = useCreatePlaybackSessionMutation();
+  const [killPlaybackSession] = useKillPlaybackSessionMutation();
   const location = useLocation();
   const navigate = useNavigate();
   const [player, setPlayer] = useState();
@@ -55,8 +62,6 @@ function VideoPlayer() {
   const videoPlayer = useRef(null);
   const overlay = useRef(null);
   const videoRef = useRef(null);
-
-  const { token } = auth;
 
   const { data: media } = useGetMediaQuery(
     video.mediaID ? video.mediaID : skipToken
@@ -117,24 +122,17 @@ function VideoPlayer() {
     if (video.gid) return;
 
     const force_ass = localStorage.getItem("enable_ssa") === "true";
-    const host = `/api/v1/stream/${params.fileID}/manifest?force_ass=${force_ass}`;
-
     (async () => {
-      const config = {
-        headers: {
-          authorization: token,
-        },
-      };
-
       try {
-        const res = await fetch(host, config);
-        if (!res.ok) throw new Error(`Manifest request failed (${res.status})`);
-        const payload = await res.json();
+        const payload = await createPlaybackSession({
+          fileId: params.fileID,
+          forceAss: force_ass,
+        }).unwrap();
         if (!payload.gid || !Array.isArray(payload.tracks)) {
           throw new Error("Manifest response was incomplete");
         }
 
-        sessionStorage.setItem("GID", payload.gid);
+        setPlaybackSession(payload.gid);
         dispatch(setGID(payload.gid));
 
         const tVideos = payload.tracks.filter(
@@ -177,7 +175,7 @@ function VideoPlayer() {
         );
       }
     })();
-  }, [dispatch, params.fileID, token, video.gid]);
+  }, [createPlaybackSession, dispatch, params.fileID, video.gid]);
 
   useEffect(() => {
     if (!video.gid || !manifest.virtual.loaded) return;
@@ -264,18 +262,14 @@ function VideoPlayer() {
 
       if (!video.gid) return;
 
-      (async () => {
-        await fetch(`/api/v1/stream/${video.gid}/state/kill`, {
-          method: "DELETE",
-          headers: { Authorization: auth.token },
-        });
-        sessionStorage.removeItem("GID");
-      })();
+      killPlaybackSession(video.gid);
+      clearPlaybackSession();
     };
   }, [
     audioTracks.list,
     auth.token,
     dispatch,
+    killPlaybackSession,
     manifest.virtual.loaded,
     video.gid,
     videoTracks.list,

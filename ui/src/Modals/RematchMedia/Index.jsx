@@ -1,7 +1,7 @@
 import { cloneElement, useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router";
 import Modal from "react-modal";
-import { shallowEqual, useDispatch, useSelector } from "react-redux";
+import { useDispatch } from "react-redux";
 
 import { addNotification } from "../../slices/notifications";
 import MediaTypeSelection from "./MediaTypeSelection";
@@ -9,6 +9,7 @@ import Button from "../../Components/Misc/Button";
 
 import Search from "./Search";
 import { RematchContext } from "./Context";
+import { useRematchMediaMutation } from "../../api/v1/foundation";
 
 import "./Index.scss";
 
@@ -34,12 +35,7 @@ function RematchMediaModal(props) {
 
   const { id } = useParams();
 
-  const { token } = useSelector(
-    (store) => ({
-      token: store.auth.token,
-    }),
-    shallowEqual
-  );
+  const [runRematch] = useRematchMediaMutation();
 
   const [visible, setVisible] = useState(false);
 
@@ -83,12 +79,14 @@ function RematchMediaModal(props) {
 
     setMatching(true);
 
-    const { url, config } = buildRematchRequest(id, token, tmdbID, mediaType);
-
-    const req = await fetch(url, config);
-
-    if (req.status !== 200) {
-      setError(req.statusText);
+    try {
+      await runRematch({
+        id,
+        match: { external_id: String(tmdbID), media_type: mediaType },
+      }).unwrap();
+    } catch (failure) {
+      setError(failure?.message || "Unable to rematch this media.");
+      setMatching(false);
       return;
     }
 
@@ -108,7 +106,7 @@ function RematchMediaModal(props) {
     setError,
     setMatching,
     tmdbID,
-    token,
+    runRematch,
     close,
   ]);
 

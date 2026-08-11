@@ -55,12 +55,23 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         match self {
-            Self::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
-            }
-            Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
-            Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            Self::InvalidCredentials => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "session_expired",
+                "Sign in to continue.",
+            ),
+            Self::BadRequest(_) => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "The request is invalid.",
+            ),
+            Self::Database(error) => {
+                tracing::error!(?error, "Authentication API database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }
@@ -299,11 +310,18 @@ pub enum LoginError {
 impl IntoResponse for LoginError {
     fn into_response(self) -> Response {
         match self {
-            Self::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
-            }
-            Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            Self::InvalidCredentials => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_credentials",
+                "The username or password is incorrect.",
+            ),
+            Self::Database(error) => {
+                tracing::error!(?error, "Login database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }
@@ -383,9 +401,18 @@ pub enum RegisterError {
 impl IntoResponse for RegisterError {
     fn into_response(self) -> Response {
         match self {
-            RegisterError::NoToken => (StatusCode::UNAUTHORIZED, self.to_string()).into_response(),
-            RegisterError::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            RegisterError::NoToken => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "invite_required",
+                "A valid invite token is required.",
+            ),
+            RegisterError::Database(error) => {
+                tracing::error!(?error, "Registration database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }
@@ -470,5 +497,10 @@ pub async fn register(
     // FIXME: Return internal server error.
     tx.commit().await.map_err(DatabaseError::from)?;
 
-    Ok(axum::response::Json(json!({ "username": res.username })).into_response())
+    let token = dim_database::user::Login::create_cookie(res.id);
+    Ok(axum::response::Json(json!({
+        "username": res.username,
+        "token": token,
+    }))
+    .into_response())
 }

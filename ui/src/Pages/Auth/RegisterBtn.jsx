@@ -1,17 +1,13 @@
 import { useCallback, useEffect } from "react";
-import { shallowEqual, useDispatch, useSelector } from "react-redux";
-import { register, authenticate } from "../../actions/auth.js";
+import { useDispatch, useSelector } from "react-redux";
+import { AUTH_LOGIN_OK } from "../../actions/types.js";
+import { useRegisterMutation } from "../../api/v1/foundation";
 
 function RegisterBtn(props) {
   const dispatch = useDispatch();
+  const [register, { isLoading }] = useRegisterMutation();
 
-  const { auth, admin_exists } = useSelector(
-    (store) => ({
-      auth: store.auth,
-      admin_exists: store.auth.admin_exists,
-    }),
-    shallowEqual
-  );
+  const admin_exists = useSelector((store) => store.auth.admin_exists);
 
   const { credentials, error, registering } = props;
 
@@ -19,7 +15,7 @@ function RegisterBtn(props) {
   const [setUsernameErr, setPassErr, setInviteErr] = error;
 
   const authorize = useCallback(async () => {
-    if (registering) return;
+    if (isLoading || registering) return;
 
     const allowedChars = /^[a-zA-Z0-9_.-]*$/;
 
@@ -46,19 +42,31 @@ function RegisterBtn(props) {
         setInviteErr("Code has to be 36 characters.");
         return;
       }
+    }
 
-      await dispatch(register(username, pass, invite));
-      dispatch(authenticate(username, pass));
-    } else {
-      await dispatch(register(username, pass));
-      dispatch(authenticate(username, pass));
+    try {
+      const payload = await register({
+        username,
+        password: pass,
+        ...(admin_exists && { invite_token: invite }),
+      }).unwrap();
+      dispatch({ type: AUTH_LOGIN_OK, payload });
+      if ("BroadcastChannel" in window) {
+        const channel = new BroadcastChannel("dim");
+        channel.postMessage("login");
+        channel.close();
+      }
+    } catch (failure) {
+      setInviteErr(failure?.message || "Unable to register.");
     }
   }, [
     admin_exists,
     dispatch,
     invite,
+    isLoading,
     pass,
     registering,
+    register,
     setInviteErr,
     setPassErr,
     setUsernameErr,
@@ -83,7 +91,7 @@ function RegisterBtn(props) {
   }, [onKeyDown]);
 
   return (
-    <button className={`${auth.registering}`} onClick={authorize}>
+    <button className={`${isLoading}`} onClick={authorize} disabled={isLoading}>
       Register
     </button>
   );
