@@ -69,7 +69,9 @@ Dim creates local state relative to its runtime directory. `scripts/run.sh` uses
 
 Existing configuration files are preserved. If upgrading from a version that exposed `secret_key`, remove that setting once and restart Dim to generate a new secret and invalidate existing sessions.
 
-Dim listens on all local interfaces so trusted devices on the same home network can connect using the host machine's IP address. The current deployment model is not intended for direct internet exposure.
+Dim listens on `127.0.0.1` by default. Trusted LAN access is opt-in with an explicit listener, for example `dim --bind-address 0.0.0.0` or `bind_address = "0.0.0.0"` in the configuration file. The effective listener is logged at startup.
+
+Direct internet exposure is unsupported. Dim has no built-in TLS termination; use an appropriately configured trusted reverse proxy when HTTPS access is intentional. See [the deployment and authentication boundary](docs/design/deployment-security.md) for proxy settings, session migration behavior, and security limits.
 
 ## Running from binaries
 
@@ -100,14 +102,14 @@ In this example, the path `/media` on the host is made available at the same pat
 This name "media" is arbitrary and you can choose whatever you like.
 
 ```
-docker run -d -p 8000:8000/tcp -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro ghcr.io/dusk-labs/dim:dev
+docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro ghcr.io/dusk-labs/dim:dev
 ```
 The multi-architecture image resides at `ghcr.io/dusk-labs/dim:master`.
 
 To use hardware acceleration, mount the relevant device:
 
 ```
-docker run -d -p 8000:8000/tcp -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro --device=/dev/dri/renderD128 ghcr.io/dusk-labs/dim:dev
+docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro --device=/dev/dri/renderD128 ghcr.io/dusk-labs/dim:dev
 ```
 
 Refer to [docker-compose-template.yml](docker-compose-template.yml) to run Dim using Docker Compose.

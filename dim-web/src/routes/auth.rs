@@ -1,7 +1,7 @@
 //! This module contains all docs and APIs related to authentication and user creation.
 //!
 //! # Request Authentication and Authorization
-//! Most API endpoints require a valid JWT authentication token. If no such token is supplied, the
+//! Most API endpoints require a valid server-side session token. If no such token is supplied, the
 //! API will return [`AuthError`]. Authentication tokens can be obtained by logging in with
 //! the [`login`] method. Authentication tokens must be passed to the server through a
 //! `Authroization` header.
@@ -13,25 +13,27 @@
 //! ```
 //!
 //! # Token expiration
-//! By default tokens expire after exactly two weeks, once the tokens expire the client must renew
-//! them. At the moment renewing the token is only possible by logging in again.
+//! Sessions expire after the configured finite lifetime (seven days by default). Renewal requires
+//! logging in again, and password changes revoke all sessions for the account.
 //!
 //! [`AuthError`]
 //! [`login`]: fn@login
 
 use crate::AppState;
+use axum::extract::ConnectInfo;
 use axum::extract::Json;
 use axum::extract::Path;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::Extension;
+use std::net::SocketAddr;
 
 use dim_database::asset::Asset;
 use dim_database::progress::Progress;
-use dim_database::user::verify;
 use dim_database::user::InsertableUser;
 use dim_database::user::Login;
+use dim_database::user::Session;
 use dim_database::user::User;
 use dim_database::DatabaseError;
 
@@ -303,6 +305,10 @@ pub async fn whoami(
 pub enum LoginError {
     /// The provided username or password is incorrect.
     InvalidCredentials,
+    /// Too many failed attempts.
+    Throttled,
+    /// Invalid credential input.
+    InvalidInput,
     /// database: {0}
     Database(#[from] DatabaseError),
 }
@@ -314,6 +320,16 @@ impl IntoResponse for LoginError {
                 StatusCode::UNAUTHORIZED,
                 "invalid_credentials",
                 "The username or password is incorrect.",
+            ),
+            Self::Throttled => crate::error::api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "login_throttled",
+                "Too many failed sign-in attempts. Try again shortly.",
+            ),
+            Self::InvalidInput => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_credentials_input",
+                "Username and password must meet the documented length limits.",
             ),
             Self::Database(error) => {
                 tracing::error!(?error, "Login database failure");
@@ -356,24 +372,58 @@ impl IntoResponse for LoginError {
 /// [`Login`]: dim_database::user::Login
 #[axum::debug_handler]
 pub async fn login(
-    State(AppState { conn, .. }): State<AppState>,
+    State(app): State<AppState>,
+    remote: Option<ConnectInfo<SocketAddr>>,
     Json(new_login): Json<Login>,
 ) -> Result<Response, LoginError> {
-    let mut tx = conn.read().begin().await.map_err(DatabaseError::from)?;
-    let user = User::get(&mut tx, &new_login.username)
-        .await
-        .map_err(|_| LoginError::InvalidCredentials)?;
-    let pass = user.get_pass(&mut tx).await?;
-    if verify(user.username, pass, new_login.password) {
-        let token = dim_database::user::Login::create_cookie(user.id);
-
-        return Ok(axum::response::Json(json!({
-            "token": token,
-        }))
-        .into_response());
+    validate_login_credentials(&new_login.username, &new_login.password)
+        .map_err(|_| LoginError::InvalidInput)?;
+    let remote_ip = remote
+        .map(|value| value.0.ip())
+        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+    if !app.login_allowed(remote_ip) {
+        return Err(LoginError::Throttled);
     }
+    let mut lock = app.conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock)
+        .await
+        .map_err(DatabaseError::from)?;
+    let user = match User::authenticate(&mut tx, new_login.username, new_login.password).await {
+        Ok(user) => user,
+        Err(_) => {
+            app.record_login_failure(remote_ip);
+            return Err(LoginError::InvalidCredentials);
+        }
+    };
+    let (_, token) =
+        Session::create(&mut tx, user.id, app.settings.running().session_ttl_seconds).await?;
+    tx.commit().await.map_err(DatabaseError::from)?;
+    app.clear_login_failures(remote_ip);
+    Ok(session_response(
+        json!({ "token": token }),
+        &token,
+        app.settings.running(),
+    ))
+}
 
-    Err(LoginError::InvalidCredentials)
+pub async fn logout(
+    Extension(session): Extension<Session>,
+    State(AppState { conn, settings, .. }): State<AppState>,
+) -> Result<Response, AuthError> {
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock)
+        .await
+        .map_err(DatabaseError::from)?;
+    Session::revoke(&mut tx, &session.id).await?;
+    tx.commit().await.map_err(DatabaseError::from)?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        http::header::SET_COOKIE,
+        expired_session_cookie(settings.running())
+            .parse()
+            .expect("static cookie is valid"),
+    );
+    Ok(response)
 }
 
 pub async fn admin_exists(
@@ -394,6 +444,8 @@ pub async fn admin_exists(
 pub enum RegisterError {
     /// the request does not contain a valid invite token
     NoToken,
+    /// Invalid credential input.
+    InvalidInput,
     /// database: {0}
     Database(#[from] DatabaseError),
 }
@@ -405,6 +457,11 @@ impl IntoResponse for RegisterError {
                 StatusCode::UNAUTHORIZED,
                 "invite_required",
                 "A valid invite token is required.",
+            ),
+            RegisterError::InvalidInput => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_credentials_input",
+                "Use a username of 1-64 characters and a password of 8-1024 characters.",
             ),
             RegisterError::Database(error) => {
                 tracing::error!(?error, "Registration database failure");
@@ -454,11 +511,13 @@ impl IntoResponse for RegisterError {
 /// [`Login`]: dim_database::user::Login
 #[axum::debug_handler]
 pub async fn register(
-    State(AppState { conn, .. }): State<AppState>,
+    State(app): State<AppState>,
     Json(new_user): Json<Login>,
 ) -> Result<Response, RegisterError> {
+    validate_credentials(&new_user.username, &new_user.password)
+        .map_err(|_| RegisterError::InvalidInput)?;
     // FIXME: Return INTERNAL SERVER ERROR maybe with a traceback?
-    let mut lock = conn.writer().lock_owned().await;
+    let mut lock = app.conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock)
         .await
         .map_err(DatabaseError::from)?;
@@ -495,12 +554,86 @@ pub async fn register(
     .await?;
 
     // FIXME: Return internal server error.
+    let (_, token) =
+        Session::create(&mut tx, res.id, app.settings.running().session_ttl_seconds).await?;
     tx.commit().await.map_err(DatabaseError::from)?;
+    Ok(session_response(
+        json!({ "username": res.username, "token": token }),
+        &token,
+        app.settings.running(),
+    ))
+}
 
-    let token = dim_database::user::Login::create_cookie(res.id);
-    Ok(axum::response::Json(json!({
-        "username": res.username,
-        "token": token,
-    }))
-    .into_response())
+fn validate_login_credentials(username: &str, password: &str) -> Result<(), ()> {
+    if !(1..=64).contains(&username.chars().count())
+        || username.chars().any(char::is_control)
+        || !(1..=1024).contains(&password.chars().count())
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_credentials(username: &str, password: &str) -> Result<(), ()> {
+    validate_login_credentials(username, password)?;
+    if password.chars().count() < 8 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn session_response(
+    body: serde_json::Value,
+    token: &str,
+    settings: &dim_core::settings::GlobalSettings,
+) -> Response {
+    let mut response = axum::response::Json(body).into_response();
+    response.headers_mut().insert(
+        http::header::SET_COOKIE,
+        session_cookie(token, settings)
+            .parse()
+            .expect("session token is a valid cookie value"),
+    );
+    response
+}
+
+fn session_cookie(token: &str, settings: &dim_core::settings::GlobalSettings) -> String {
+    format!(
+        "dim_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+        settings.session_ttl_seconds,
+        if settings.https_reverse_proxy {
+            "; Secure"
+        } else {
+            ""
+        }
+    )
+}
+
+fn expired_session_cookie(settings: &dim_core::settings::GlobalSettings) -> String {
+    format!(
+        "dim_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        if settings.https_reverse_proxy {
+            "; Secure"
+        } else {
+            ""
+        }
+    )
+}
+
+#[cfg(test)]
+mod session_cookie_tests {
+    use super::*;
+
+    #[test]
+    fn cookie_attributes_follow_deployment_mode() {
+        let mut settings = dim_core::settings::GlobalSettings::default();
+        let local = session_cookie("token", &settings);
+        assert!(local.contains("HttpOnly"));
+        assert!(local.contains("SameSite=Lax"));
+        assert!(!local.contains("Secure"));
+
+        settings.https_reverse_proxy = true;
+        settings.trust_proxy_headers = true;
+        assert!(session_cookie("token", &settings).contains("; Secure"));
+    }
 }

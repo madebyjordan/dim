@@ -6,31 +6,24 @@ import { logout } from "../actions/auth.js";
 import { SESSION_EXPIRED_EVENT } from "../api/transport";
 import { useAppDispatch, useAppSelector } from "../hooks/store";
 
-const AUTH_COOKIE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
-
 export const getAuthTokenCookie = () =>
-  document.cookie
-    .split("; ")
-    .find((cookie) => cookie.startsWith("token="))
-    ?.slice("token=".length);
+  window.sessionStorage.getItem("dim-bearer-token") ?? undefined;
 
 export const AuthSessionController = () => {
   const dispatch = useAppDispatch();
   const token = useAppSelector((state) => state.auth.token);
   const loggedIn = useAppSelector((state) => state.auth.login.logged_in);
   const loginError = useAppSelector((state) => state.auth.login.error);
-  const cookieToken = getAuthTokenCookie();
+  const storedToken = getAuthTokenCookie();
 
   useEffect(() => {
-    if (cookieToken && !token) dispatch(updateAuthToken(cookieToken));
-  }, [cookieToken, dispatch, token]);
+    if (storedToken && !token) dispatch(updateAuthToken(storedToken));
+  }, [storedToken, dispatch, token]);
 
   useEffect(() => {
-    if (!loggedIn || !token || loginError || cookieToken) return;
-
-    const expires = new Date(Date.now() + AUTH_COOKIE_LIFETIME_MS);
-    document.cookie = `token=${token};expires=${expires.toUTCString()};path=/;samesite=lax;`;
-  }, [cookieToken, loggedIn, loginError, token]);
+    if (!loggedIn || !token || loginError || storedToken === token) return;
+    window.sessionStorage.setItem("dim-bearer-token", token);
+  }, [storedToken, loggedIn, loginError, token]);
 
   useEffect(() => {
     const expire = () => {

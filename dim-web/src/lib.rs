@@ -1,7 +1,11 @@
 #![deny(warnings)]
 
+use std::collections::{HashMap, VecDeque};
 use std::future::IntoFuture;
+use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub mod routes;
 pub mod tree;
@@ -38,6 +42,7 @@ pub struct AppState {
     stream_tracking: StreamTracking,
     library_workers: LibraryWorkers,
     settings: SettingsStore,
+    login_failures: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
 }
 
 impl AppState {
@@ -57,7 +62,51 @@ impl AppState {
             stream_tracking,
             library_workers: LibraryWorkers::default(),
             settings,
+            login_failures: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn login_allowed(&self, remote: IpAddr) -> bool {
+        if self
+            .settings
+            .running()
+            .bind_address
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(true)
+        {
+            return true;
+        }
+        let now = Instant::now();
+        let mut failures = self
+            .login_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let attempts = failures.entry(remote).or_default();
+        while attempts
+            .front()
+            .map(|then| now.duration_since(*then).as_secs() >= 60)
+            .unwrap_or(false)
+        {
+            attempts.pop_front();
+        }
+        attempts.len() < self.settings.running().login_attempts_per_minute as usize
+    }
+
+    pub fn record_login_failure(&self, remote: IpAddr) {
+        self.login_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(remote)
+            .or_default()
+            .push_back(Instant::now());
+    }
+
+    pub fn clear_login_failures(&self, remote: IpAddr) {
+        self.login_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&remote);
     }
 
     pub fn with_library_workers(mut self, library_workers: LibraryWorkers) -> Self {
@@ -225,6 +274,7 @@ async fn ws_handler(
 pub fn build_router(app: AppState) -> Router {
     let protected = axum::Router::new()
         .route("/api/v1/auth/whoami", get(routes::auth::whoami))
+        .route("/api/v1/auth/logout", post(routes::auth::logout))
         .merge(library_routes(app.clone()))
         .route("/api/v1/dashboard", get(routes::dashboard::dashboard))
         .route("/api/v1/dashboard/banner", get(routes::dashboard::banners))
@@ -281,6 +331,7 @@ pub fn build_router(app: AppState) -> Router {
             verify_cookie_token,
         ));
 
+    let deployment_settings = app.settings.clone();
     axum::Router::new()
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(readiness))
@@ -292,6 +343,10 @@ pub fn build_router(app: AppState) -> Router {
         .route("/ws", get(ws_handler))
         .merge(protected)
         .with_state(app)
+        .layer(axum::middleware::from_fn_with_state(
+            deployment_settings,
+            middleware::deployment_guard,
+        ))
         .layer(axum::middleware::from_fn(middleware::request_id))
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
@@ -387,5 +442,41 @@ mod shutdown_tests {
         .await
         .expect("server did not shut down")
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lan_login_throttle_is_conservative_and_loopback_scoped_by_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let store = SettingsStore::load(&config).unwrap();
+        let mut lan = store.running().clone();
+        lan.bind_address = "0.0.0.0".into();
+        lan.login_attempts_per_minute = 2;
+        store.save_for_restart(&lan).unwrap();
+        let store = SettingsStore::load(&config).unwrap();
+        let conn = dim_database::get_conn_memory().await.unwrap();
+        let (socket_tx, _socket_rx) = tokio::sync::mpsc::channel(4);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(4);
+        let manager = nightfall::StateManager::new(
+            &mut xtra::spawn::Tokio::Global,
+            directory.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        let app = AppState::new(
+            conn,
+            socket_tx,
+            event_tx,
+            manager,
+            StreamTracking::default(),
+            store,
+        );
+        let remote = "192.0.2.10".parse().unwrap();
+        assert!(app.login_allowed(remote));
+        app.record_login_failure(remote);
+        assert!(app.login_allowed(remote));
+        app.record_login_failure(remote);
+        assert!(!app.login_allowed(remote));
+        app.clear_login_failures(remote);
+        assert!(app.login_allowed(remote));
     }
 }

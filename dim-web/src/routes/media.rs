@@ -340,7 +340,14 @@ pub async fn get_media_files(
         MediaType::Episode | MediaType::Movie => MediaFile::get_of_media(&mut tx, id).await?,
     };
 
-    Ok(axum::response::Json(json!(&mediafiles)).into_response())
+    let public_files = mediafiles
+        .into_iter()
+        .map(|mut file| {
+            file.target_file = super::public_file_name(&file.target_file);
+            file
+        })
+        .collect::<Vec<_>>();
+    Ok(axum::response::Json(json!(&public_files)).into_response())
 }
 
 /// # GET `/api/v1/media/<id>/tree`
@@ -379,8 +386,9 @@ pub async fn get_mediafile_tree(
         mediafiles,
         |x| {
             x.target_file
-                .iter()
-                .map(|x| x.to_string_lossy().to_string())
+                .file_name()
+                .into_iter()
+                .map(|name| name.to_string_lossy().to_string())
                 .collect()
         },
         |k, v| Record {

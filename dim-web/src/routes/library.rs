@@ -469,7 +469,11 @@ pub async fn library_get_all(State(state): State<AppState>) -> Response {
         Ok(tx) => tx,
         Err(err) => {
             tracing::error!(?err, "Error getting connection");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
         }
     };
 
@@ -486,18 +490,28 @@ pub async fn library_get_one(State(state): State<AppState>, Path(id): Path<i64>)
         Ok(tx) => tx,
         Err(err) => {
             tracing::error!(?err, "Error getting connection");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
         }
     };
 
-    let lib = match Library::get_one(&mut tx, id).await {
+    let mut lib = match Library::get_one(&mut tx, id).await {
         Ok(library) => library,
         Err(err) => {
             tracing::error!(?err, "Error getting library");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::NOT_FOUND,
+                "library_not_found",
+                "The requested library was not found.",
+            );
         }
     };
-
+    // Filesystem locations are owner-only input to creation and browsing, not ordinary library
+    // metadata. Never return absolute host paths from the normal authenticated read endpoint.
+    lib.locations.clear();
     Json(lib).into_response()
 }
 
@@ -513,7 +527,11 @@ pub async fn library_get_media(
         Ok(tx) => tx,
         Err(err) => {
             tracing::error!(?err, "Error getting connection");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
         }
     };
 
@@ -521,7 +539,11 @@ pub async fn library_get_media(
         Ok(library) => library,
         Err(err) => {
             tracing::error!(?err, "Error getting library");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::NOT_FOUND,
+                "library_not_found",
+                "The requested library was not found.",
+            );
         }
     };
 
@@ -544,7 +566,12 @@ pub async fn library_get_media(
     {
         Ok(res) => res,
         Err(err) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            tracing::error!(?err, "Library media query failed");
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
         }
     };
 
@@ -576,7 +603,11 @@ pub async fn library_get_unmatched(
         Ok(tx) => tx,
         Err(err) => {
             tracing::error!(?err, "Error getting connection");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
         }
     };
 
@@ -588,7 +619,11 @@ pub async fn library_get_unmatched(
         Ok(r) => r,
         Err(err) => {
             tracing::error!(?err, "Error getting unmatched files");
-            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
         }
     };
 
@@ -628,8 +663,9 @@ pub async fn library_get_unmatched(
         files,
         |x| {
             x.target_file
-                .iter()
-                .map(|x| x.to_string_lossy().to_string())
+                .file_name()
+                .into_iter()
+                .map(|name| name.to_string_lossy().to_string())
                 .collect()
         },
         |k, v| Record {

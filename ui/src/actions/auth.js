@@ -83,9 +83,18 @@ export const authenticate = (username, password) => async (dispatch) => {
   }
 };
 
-export const logout = () => async (dispatch) => {
-  document.cookie =
-    "token=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;samesite=lax";
+export const logout = () => async (dispatch, getState) => {
+  const token = getState?.().auth?.token;
+  try {
+    await fetch("/api/v1/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: token ? { Authorization: token } : {},
+    });
+  } catch {
+    // Local logout still clears the browser state when Dim is unavailable.
+  }
+  window.sessionStorage.removeItem("dim-bearer-token");
 
   if ("BroadcastChannel" in window) {
     const bc = new BroadcastChannel("dim");

@@ -2,6 +2,7 @@ import contract from "../../../api-contract/openapi.json";
 
 const migratedOperations = [
   "login",
+  "logout",
   "register",
   "adminExists",
   "whoAmI",

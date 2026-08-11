@@ -377,12 +377,9 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
     let library = json_body(response).await;
     assert_eq!(library["name"], "Family Movies");
     assert_eq!(library["media_type"], "movie");
-    assert_eq!(
-        library["locations"][0],
-        std::fs::canonicalize(&media)
-            .unwrap()
-            .to_string_lossy()
-            .as_ref()
+    assert!(
+        library.get("locations").is_none(),
+        "normal library reads redact server paths"
     );
 
     struct Dropped(Arc<AtomicBool>);

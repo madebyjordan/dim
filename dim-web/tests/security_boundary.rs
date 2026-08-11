@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::body::Body;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use dim_core::stream_tracking::StreamTracking;
 use dim_database::user::{InsertableUser, Roles, UserSettings};
@@ -79,11 +79,14 @@ async fn test_app() -> TestApp {
     dim_database::user::User::set_picture(&mut tx, user.id, avatar.id)
         .await
         .unwrap();
+    let (_, owner_token) = dim_database::user::Session::create(&mut tx, owner.id, 3600)
+        .await
+        .unwrap();
+    let (_, user_token) = dim_database::user::Session::create(&mut tx, user.id, 3600)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     drop(lock);
-
-    let owner_token = dim_database::user::Login::create_cookie(owner.id);
-    let user_token = dim_database::user::Login::create_cookie(user.id);
 
     let (socket_tx, _socket_rx) = tokio::sync::mpsc::channel::<CtrlEvent<SocketAddr, String>>(16);
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(128);
@@ -197,7 +200,6 @@ async fn enforces_the_application_security_boundary() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-
     for (method, uri, body) in [
         (Method::GET, "/api/v1/filebrowser?path=/tmp", ""),
         (Method::GET, "/api/v1/host/settings", ""),
@@ -307,7 +309,6 @@ async fn enforces_the_application_security_boundary() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-
     let response = test
         .router
         .clone()
@@ -325,6 +326,19 @@ async fn enforces_the_application_security_boundary() {
         .router
         .clone()
         .oneshot(request(
+            Method::GET,
+            "/api/v1/auth/whoami",
+            Some(&test.user_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
             Method::POST,
             "/api/v1/auth/login",
             None,
@@ -333,6 +347,19 @@ async fn enforces_the_application_security_boundary() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(cookie.contains("dim_session="));
+    assert!(cookie.contains("HttpOnly"));
+    assert!(cookie.contains("SameSite=Lax"));
+    assert!(!cookie.contains("Secure"));
+    let relogin: serde_json::Value =
+        serde_json::from_slice(&response_body(response).await).unwrap();
+    let renewed_user_token = relogin["token"].as_str().unwrap().to_owned();
 
     let response = test
         .router
@@ -340,7 +367,7 @@ async fn enforces_the_application_security_boundary() {
         .oneshot(request(
             Method::DELETE,
             "/api/v1/user/avatar",
-            Some(&test.user_token),
+            Some(&renewed_user_token),
             "",
         ))
         .await
@@ -354,7 +381,7 @@ async fn enforces_the_application_security_boundary() {
         .oneshot(request(
             Method::DELETE,
             "/api/v1/user",
-            Some(&test.user_token),
+            Some(&renewed_user_token),
             r#"{"password":"new-password"}"#,
         ))
         .await
@@ -392,10 +419,18 @@ async fn enforces_the_application_security_boundary() {
         .headers_mut()
         .insert(ORIGIN, HeaderValue::from_static("https://example.com"));
     let response = test.router.clone().oneshot(cors_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(response
         .headers()
         .get("access-control-allow-origin")
         .is_none());
+
+    let mut poisoned_host = request(Method::GET, "/api/v1/auth/admin_exists", None, "");
+    poisoned_host
+        .headers_mut()
+        .insert(HOST, HeaderValue::from_static("attacker.example"));
+    let response = test.router.clone().oneshot(poisoned_host).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     std::fs::remove_dir_all(&test.root).unwrap();
 }

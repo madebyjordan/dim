@@ -9,6 +9,8 @@ use dim_auth::AuthError;
 use serde::Deserialize;
 use serde::Serialize;
 
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
 use ring::digest;
 use ring::pbkdf2;
 use sqlx::Decode;
@@ -17,6 +19,9 @@ use sqlx::Encode;
 static PBKDF2_ALG: pbkdf2::Algorithm = pbkdf2::PBKDF2_HMAC_SHA256;
 const CREDENTIAL_LEN: usize = digest::SHA256_OUTPUT_LEN;
 const HASH_ROUNDS: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(1_000) };
+const ARGON_MEMORY_KIB: u32 = 19_456;
+const ARGON_ITERATIONS: u32 = 2;
+const ARGON_PARALLELISM: u32 = 1;
 
 pub type Credential = [u8; CREDENTIAL_LEN];
 
@@ -264,17 +269,33 @@ impl User {
         uname: String,
         pw: String,
     ) -> Result<Self, DatabaseError> {
-        let password_salt = sqlx::query_scalar!(
-            r#"SELECT password_salt as "password_salt!: String" FROM users WHERE username = ?"#,
+        let record = sqlx::query!(
+            r#"SELECT id, password, password_salt FROM users WHERE username = ?"#,
             uname
         )
         .fetch_one(&mut *conn)
         .await?;
-        let hash = hash(password_salt, pw);
+        let verification = verify_password(
+            record.password_salt.as_deref().unwrap_or(""),
+            &record.password,
+            &pw,
+        );
+        if verification == PasswordVerification::Invalid {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
+        if verification == PasswordVerification::Legacy {
+            let upgraded = hash_password(&pw)?;
+            sqlx::query!(
+                "UPDATE users SET password = $1, password_salt = NULL WHERE id = $2",
+                upgraded,
+                record.id
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
         let user = sqlx::query!(
-            r#"SELECT id as "id: UserID", username, roles as "roles: Roles", prefs as "prefs: UserSettings", picture FROM users WHERE username = ? AND password = ?"#,
-            uname,
-            hash,
+            r#"SELECT id as "id: UserID", username, roles as "roles: Roles", prefs as "prefs: UserSettings", picture FROM users WHERE id = ?"#,
+            record.id,
         )
         .fetch_one(&mut *conn)
         .await?;
@@ -329,12 +350,11 @@ impl User {
         conn: &mut crate::Transaction<'_>,
         password: String,
     ) -> Result<usize, DatabaseError> {
-        let hash = hash(self.username.clone(), password);
+        let hash = hash_password(&password)?;
 
         Ok(sqlx::query!(
-            "UPDATE users SET password = $1, password_salt = $2 WHERE username = ?3",
+            "UPDATE users SET password = $1, password_salt = NULL WHERE username = ?2",
             hash,
-            self.username,
             self.username
         )
         .execute(&mut *conn)
@@ -414,11 +434,11 @@ impl InsertableUser {
             claimed_invite,
         } = self;
 
-        let password = hash(username.clone(), password);
+        let password = hash_password(&password)?;
 
         let user = sqlx::query_as!(
             User,
-            r#"INSERT INTO users (username, password, password_salt, prefs, claimed_invite, roles) VALUES ($1, $2, $1, $3, $4, $5) returning id as "id: UserID",username,roles as "roles: Roles",prefs as "prefs: UserSettings",picture"#,
+            r#"INSERT INTO users (username, password, password_salt, prefs, claimed_invite, roles) VALUES ($1, $2, NULL, $3, $4, $5) returning id as "id: UserID",username,roles as "roles: Roles",prefs as "prefs: UserSettings",picture"#,
             username,
             password,
             prefs,
@@ -567,14 +587,176 @@ pub fn hash(salt: String, s: String) -> String {
 }
 
 pub fn verify(salt: String, password: String, attempted_password: String) -> bool {
-    let real_pwd = base64::decode(&password).unwrap();
+    verify_password(&salt, &password, &attempted_password) != PasswordVerification::Invalid
+}
 
-    pbkdf2::verify(
+fn argon2() -> Argon2<'static> {
+    Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(ARGON_MEMORY_KIB, ARGON_ITERATIONS, ARGON_PARALLELISM, None)
+            .expect("fixed Argon2 parameters are valid"),
+    )
+}
+
+pub fn hash_password(password: &str) -> Result<String, DatabaseError> {
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    argon2()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| sqlx::Error::Protocol(format!("password hashing failed: {error}")).into())
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PasswordVerification {
+    Invalid,
+    Legacy,
+    Argon2id,
+}
+
+pub fn verify_password(salt: &str, stored: &str, attempted: &str) -> PasswordVerification {
+    if stored.starts_with("$argon2id$") {
+        return PasswordHash::new(stored)
+            .ok()
+            .filter(|parsed| {
+                argon2()
+                    .verify_password(attempted.as_bytes(), parsed)
+                    .is_ok()
+            })
+            .map(|_| PasswordVerification::Argon2id)
+            .unwrap_or(PasswordVerification::Invalid);
+    }
+
+    let Ok(real_pwd) = base64::decode(stored) else {
+        return PasswordVerification::Invalid;
+    };
+
+    if pbkdf2::verify(
         PBKDF2_ALG,
         HASH_ROUNDS,
-        &salt.as_bytes(),
-        attempted_password.as_bytes(),
+        salt.as_bytes(),
+        attempted.as_bytes(),
         real_pwd.as_slice(),
     )
     .is_ok()
+    {
+        PasswordVerification::Legacy
+    } else {
+        PasswordVerification::Invalid
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Session {
+    pub id: String,
+    pub user_id: UserID,
+    pub expires_at: i64,
+}
+
+impl Session {
+    pub async fn create(
+        conn: &mut crate::Transaction<'_>,
+        user_id: UserID,
+        ttl_seconds: u64,
+    ) -> Result<(Self, String), DatabaseError> {
+        let now = unix_timestamp();
+        let ttl = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
+        let expires_at = now.saturating_add(ttl);
+        let revoked_before = now.saturating_sub(24 * 60 * 60);
+        sqlx::query!(
+            "DELETE FROM auth_sessions WHERE expires_at <= $1 OR (revoked_at IS NOT NULL AND revoked_at <= $2)",
+            now,
+            revoked_before
+        )
+        .execute(&mut *conn)
+        .await?;
+        let id = uuid::Uuid::new_v4().to_hyphenated().to_string();
+        // Two independently generated UUIDv4 values provide 244 random bits without adding a
+        // second RNG dependency. Only the SHA-256 digest is retained server-side.
+        let token = format!(
+            "{}.{}",
+            uuid::Uuid::new_v4().to_simple(),
+            uuid::Uuid::new_v4().to_simple()
+        );
+        let token_hash = session_token_hash(&token);
+        sqlx::query!(
+            "INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)",
+            id,
+            user_id,
+            token_hash,
+            now,
+            expires_at
+        )
+        .execute(&mut *conn)
+        .await?;
+        Ok((
+            Self {
+                id,
+                user_id,
+                expires_at,
+            },
+            token,
+        ))
+    }
+
+    pub async fn verify(
+        conn: &mut crate::Transaction<'_>,
+        token: &str,
+    ) -> Result<Self, DatabaseError> {
+        let token_hash = session_token_hash(token);
+        let now = unix_timestamp();
+        let row = sqlx::query!(
+            "SELECT id, user_id, expires_at FROM auth_sessions WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > $2",
+            token_hash,
+            now
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(Self {
+            id: row.id,
+            user_id: UserID(row.user_id),
+            expires_at: row.expires_at,
+        })
+    }
+
+    pub async fn revoke_user(
+        conn: &mut crate::Transaction<'_>,
+        user_id: UserID,
+    ) -> Result<usize, DatabaseError> {
+        let now = unix_timestamp();
+        Ok(sqlx::query!(
+            "UPDATE auth_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL",
+            now,
+            user_id
+        )
+        .execute(&mut *conn)
+        .await?
+        .rows_affected() as usize)
+    }
+
+    pub async fn revoke(
+        conn: &mut crate::Transaction<'_>,
+        session_id: &str,
+    ) -> Result<usize, DatabaseError> {
+        let now = unix_timestamp();
+        Ok(sqlx::query!(
+            "UPDATE auth_sessions SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL",
+            now,
+            session_id
+        )
+        .execute(&mut *conn)
+        .await?
+        .rows_affected() as usize)
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn session_token_hash(token: &str) -> String {
+    base64::encode(digest::digest(&digest::SHA256, token.as_bytes()).as_ref())
 }

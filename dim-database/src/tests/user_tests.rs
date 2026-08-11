@@ -5,6 +5,7 @@ use crate::get_conn_memory;
 use crate::user;
 use crate::user::Login;
 use crate::user::Roles;
+use crate::user::Session;
 use crate::user::User;
 use crate::write_tx;
 
@@ -98,6 +99,90 @@ async fn changing_username_preserves_password_verification() {
         .await
         .unwrap();
     assert_eq!(authenticated.id, user.id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_passwords_use_argon2id_with_random_salts() {
+    let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
+    let mut tx = write_tx(&mut conn).await.unwrap();
+    let first = insert_user(&mut tx).await;
+    let first_hash: String = sqlx::query_scalar("SELECT password FROM users WHERE id = ?")
+        .bind(first.id.get())
+        .fetch_one(&mut tx)
+        .await
+        .unwrap();
+    let invite = Login::new_invite(&mut tx).await.unwrap();
+    let second = user::InsertableUser {
+        username: "second".into(),
+        password: "test".into(),
+        roles: Roles(vec!["User".into()]),
+        prefs: Default::default(),
+        claimed_invite: invite,
+    }
+    .insert(&mut tx)
+    .await
+    .unwrap();
+    let second_hash: String = sqlx::query_scalar("SELECT password FROM users WHERE id = ?")
+        .bind(second.id.get())
+        .fetch_one(&mut tx)
+        .await
+        .unwrap();
+    assert!(first_hash.starts_with("$argon2id$v=19$"));
+    assert!(second_hash.starts_with("$argon2id$v=19$"));
+    assert_ne!(first_hash, second_hash);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_pbkdf2_migrates_on_successful_login_and_survives_rename() {
+    let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
+    let mut tx = write_tx(&mut conn).await.unwrap();
+    let invite = Login::new_invite(&mut tx).await.unwrap();
+    let legacy = user::hash("legacy-name".into(), "password".into());
+    sqlx::query("INSERT INTO users (username, password, password_salt, prefs, claimed_invite, roles) VALUES (?, ?, ?, '{}', ?, '[]')")
+        .bind("legacy-name")
+        .bind(legacy)
+        .bind("legacy-name")
+        .bind(invite)
+        .execute(&mut tx)
+        .await
+        .unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'legacy-name'")
+        .fetch_one(&mut tx)
+        .await
+        .unwrap();
+    User::set_username(&mut tx, user::UserID(id), "renamed-legacy".into())
+        .await
+        .unwrap();
+    User::authenticate(&mut tx, "renamed-legacy".into(), "password".into())
+        .await
+        .unwrap();
+    let upgraded: String = sqlx::query_scalar("SELECT password FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut tx)
+        .await
+        .unwrap();
+    assert!(upgraded.starts_with("$argon2id$v=19$"));
+    assert!(
+        User::authenticate(&mut tx, "renamed-legacy".into(), "wrong".into())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_expire_and_can_be_revoked() {
+    let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
+    let mut tx = write_tx(&mut conn).await.unwrap();
+    let user = insert_user(&mut tx).await;
+    let (_, token) = Session::create(&mut tx, user.id, 60).await.unwrap();
+    assert_eq!(
+        Session::verify(&mut tx, &token).await.unwrap().user_id,
+        user.id
+    );
+    assert_eq!(Session::revoke_user(&mut tx, user.id).await.unwrap(), 1);
+    assert!(Session::verify(&mut tx, &token).await.is_err());
+    let (_, expired) = Session::create(&mut tx, user.id, 0).await.unwrap();
+    assert!(Session::verify(&mut tx, &expired).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]

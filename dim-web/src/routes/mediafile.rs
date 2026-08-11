@@ -56,18 +56,33 @@ impl From<dim_core::scanner::error::Error> for Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         match self {
-            Self::ExternalSearchError(_) => {
-                (StatusCode::NOT_FOUND, self.to_string()).into_response()
-            }
-            Self::InvalidMediaType => {
-                (StatusCode::NOT_ACCEPTABLE, self.to_string()).into_response()
-            }
-            Self::NoMediafiles => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
-            Self::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
-            }
-            Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            Self::ExternalSearchError(_) => crate::error::api_error(
+                StatusCode::NOT_FOUND,
+                "external_match_not_found",
+                "No matching metadata was found.",
+            ),
+            Self::InvalidMediaType => crate::error::api_error(
+                StatusCode::NOT_ACCEPTABLE,
+                "invalid_media_type",
+                "Choose a supported media type.",
+            ),
+            Self::NoMediafiles => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Select at least one media file.",
+            ),
+            Self::InvalidCredentials => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "session_expired",
+                "Sign in to continue.",
+            ),
+            Self::Database(error) => {
+                tracing::error!(?error, "Mediafile API database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }

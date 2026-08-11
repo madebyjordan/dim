@@ -58,6 +58,9 @@ impl Error for SettingsError {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalSettings {
+    /// Listener address. Loopback is the supported local-first default; any non-loopback value is
+    /// an explicit opt-in to trusted LAN access.
+    pub bind_address: String,
     pub enable_ssl: bool,
     pub port: u16,
     pub priv_key: Option<String>,
@@ -70,11 +73,20 @@ pub struct GlobalSettings {
     pub secret_key: Option<[u8; 32]>,
     pub enable_hwaccel: bool,
     pub version: String,
+    /// Set only when HTTPS is terminated by a trusted reverse proxy. Dim itself remains HTTP-only.
+    pub https_reverse_proxy: bool,
+    /// Trust `Forwarded`/`X-Forwarded-*` only when the immediate peer is the trusted proxy.
+    pub trust_proxy_headers: bool,
+    /// Finite lifetime for login sessions.
+    pub session_ttl_seconds: u64,
+    /// Per-address failed-login allowance in a rolling minute for non-loopback listeners.
+    pub login_attempts_per_minute: u32,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
+            bind_address: "127.0.0.1".into(),
             enable_ssl: false,
             port: 8000,
             priv_key: None,
@@ -87,12 +99,19 @@ impl Default for GlobalSettings {
             secret_key: None,
             enable_hwaccel: false,
             version: String::new(),
+            https_reverse_proxy: false,
+            trust_proxy_headers: false,
+            session_ttl_seconds: 7 * 24 * 60 * 60,
+            login_attempts_per_minute: 10,
         }
     }
 }
 
 impl GlobalSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
+        let bind_address = self.bind_address.parse::<std::net::IpAddr>().map_err(|_| {
+            SettingsError::Invalid("bind_address must be an IPv4 or IPv6 address".into())
+        })?;
         if self.port == 0 {
             return Err(SettingsError::Invalid(
                 "port must be between 1 and 65535".into(),
@@ -116,13 +135,34 @@ impl GlobalSettings {
                 "disable_auth is not implemented and must remain false".into(),
             ));
         }
+        if self.https_reverse_proxy && !self.trust_proxy_headers {
+            return Err(SettingsError::Invalid(
+                "https_reverse_proxy requires trust_proxy_headers=true and a trusted local reverse proxy".into(),
+            ));
+        }
+        if self.https_reverse_proxy && !bind_address.is_loopback() {
+            return Err(SettingsError::Invalid(
+                "https_reverse_proxy requires a loopback bind_address".into(),
+            ));
+        }
+        if !(300..=31_536_000).contains(&self.session_ttl_seconds) {
+            return Err(SettingsError::Invalid(
+                "session_ttl_seconds must be between 300 and 31536000".into(),
+            ));
+        }
+        if !(1..=120).contains(&self.login_attempts_per_minute) {
+            return Err(SettingsError::Invalid(
+                "login_attempts_per_minute must be between 1 and 120".into(),
+            ));
+        }
         Ok(())
     }
 
     /// Host settings are startup-only in Milestone 4. Persisting changes never mutates running
     /// components, so callers can accurately report that a restart is required.
     pub fn restart_required(&self, running: &Self) -> bool {
-        self.enable_ssl != running.enable_ssl
+        self.bind_address != running.bind_address
+            || self.enable_ssl != running.enable_ssl
             || self.port != running.port
             || self.priv_key != running.priv_key
             || self.ssl_cert != running.ssl_cert
@@ -132,6 +172,10 @@ impl GlobalSettings {
             || self.disable_auth != running.disable_auth
             || self.verbose != running.verbose
             || self.enable_hwaccel != running.enable_hwaccel
+            || self.https_reverse_proxy != running.https_reverse_proxy
+            || self.trust_proxy_headers != running.trust_proxy_headers
+            || self.session_ttl_seconds != running.session_ttl_seconds
+            || self.login_attempts_per_minute != running.login_attempts_per_minute
     }
 }
 
@@ -177,6 +221,22 @@ impl SettingsStore {
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
+
+    /// Apply a process-only CLI listener override without rewriting the saved configuration.
+    pub fn with_bind_override(
+        &self,
+        bind_address: std::net::IpAddr,
+    ) -> Result<Self, SettingsError> {
+        let mut running = self.running().clone();
+        running.bind_address = bind_address.to_string();
+        running.validate()?;
+        Ok(Self {
+            path: self.path.clone(),
+            running: Arc::new(running),
+            write_lock: self.write_lock.clone(),
+        })
+    }
+
     pub fn running(&self) -> &GlobalSettings {
         self.running.as_ref()
     }
@@ -352,5 +412,30 @@ mod tests {
         settings.disable_auth = false;
         settings.enable_ssl = true;
         assert!(settings.validate().unwrap_err().to_string().contains("TLS"));
+    }
+
+    #[test]
+    fn defaults_to_loopback_and_validates_deployment_settings() {
+        let settings = GlobalSettings::default();
+        assert_eq!(settings.bind_address, "127.0.0.1");
+        settings.validate().unwrap();
+
+        let mut invalid = settings.clone();
+        invalid.bind_address = "localhost".into();
+        assert!(invalid.validate().is_err());
+        invalid.bind_address = "0.0.0.0".into();
+        invalid.https_reverse_proxy = true;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn cli_bind_override_is_runtime_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(directory.path().join("config.toml")).unwrap();
+        let overridden = store
+            .with_bind_override("0.0.0.0".parse().unwrap())
+            .unwrap();
+        assert_eq!(overridden.running().bind_address, "0.0.0.0");
+        assert_eq!(overridden.persisted().unwrap().bind_address, "127.0.0.1");
     }
 }

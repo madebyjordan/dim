@@ -125,6 +125,7 @@ export interface ApiOperations {
   login: "/auth/login";
   register: "/auth/register";
   adminExists: "/auth/admin_exists";
+  logout: "/auth/logout";
   whoAmI: "/auth/whoami";
   changePassword: "/user/password";
   deleteAccount: "/user";

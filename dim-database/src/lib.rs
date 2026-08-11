@@ -82,8 +82,17 @@ async fn open_file_pool(path: &str) -> sqlx::Result<DbConnection> {
 /// Open and validate an explicitly owned file-backed database. Runtime code should prefer this
 /// over the legacy process-global accessor.
 pub async fn open_at(path: impl AsRef<std::path::Path>) -> sqlx::Result<DbConnection> {
-    let path = path.as_ref().to_string_lossy();
+    let path_ref = path.as_ref();
+    let existed = path_ref.exists();
+    let path = path_ref.to_string_lossy();
     let pool = open_file_pool(&path).await?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path_ref)?.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path_ref, permissions)?;
+    }
     prepare_connection(&pool).await?;
     Ok(pool)
 }
@@ -288,4 +297,20 @@ pub async fn get_conn_file(file: &str) -> sqlx::Result<crate::DbConnection> {
     prepare_connection(&pool).await?;
 
     Ok(pool)
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn newly_created_runtime_database_is_private() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dim.db");
+        let _connection = super::open_at(&path).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }

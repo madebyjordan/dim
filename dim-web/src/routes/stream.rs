@@ -619,7 +619,16 @@ pub async fn session_get_stderr(
     })
     .collect::<Vec<_>>()
     .await;
-    Ok(Json(json!({ "errors": errors })))
+    if !errors.is_empty() {
+        tracing::warn!(session_id = %gid, process_errors = ?errors, "Playback process reported diagnostics");
+    }
+    let public_errors = errors
+        .iter()
+        .map(|_| {
+            "Playback processing failed. See the local Dim logs for administrator diagnostics."
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "errors": public_errors })))
 }
 
 pub async fn kill_session(

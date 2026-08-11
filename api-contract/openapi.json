@@ -6,6 +6,7 @@
     "/auth/login": { "post": { "operationId": "login", "requestBody": { "$ref": "#/components/requestBodies/Login" }, "responses": { "200": { "$ref": "#/components/responses/Login" }, "401": { "$ref": "#/components/responses/Error" } } } },
     "/auth/register": { "post": { "operationId": "register", "requestBody": { "$ref": "#/components/requestBodies/Login" }, "responses": { "200": { "$ref": "#/components/responses/Register" }, "401": { "$ref": "#/components/responses/Error" } } } },
     "/auth/admin_exists": { "get": { "operationId": "adminExists", "responses": { "200": { "description": "Admin state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminExists" } } } } } } },
+    "/auth/logout": { "post": { "operationId": "logout", "security": [{ "token": [] }, { "sessionCookie": [] }], "responses": { "204": { "description": "Session revoked" }, "401": { "$ref": "#/components/responses/Error" } } } },
     "/auth/whoami": { "get": { "operationId": "whoAmI", "security": [{ "token": [] }], "responses": { "200": { "description": "Current user", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } } }, "401": { "$ref": "#/components/responses/Error" } } } },
     "/user/password": { "patch": { "operationId": "changePassword", "security": [{ "token": [] }], "requestBody": { "description": "Passwords", "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChangePassword" } } } }, "responses": { "200": { "description": "Changed" }, "401": { "$ref": "#/components/responses/Error" } } } },
     "/user": { "delete": { "operationId": "deleteAccount", "security": [{ "token": [] }], "requestBody": { "description": "Password confirmation", "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeleteAccount" } } } }, "responses": { "200": { "description": "Deleted" }, "401": { "$ref": "#/components/responses/Error" } } } },
@@ -26,14 +27,14 @@
     "/stream/{gid}/state/kill": { "parameters": [{ "$ref": "#/components/parameters/Gid" }], "delete": { "operationId": "killPlaybackSession", "security": [{ "token": [] }], "responses": { "200": { "description": "Stopped" }, "404": { "$ref": "#/components/responses/Error" } } } }
   },
   "components": {
-    "securitySchemes": { "token": { "type": "apiKey", "in": "header", "name": "Authorization" } },
+    "securitySchemes": { "token": { "type": "apiKey", "in": "header", "name": "Authorization" }, "sessionCookie": { "type": "apiKey", "in": "cookie", "name": "dim_session" } },
     "parameters": { "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int64" } }, "Gid": { "name": "gid", "in": "path", "required": true, "schema": { "type": "string" } } },
     "requestBodies": { "Login": { "description": "Credentials", "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } } },
     "responses": { "Login": { "description": "Token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginResponse" } } } }, "Register": { "description": "Created account and token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterResponse" } } } }, "Error": { "description": "Structured error", "headers": { "x-request-id": { "schema": { "type": "string" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiErrorEnvelope" } } } } },
     "schemas": {
       "ApiErrorEnvelope": { "type": "object", "required": ["error", "request_id"], "properties": { "error": { "$ref": "#/components/schemas/ApiError" }, "request_id": { "type": "string" } } },
       "ApiError": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "details": { "type": "object", "additionalProperties": true } } },
-      "LoginRequest": { "type": "object", "required": ["username", "password"], "properties": { "username": { "type": "string" }, "password": { "type": "string" }, "invite_token": { "type": ["string", "null"] } } },
+      "LoginRequest": { "type": "object", "required": ["username", "password"], "properties": { "username": { "type": "string", "minLength": 1, "maxLength": 64 }, "password": { "type": "string", "minLength": 1, "maxLength": 1024 }, "invite_token": { "type": ["string", "null"] } } },
       "LoginResponse": { "type": "object", "required": ["token"], "properties": { "token": { "type": "string" } } },
       "RegisterResponse": { "type": "object", "required": ["token", "username"], "properties": { "token": { "type": "string" }, "username": { "type": "string" } } },
       "AdminExists": { "type": "object", "required": ["exists"], "properties": { "exists": { "type": "boolean" } } },

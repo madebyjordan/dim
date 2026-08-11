@@ -31,12 +31,23 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         match self {
-            Self::NotFoundError => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            Self::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
-            }
-            Self::Database(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+            Self::NotFoundError => crate::error::api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "No matching media was found.",
+            ),
+            Self::InvalidCredentials => crate::error::api_error(
+                StatusCode::UNAUTHORIZED,
+                "session_expired",
+                "Sign in to continue.",
+            ),
+            Self::Database(error) => {
+                tracing::error!(?error, "Search database failure");
+                crate::error::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Dim could not complete the request.",
+                )
             }
         }
     }

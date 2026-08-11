@@ -16,6 +16,9 @@ use xtra::spawn::Tokio;
 struct Args {
     #[clap(short, long, env = "DIM_CONFIG_PATH")]
     config: Option<PathBuf>,
+    /// Override the configured listener IP. Non-loopback addresses explicitly opt into LAN use.
+    #[clap(long, env = "DIM_BIND_ADDRESS")]
+    bind_address: Option<std::net::IpAddr>,
 }
 
 async fn shutdown_signal() {
@@ -47,14 +50,20 @@ fn main() {
         .config
         .unwrap_or_else(|| PathBuf::from(dim::utils::ffpath("config/config.toml")));
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create a tokio runtime");
-    if let Err(error) = runtime.block_on(run(config_path)) {
+    if let Err(error) = runtime.block_on(run(config_path, args.bind_address)) {
         eprintln!("Dim startup failed: {error}");
         std::process::exit(1);
     }
 }
 
-async fn run(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(
+    config_path: PathBuf,
+    bind_override: Option<std::net::IpAddr>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut context = ApplicationContext::build(config_path.clone()).await?;
+    if let Some(bind_address) = bind_override {
+        context.settings = context.settings.with_bind_override(bind_address)?;
+    }
     let global_settings = context.settings.running().clone();
 
     // Compatibility boundaries for scanner/artwork code not yet converted to injection. Runtime
@@ -148,8 +157,14 @@ async fn run(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let mut web_shutdown = context.shutdown_receiver();
     let web_shutdown_future =
         async move { while !*web_shutdown.borrow() && web_shutdown.changed().await.is_ok() {} };
-    let address = std::net::SocketAddr::from(([0, 0, 0, 0], global_settings.port));
-    tracing::info!(%address, "Launching Dim");
+    let bind_address = global_settings.bind_address.parse()?;
+    let address = std::net::SocketAddr::new(bind_address, global_settings.port);
+    let deployment = if bind_address.is_loopback() {
+        "local"
+    } else {
+        "lan-opt-in"
+    };
+    tracing::info!(%address, deployment, https_reverse_proxy = global_settings.https_reverse_proxy, "Launching Dim with effective listener");
     let event_rx = context.take_event_rx();
     dim_web::start_webserver(
         address,

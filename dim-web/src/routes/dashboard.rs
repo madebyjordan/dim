@@ -74,7 +74,7 @@ async fn banner_for_movie(
         "banner_caption": caption,
         "versions": mediafiles.iter().map(|x| json!({
             "id": x.id,
-            "file": x.target_file,
+            "file": super::public_file_name(&x.target_file),
             "display_name": format!("{} - {} - {} - Library {}",
                                     x.codec.as_ref().unwrap_or(&"Unknown VC".to_string()),
                                     x.audio.as_ref().unwrap_or(&"Unknwon AC".to_string()),
@@ -143,7 +143,7 @@ async fn banner_for_show(
         "season": episode.get_season_number(&mut *conn).await.unwrap_or(0),
         "versions": mediafiles.iter().map(|x| json!({
             "id": x.id,
-            "file": x.target_file,
+            "file": super::public_file_name(&x.target_file),
             "display_name": format!("{} - {} - {} - Library {}",
                                     x.codec.as_ref().unwrap_or(&"Unknown VC".to_string()),
                                     x.audio.as_ref().unwrap_or(&"Unknwon AC".to_string()),

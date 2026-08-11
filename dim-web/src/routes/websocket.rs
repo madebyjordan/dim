@@ -131,13 +131,18 @@ pub async fn handle_websocket_session(
     tokio::pin!(stream);
     let mut sink: Pin<Box<dyn Sink<WsMessage, Error = WsMessageError> + Send>> = Box::pin(sink);
 
-    while let Some(message) = stream.next().await {
+    let authenticated_token = loop {
+        let Some(message) = stream.next().await else {
+            return;
+        };
         if let WsMessage::Text(st) = message {
             if let Ok(ClientActions::Authenticate { token }) = serde_json::from_str(&st) {
-                if let Ok(token_data) = dim_database::user::Login::verify_cookie(token) {
-                    if let Ok(mut sql_tx) = conn.read().begin().await {
+                if let Ok(mut sql_tx) = conn.read().begin().await {
+                    if let Ok(session) =
+                        dim_database::user::Session::verify(&mut sql_tx, &token).await
+                    {
                         if let Ok(u) =
-                            dim_database::user::User::get_by_id(&mut sql_tx, token_data).await
+                            dim_database::user::User::get_by_id(&mut sql_tx, session.user_id).await
                         {
                             let _ = socket_tx
                                 .send(CtrlEvent::Track {
@@ -158,7 +163,7 @@ pub async fn handle_websocket_session(
                                 })
                                 .await;
 
-                            break;
+                            break token;
                         }
                     }
                 }
@@ -173,8 +178,10 @@ pub async fn handle_websocket_session(
         let _ = sink.send(WsMessage::Text(message)).await;
         let _ = sink.close().await;
         return;
-    }
+    };
 
+    let mut session_check = tokio::time::interval(std::time::Duration::from_secs(15));
+    session_check.tick().await;
     loop {
         tokio::select! {
             biased;
@@ -185,6 +192,23 @@ pub async fn handle_websocket_session(
             None = stream.next() => {
                 let _ = socket_tx.send(CtrlEvent::Forget { addr }).await;
                 break;
+            }
+            _ = session_check.tick() => {
+                let valid = match conn.read().begin().await {
+                    Ok(mut transaction) => dim_database::user::Session::verify(&mut transaction, &authenticated_token).await.is_ok(),
+                    Err(_) => false,
+                };
+                if !valid {
+                    let _ = socket_tx.send(CtrlEvent::SendTo {
+                        addr,
+                        message: dim_events::Message {
+                            id: -1,
+                            event_type: dim_events::PushEventType::EventAuthErr,
+                        }.to_string(),
+                    }).await;
+                    let _ = socket_tx.send(CtrlEvent::Forget { addr }).await;
+                    break;
+                }
             }
         }
     }
@@ -313,5 +337,49 @@ mod tests {
             socket_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_session_is_rejected_by_websocket_authentication() {
+        let conn = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        let invite = dim_database::user::Login::new_invite(&mut tx)
+            .await
+            .unwrap();
+        let user = dim_database::user::InsertableUser {
+            username: "socket-user".into(),
+            password: "password".into(),
+            roles: dim_database::user::Roles(vec!["user".into()]),
+            prefs: Default::default(),
+            claimed_invite: invite,
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let (_, token) = dim_database::user::Session::create(&mut tx, user.id, 0)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        drop(lock);
+
+        let (outgoing, mut outgoing_rx) = futures::channel::mpsc::unbounded();
+        let sink = outgoing.sink_map_err(|_| WsMessageError);
+        let stream = futures::stream::iter([WsMessage::Text(
+            serde_json::json!({ "type": "authenticate", "token": token }).to_string(),
+        )]);
+        let (socket_tx, _socket_rx) = mpsc::channel(4);
+        handle_websocket_session(
+            sink,
+            stream,
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)),
+            conn,
+            socket_tx,
+        )
+        .await;
+        let WsMessage::Text(body) = outgoing_rx.next().await.unwrap() else {
+            panic!("expected an authentication error message");
+        };
+        assert!(body.contains("EventAuthErr"));
     }
 }

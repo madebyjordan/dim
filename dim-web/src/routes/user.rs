@@ -10,6 +10,7 @@ use axum::Extension;
 
 use dim_database::asset::Asset;
 use dim_database::asset::InsertableAsset;
+use dim_database::user::Session;
 use dim_database::user::User;
 use dim_database::DatabaseError;
 
@@ -29,6 +30,8 @@ pub enum AuthError {
     UnsupportedFile,
     /// Not logged in.
     InvalidCredentials,
+    /// Invalid credential input.
+    InvalidInput,
     /// database: {0}
     Database(#[from] DatabaseError),
 }
@@ -50,6 +53,11 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "invalid_credentials",
                 "The supplied credentials are incorrect.",
+            ),
+            Self::InvalidInput => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_credentials_input",
+                "Use a username of 1-64 characters and a password of 8-1024 characters.",
             ),
             Self::UploadFailed => crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -107,6 +115,9 @@ pub async fn change_password(
     State(AppState { conn, .. }): State<AppState>,
     Json(params): Json<ChangePasswordParams>,
 ) -> Result<impl IntoResponse, AuthError> {
+    if !(8..=1024).contains(&params.new_password.chars().count()) {
+        return Err(AuthError::InvalidInput);
+    }
     let mut lock = conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock)
         .await
@@ -117,6 +128,7 @@ pub async fn change_password(
         .map_err(|_| AuthError::InvalidCredentials)?;
 
     user.set_password(&mut tx, params.new_password).await?;
+    Session::revoke_user(&mut tx, user.id).await?;
 
     tx.commit().await.map_err(DatabaseError::from)?;
 
@@ -151,9 +163,7 @@ pub struct DeleteParams {
 /// If the account is successfully deleted, the method will simply return `200 0K`.
 ///
 /// # SAFETY and caveats
-/// Because Dim uses JWTs for authorization, deleting an account doesnt mean the authorization
-/// token is also revoked as JWTs are stateless by design. Because of this, users must ensure that
-/// the token is cleared from memory and is not *EVER* reused.
+/// Deleting the account cascades to its server-side sessions, so outstanding tokens are revoked.
 ///
 /// # Errors
 /// * [`InvalidCredentials`] - The provided `old_password` is incorrect or the authentication token
@@ -215,6 +225,11 @@ pub async fn change_username(
     State(AppState { conn, .. }): State<AppState>,
     Json(params): Json<ChangeUsernameParams>,
 ) -> Result<impl IntoResponse, AuthError> {
+    if !(1..=64).contains(&params.new_username.chars().count())
+        || params.new_username.chars().any(char::is_control)
+    {
+        return Err(AuthError::InvalidInput);
+    }
     let mut lock = conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock)
         .await

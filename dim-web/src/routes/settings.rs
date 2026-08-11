@@ -15,9 +15,20 @@ use serde::{Deserialize, Serialize};
 use super::auth::AuthError;
 use crate::middleware::Owner;
 
+const REDACTED_PATH: &str = "<redacted>";
+
+fn public_setting_path(path: String) -> String {
+    if std::path::Path::new(&path).is_absolute() {
+        REDACTED_PATH.into()
+    } else {
+        path
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSettings {
+    pub bind_address: String,
     pub enable_ssl: bool,
     pub port: u16,
     pub priv_key: Option<String>,
@@ -29,6 +40,10 @@ pub struct HostSettings {
     pub verbose: bool,
     pub enable_hwaccel: bool,
     pub version: String,
+    pub https_reverse_proxy: bool,
+    pub trust_proxy_headers: bool,
+    pub session_ttl_seconds: u64,
+    pub login_attempts_per_minute: u32,
     #[serde(default)]
     pub restart_required: bool,
 }
@@ -36,37 +51,55 @@ pub struct HostSettings {
 impl From<GlobalSettings> for HostSettings {
     fn from(settings: GlobalSettings) -> Self {
         Self {
+            bind_address: settings.bind_address,
             enable_ssl: settings.enable_ssl,
             port: settings.port,
             priv_key: settings.priv_key,
             ssl_cert: settings.ssl_cert,
-            cache_dir: settings.cache_dir,
-            metadata_dir: settings.metadata_dir,
+            cache_dir: public_setting_path(settings.cache_dir),
+            metadata_dir: public_setting_path(settings.metadata_dir),
             quiet_boot: settings.quiet_boot,
             disable_auth: settings.disable_auth,
             verbose: settings.verbose,
             enable_hwaccel: settings.enable_hwaccel,
             version: settings.version,
+            https_reverse_proxy: settings.https_reverse_proxy,
+            trust_proxy_headers: settings.trust_proxy_headers,
+            session_ttl_seconds: settings.session_ttl_seconds,
+            login_attempts_per_minute: settings.login_attempts_per_minute,
             restart_required: false,
         }
     }
 }
 
 impl HostSettings {
-    fn into_global_settings(self, secret_key: Option<[u8; 32]>) -> GlobalSettings {
+    fn into_global_settings(self, current: &GlobalSettings) -> GlobalSettings {
         GlobalSettings {
+            bind_address: self.bind_address,
             enable_ssl: self.enable_ssl,
             port: self.port,
             priv_key: self.priv_key,
             ssl_cert: self.ssl_cert,
-            cache_dir: self.cache_dir,
-            metadata_dir: self.metadata_dir,
+            cache_dir: if self.cache_dir == REDACTED_PATH {
+                current.cache_dir.clone()
+            } else {
+                self.cache_dir
+            },
+            metadata_dir: if self.metadata_dir == REDACTED_PATH {
+                current.metadata_dir.clone()
+            } else {
+                self.metadata_dir
+            },
             quiet_boot: self.quiet_boot,
             disable_auth: self.disable_auth,
             verbose: self.verbose,
-            secret_key,
+            secret_key: current.secret_key,
             enable_hwaccel: self.enable_hwaccel,
             version: self.version,
+            https_reverse_proxy: self.https_reverse_proxy,
+            trust_proxy_headers: self.trust_proxy_headers,
+            session_ttl_seconds: self.session_ttl_seconds,
+            login_attempts_per_minute: self.login_attempts_per_minute,
         }
     }
 }
@@ -128,13 +161,30 @@ pub async fn http_set_global_settings(
     State(AppState { settings, .. }): State<AppState>,
     Json(new_settings): Json<HostSettings>,
 ) -> Result<Response, AuthError> {
-    let secret_key = settings
+    let current = settings
         .persisted()
-        .map_err(|error| AuthError::BadRequest(error.to_string()))?
-        .secret_key;
+        .map_err(|error| AuthError::BadRequest(error.to_string()))?;
     settings
-        .save_for_restart(&new_settings.into_global_settings(secret_key))
+        .save_for_restart(&new_settings.into_global_settings(&current))
         .map_err(|error| AuthError::BadRequest(error.to_string()))?;
 
     Ok(Json(&get_host_settings(&settings).map_err(AuthError::BadRequest)?).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_host_paths_are_redacted_and_round_trip_without_overwrite() {
+        let mut current = GlobalSettings::default();
+        current.cache_dir = "/private/cache".into();
+        current.metadata_dir = "/private/metadata".into();
+        let public = HostSettings::from(current.clone());
+        assert_eq!(public.cache_dir, REDACTED_PATH);
+        assert_eq!(public.metadata_dir, REDACTED_PATH);
+        let restored = public.into_global_settings(&current);
+        assert_eq!(restored.cache_dir, "/private/cache");
+        assert_eq!(restored.metadata_dir, "/private/metadata");
+    }
 }
