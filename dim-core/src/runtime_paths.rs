@@ -1,6 +1,4 @@
 use crate::settings::GlobalSettings;
-use crate::utils::ffpath;
-
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,7 +19,7 @@ impl RuntimePaths {
     pub fn from_settings(config: impl Into<PathBuf>, settings: &GlobalSettings) -> Self {
         Self {
             config: config.into(),
-            database: PathBuf::from(ffpath("config/dim.db")),
+            database: PathBuf::from("config/dim.db"),
             metadata: PathBuf::from(&settings.metadata_dir),
             cache: PathBuf::from(&settings.cache_dir),
             logs: PathBuf::from("logs"),
@@ -35,23 +33,43 @@ impl RuntimePaths {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
         {
-            create_private_dir(parent)?;
+            create_private_dir(parent)
+                .map_err(|error| path_io_error("prepare configuration directory", parent, error))?;
         }
         if let Some(parent) = self
             .database
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
         {
-            create_private_dir(parent)?;
+            create_private_dir(parent)
+                .map_err(|error| path_io_error("prepare database directory", parent, error))?;
         }
-        for directory in [&self.metadata, &self.cache, &self.logs, &self.temporary] {
-            create_private_dir(directory)?;
+        for (purpose, directory) in [
+            ("metadata", &self.metadata),
+            ("streaming cache", &self.cache),
+            ("logs", &self.logs),
+            ("temporary streaming cache", &self.temporary),
+        ] {
+            create_private_dir(directory).map_err(|error| {
+                path_io_error(&format!("prepare {purpose} directory"), directory, error)
+            })?;
             let probe = directory.join(".dim-write-probe");
-            fs::write(&probe, b"")?;
-            fs::remove_file(probe)?;
+            fs::write(&probe, b"").map_err(|error| {
+                path_io_error(&format!("write {purpose} startup probe"), &probe, error)
+            })?;
+            fs::remove_file(&probe).map_err(|error| {
+                path_io_error(&format!("remove {purpose} startup probe"), &probe, error)
+            })?;
         }
         Ok(())
     }
+}
+
+fn path_io_error(operation: &str, path: &Path, source: io::Error) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        format!("failed to {operation} at '{}': {source}", path.display()),
+    )
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -78,7 +96,7 @@ mod tests {
     #[test]
     fn preserves_legacy_default_locations() {
         let paths = RuntimePaths::from_settings("config/config.toml", &GlobalSettings::default());
-        assert_eq!(paths.database, PathBuf::from(ffpath("config/dim.db")));
+        assert_eq!(paths.database, PathBuf::from("config/dim.db"));
         assert_eq!(paths.metadata, PathBuf::from("metadata"));
         assert_eq!(paths.cache, PathBuf::from("streaming_cache"));
         assert_eq!(paths.temporary, PathBuf::from("streaming_cache/tmp"));

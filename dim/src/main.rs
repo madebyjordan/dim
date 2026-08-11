@@ -48,7 +48,7 @@ fn main() {
     let args = Args::parse();
     let config_path = args
         .config
-        .unwrap_or_else(|| PathBuf::from(dim::utils::ffpath("config/config.toml")));
+        .unwrap_or_else(|| PathBuf::from("config/config.toml"));
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create a tokio runtime");
     if let Err(error) = runtime.block_on(run(config_path, args.bind_address)) {
         eprintln!("Dim startup failed: {error}");
@@ -176,7 +176,13 @@ async fn run(
         context.library_workers.clone(),
         web_shutdown_future,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("HTTP listener at {address} failed: {error}"),
+        )
+    })?;
 
     context.request_shutdown();
     context.shutdown().await;

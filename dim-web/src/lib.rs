@@ -395,7 +395,7 @@ pub async fn start_webserver(
     event_rx: Receiver<String>,
     library_workers: LibraryWorkers,
     shutdown_fut: impl Future<Output = ()> + Send + 'static,
-) {
+) -> std::io::Result<()> {
     let state = stream_manager;
     let stream_tracking = StreamTracking::default();
     let event_repeater = routes::websocket::event_repeater(
@@ -427,12 +427,9 @@ pub async fn start_webserver(
         .with_library_workers(library_workers);
     let router = build_router(app);
 
-    tracing::info!(%address, "webserver is listening");
+    tracing::info!(%address, "starting HTTP listener");
 
     let result = serve_router(address, router, shutdown_fut).await;
-    if let Err(error) = result {
-        tracing::error!(?error, "HTTP server stopped with an error");
-    }
 
     cleanup_handle.abort();
     let _ = cleanup_handle.await;
@@ -440,17 +437,25 @@ pub async fn start_webserver(
 
     event_repeater_handle.abort();
     let _ = event_repeater_handle.await;
+    result
 }
 
 async fn serve_router(
     address: SocketAddr,
     router: Router,
     shutdown_fut: impl Future<Output = ()> + Send + 'static,
-) -> Result<(), hyper::Error> {
-    axum::Server::bind(&address)
+) -> std::io::Result<()> {
+    let server = axum::Server::try_bind(&address).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to bind HTTP listener at {address}: {error}"
+        ))
+    })?;
+    tracing::info!(%address, "HTTP listener bound");
+    server
         .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_fut)
         .await
+        .map_err(|error| std::io::Error::other(format!("HTTP server at {address} failed: {error}")))
 }
 
 #[cfg(test)]
@@ -467,6 +472,19 @@ mod shutdown_tests {
         .await
         .expect("server did not shut down")
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bind_failure_identifies_the_listener_address() {
+        let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = occupied.local_addr().unwrap();
+
+        let error = serve_router(address, Router::new(), async {})
+            .await
+            .expect_err("binding an occupied address should fail");
+
+        assert!(error.to_string().contains("failed to bind HTTP listener"));
+        assert!(error.to_string().contains(&address.to_string()));
     }
 
     #[tokio::test]

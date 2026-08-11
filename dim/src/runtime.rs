@@ -31,7 +31,14 @@ impl ApplicationContext {
         }
         let paths = RuntimePaths::from_settings(&config_path, settings.running());
         paths.prepare()?;
-        let database = dim_database::open_at(&paths.database).await?;
+        let database = dim_database::open_at(&paths.database)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to open and validate database at '{}': {error}",
+                    paths.database.display()
+                ))
+            })?;
         let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         let (shutdown_tx, _) = watch::channel(false);
         Ok(Self {
