@@ -10,6 +10,58 @@ use crate::error::REQUEST_ID_HEADER;
 use crate::DimErrorWrapper;
 use dim_core::settings::SettingsStore;
 
+pub async fn trace_remote_playback<B>(
+    req: axum::http::Request<B>,
+    next: axum::middleware::Next<B>,
+) -> axum::response::Response {
+    let path = req.uri().path().to_owned();
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|connect| connect.0);
+    let user_agent = req
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned();
+    let range = req
+        .headers()
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none")
+        .to_owned();
+    let stage = if path.ends_with("/master.m3u8") {
+        "master_playlist"
+    } else if path.ends_with("/index.m3u8") {
+        "media_playlist"
+    } else if path.ends_with("/init.mp4") {
+        "init_fragment"
+    } else if path.ends_with(".m4s") {
+        "media_segment"
+    } else {
+        "unknown"
+    };
+
+    tracing::info!(
+        remote_stage = stage,
+        remote_path = %path,
+        peer = ?peer,
+        user_agent = %user_agent,
+        range = %range,
+        "Remote playback request started"
+    );
+    let response = next.run(req).await;
+    tracing::info!(
+        remote_stage = stage,
+        remote_path = %path,
+        peer = ?peer,
+        status = %response.status(),
+        "Remote playback request finished"
+    );
+    response
+}
+
 pub async fn request_id<B>(
     req: axum::http::Request<B>,
     next: axum::middleware::Next<B>,

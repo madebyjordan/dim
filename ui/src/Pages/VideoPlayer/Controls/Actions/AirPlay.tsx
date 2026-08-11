@@ -1,14 +1,21 @@
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useParams } from "react-router";
 
 import AirPlayIcon from "../../../../assets/Icons/AirPlay";
 import { updateVideo } from "../../../../actions/video";
 import {
   useCreatePlaybackSessionMutation,
-  useKillPlaybackSessionMutation,
 } from "../../../../api/v1/foundation";
+import { apiRequest } from "../../../../api/transport";
 import { VideoPlayerContext } from "../../Context";
-import { useAppDispatch } from "../../../../hooks/store";
+import { useAppDispatch, useAppSelector } from "../../../../hooks/store";
 
 interface WebKitAirPlayVideo extends HTMLVideoElement {
   webkitShowPlaybackTargetPicker?: () => void;
@@ -19,15 +26,31 @@ interface AvailabilityEvent extends Event {
   availability?: "available" | "not-available";
 }
 
+const mediaErrorName = (error: MediaError | null) => {
+  switch (error?.code) {
+    case MediaError.MEDIA_ERR_ABORTED:
+      return "playback aborted";
+    case MediaError.MEDIA_ERR_NETWORK:
+      return "network request failed";
+    case MediaError.MEDIA_ERR_DECODE:
+      return "receiver could not decode the media";
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return "media source was rejected";
+    default:
+      return "unknown media error";
+  }
+};
+
 const EMPTY_CAPABILITIES = { video: null, audio: [] };
 
 export default function AirPlay() {
   const dispatch = useAppDispatch();
+  const authToken = useAppSelector((state) => state.auth.token);
   const { fileID } = useParams();
   const { player, setRemoteMedia, videoRef } = useContext(VideoPlayerContext)!;
   const [createPlaybackSession] = useCreatePlaybackSessionMutation();
-  const [killPlaybackSession] = useKillPlaybackSessionMutation();
   const remoteRef = useRef<WebKitAirPlayVideo | null>(null);
+  const sessionGidRef = useRef<string | null>(null);
   const [available, setAvailable] = useState(false);
   const [session, setSession] = useState<{
     gid: string;
@@ -42,8 +65,53 @@ export default function AirPlay() {
     "webkitShowPlaybackTargetPicker" in HTMLMediaElement.prototype;
   const supported = receiverReachable && webkitSupported;
 
+  const terminateRemoteSession = useCallback(
+    (gid: string, reason: string) => {
+      console.info("[AIRPLAY] terminating playback session", {
+        sessionId: gid,
+        reason,
+      });
+      void apiRequest(`stream/${gid}/state/kill`, {
+        method: "DELETE",
+        token: authToken,
+        keepalive: true,
+      })
+        .then(() =>
+          console.info("[AIRPLAY] playback session terminated", {
+            sessionId: gid,
+            reason,
+          })
+        )
+        .catch((error) =>
+          console.error("[AIRPLAY] failed to terminate playback session", {
+            sessionId: gid,
+            reason,
+            error,
+          })
+        );
+    },
+    [authToken]
+  );
+
+  useEffect(() => {
+    const pageHidden = () => {
+      const gid = sessionGidRef.current;
+      if (!gid) return;
+      sessionGidRef.current = null;
+      terminateRemoteSession(gid, "page hidden");
+    };
+    window.addEventListener("pagehide", pageHidden);
+    return () => window.removeEventListener("pagehide", pageHidden);
+  }, [terminateRemoteSession]);
+
   useEffect(() => {
     if (!supported || !fileID) return;
+    setSession(null);
+    const previousGid = sessionGidRef.current;
+    if (previousGid) {
+      sessionGidRef.current = null;
+      terminateRemoteSession(previousGid, "playback source changed");
+    }
     let cancelled = false;
     let createdGid: string | null = null;
     void (async () => {
@@ -56,10 +124,14 @@ export default function AirPlay() {
         }).unwrap();
         const resource = payload.remote;
         if (cancelled || !resource?.url) {
-          if (payload.gid) void killPlaybackSession(payload.gid);
+          if (payload.gid) terminateRemoteSession(payload.gid, "cancelled");
           return;
         }
         createdGid = payload.gid;
+        sessionGidRef.current = payload.gid;
+        console.info("[AIRPLAY] playback session prepared", {
+          sessionId: payload.gid,
+        });
         setSession({
           gid: payload.gid,
           url: new URL(resource.url, window.location.origin).href,
@@ -70,23 +142,33 @@ export default function AirPlay() {
     })();
     return () => {
       cancelled = true;
-      if (createdGid) void killPlaybackSession(createdGid);
+      if (createdGid && sessionGidRef.current === createdGid) {
+        sessionGidRef.current = null;
+        terminateRemoteSession(createdGid, "component cleanup");
+      }
     };
-  }, [createPlaybackSession, fileID, killPlaybackSession, supported]);
+  }, [createPlaybackSession, fileID, supported, terminateRemoteSession]);
 
   useEffect(() => {
     const remote = remoteRef.current;
     if (!remote || !session) return;
     remote.setAttribute("x-webkit-airplay", "allow");
+    remote.preload = "none";
     remote.src = session.url;
 
     const availabilityChanged = (event: Event) => {
-      setAvailable(
-        (event as AvailabilityEvent).availability === "available"
-      );
+      const availability = (event as AvailabilityEvent).availability;
+      console.info("[AIRPLAY] target availability changed", { availability });
+      setAvailable(availability === "available");
     };
     const routeChanged = () => {
       const wireless = remote.webkitCurrentPlaybackTargetIsWireless === true;
+      console.info("[AIRPLAY] playback route changed", {
+        sessionId: session.gid,
+        wireless,
+        networkState: remote.networkState,
+        readyState: remote.readyState,
+      });
       if (wireless) {
         const local = videoRef.current;
         const shouldPlay = local ? !local.paused : true;
@@ -121,13 +203,28 @@ export default function AirPlay() {
     const paused = () => dispatch(updateVideo({ paused: true }));
     const waiting = () => dispatch(updateVideo({ waiting: true }));
     const ended = () => dispatch(updateVideo({ playback_ended: true }));
-    const failed = () =>
+    const failed = () => {
+      const reason = mediaErrorName(remote.error);
+      const stage = remote.webkitCurrentPlaybackTargetIsWireless
+        ? "wireless receiver playback"
+        : "media preparation before receiver selection";
+      console.error("[AIRPLAY] media element failed", {
+        sessionId: session.gid,
+        stage,
+        reason,
+        mediaErrorCode: remote.error?.code ?? 0,
+        mediaErrorMessage: remote.error?.message ?? "",
+        networkState: remote.networkState,
+        readyState: remote.readyState,
+        currentSrc: remote.currentSrc,
+      });
       dispatch(
         updateVideo({
           waiting: false,
-          error: { msg: "AirPlay could not play this media." },
+          error: { msg: `AirPlay failed during ${stage}: ${reason}.` },
         })
       );
+    };
 
     remote.addEventListener(
       "webkitplaybacktargetavailabilitychanged",
@@ -144,7 +241,6 @@ export default function AirPlay() {
     remote.addEventListener("waiting", waiting);
     remote.addEventListener("ended", ended);
     remote.addEventListener("error", failed);
-    remote.load();
     return () => {
       setRemoteMedia(null);
       remote.pause();
@@ -168,9 +264,43 @@ export default function AirPlay() {
     };
   }, [dispatch, player, session, setRemoteMedia, videoRef]);
 
-  const chooseTarget = useCallback(() => {
-    remoteRef.current?.webkitShowPlaybackTargetPicker?.();
+  const prepareTargetPicker = useCallback(() => {
+    const remote = remoteRef.current;
+    if (!remote || remote.preload !== "none") return;
+
+    // Safari resets the picker request when load() is called from the click
+    // handler itself. Initialise on pointer-down so the subsequent click can
+    // remain a pure, user-initiated picker request.
+    remote.preload = "metadata";
+    remote.load();
   }, []);
+
+  const prepareTargetPickerFromKeyboard = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>) => {
+      if (event.key === "Enter" || event.key === " ") prepareTargetPicker();
+    },
+    [prepareTargetPicker]
+  );
+
+  const chooseTarget = useCallback(() => {
+    const remote = remoteRef.current;
+    console.info("[AIRPLAY] target picker requested", {
+      sessionId: session?.gid,
+      networkState: remote?.networkState,
+      readyState: remote?.readyState,
+    });
+    if (!remote) return;
+    const showPicker = () => {
+      console.info("[AIRPLAY] media prepared for target picker", {
+        sessionId: session?.gid,
+        networkState: remote.networkState,
+        readyState: remote.readyState,
+      });
+      remote.webkitShowPlaybackTargetPicker?.();
+    };
+
+    showPicker();
+  }, [session?.gid]);
 
   if (!webkitSupported) return null;
   return (
@@ -179,6 +309,8 @@ export default function AirPlay() {
         className={`airplay trackActive-${
           remoteRef.current?.webkitCurrentPlaybackTargetIsWireless === true
         }`}
+        onPointerDown={prepareTargetPicker}
+        onKeyDown={prepareTargetPickerFromKeyboard}
         onClick={chooseTarget}
         disabled={!receiverReachable || !available || !session}
         title={
@@ -192,7 +324,7 @@ export default function AirPlay() {
       >
         <AirPlayIcon />
       </button>
-      <video className="airplayMedia" ref={remoteRef} preload="metadata" playsInline />
+      <video className="airplayMedia" ref={remoteRef} preload="none" playsInline />
     </>
   );
 }

@@ -352,16 +352,22 @@ impl StreamTracking {
         }
         let token = Uuid::new_v4().as_simple().to_string();
         session.remote_access_token = Some(token.clone());
+        tracing::info!(session_id = %gid, owner, "Remote playback token issued");
         Ok(token)
     }
 
     pub async fn authenticate_remote(&self, gid: &Uuid, token: &str) -> Result<i64, TrackingError> {
         let mut inner = self.inner.write().await;
-        let session = inner.sessions.get_mut(gid).ok_or(TrackingError::NotFound)?;
+        let Some(session) = inner.sessions.get_mut(gid) else {
+            tracing::warn!(session_id = %gid, "Remote playback token rejected: session not found");
+            return Err(TrackingError::NotFound);
+        };
         if session.remote_access_token.as_deref() != Some(token) {
+            tracing::warn!(session_id = %gid, owner = session.owner, "Remote playback token rejected: token mismatch");
             return Err(TrackingError::NotOwner);
         }
         session.last_activity = Instant::now();
+        tracing::debug!(session_id = %gid, owner = session.owner, "Remote playback token accepted");
         Ok(session.owner)
     }
 

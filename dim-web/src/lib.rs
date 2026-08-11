@@ -242,6 +242,7 @@ fn remote_stream_routes() -> Router<AppState> {
             "/api/v1/remote/:gid/:track/:chunk",
             get(routes::stream::get_remote_chunk),
         )
+        .route_layer(axum::middleware::from_fn(middleware::trace_remote_playback))
 }
 
 fn season_routes(_app: AppState) -> Router<AppState> {
@@ -373,7 +374,18 @@ pub fn build_router(app: AppState) -> Router {
             middleware::deployment_guard,
         ))
         .layer(axum::middleware::from_fn(middleware::request_id))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http().make_span_with(
+                |request: &axum::http::Request<axum::body::Body>| {
+                    tracing::debug_span!(
+                        "request",
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                        version = ?request.version(),
+                    )
+                },
+            ),
+        )
 }
 
 async fn readiness(State(AppState { conn, .. }): State<AppState>) -> StatusCode {
