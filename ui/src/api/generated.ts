@@ -100,7 +100,18 @@ export type PlaybackTrack = {
   chunk_path?: string;
 };
 
-export type PlaybackSession = { gid: string; tracks: Array<PlaybackTrack> };
+export type PlaybackPlan = {
+  preferred_strategy: "direct_play" | "transcode";
+  direct_play_supported: boolean;
+  decision_reason: string;
+  renditions: Array<{ height: number; bitrate: number }>;
+};
+
+export type PlaybackSession = {
+  gid: string;
+  tracks: Array<PlaybackTrack>;
+  playback_plan: PlaybackPlan;
+};
 
 export type WebSocketAuthenticate = { type: "authenticate"; token: string };
 

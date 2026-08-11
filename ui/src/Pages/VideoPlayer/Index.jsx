@@ -28,7 +28,12 @@ import NextVideo from "./NextVideo/Index";
 import BackButton from "./BackButton";
 import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
 import { createPlaybackState } from "./Navigation";
-import { clearPlaybackSession, setPlaybackSession } from "../../storage";
+import { supportsVerifiedAv1Playback } from "./VideoCapabilities";
+import {
+  reclaimPlaybackSession,
+  setPlaybackSession,
+  terminatePlaybackSession,
+} from "../../storage";
 import {
   useCreatePlaybackSessionMutation,
   useKillPlaybackSessionMutation,
@@ -122,14 +127,27 @@ function VideoPlayer() {
     if (video.gid) return;
 
     const force_ass = localStorage.getItem("enable_ssa") === "true";
+    let cancelled = false;
     (async () => {
       try {
+        const removeSession = (gid) => killPlaybackSession(gid).unwrap();
+        await reclaimPlaybackSession(removeSession);
+        if (cancelled) return;
+
+        const av1Main10Bt7091080p24Fmp4 = await supportsVerifiedAv1Playback();
         const payload = await createPlaybackSession({
           fileId: params.fileID,
           forceAss: force_ass,
+          av1Main10Bt7091080p24Fmp4,
         }).unwrap();
         if (!payload.gid || !Array.isArray(payload.tracks)) {
           throw new Error("Manifest response was incomplete");
+        }
+        if (cancelled) {
+          await terminatePlaybackSession(payload.gid, removeSession).catch(
+            () => undefined
+          );
+          return;
         }
 
         setPlaybackSession(payload.gid);
@@ -159,6 +177,7 @@ function VideoPlayer() {
           })
         );
       } catch (error) {
+        if (cancelled) return;
         console.error("[VIDEO] failed to create playback manifest", error);
         dispatch(
           setManifestState({
@@ -175,7 +194,16 @@ function VideoPlayer() {
         );
       }
     })();
-  }, [createPlaybackSession, dispatch, params.fileID, video.gid]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    createPlaybackSession,
+    dispatch,
+    killPlaybackSession,
+    params.fileID,
+    video.gid,
+  ]);
 
   useEffect(() => {
     if (!video.gid || !manifest.virtual.loaded) return;
@@ -262,8 +290,9 @@ function VideoPlayer() {
 
       if (!video.gid) return;
 
-      killPlaybackSession(video.gid);
-      clearPlaybackSession();
+      void terminatePlaybackSession(video.gid, (gid) =>
+        killPlaybackSession(gid).unwrap()
+      ).catch(() => undefined);
     };
   }, [
     audioTracks.list,

@@ -82,11 +82,18 @@ export const foundation = v1.injectEndpoints({
     }),
     createPlaybackSession: build.mutation<
       PlaybackSession,
-      { fileId: string; forceAss: boolean }
+      {
+        fileId: string;
+        forceAss: boolean;
+        av1Main10Bt7091080p24Fmp4: boolean;
+      }
     >({
-      query: ({ fileId, forceAss }) => ({
+      query: ({ fileId, forceAss, av1Main10Bt7091080p24Fmp4 }) => ({
         url: `stream/${fileId}/manifest`,
-        params: { force_ass: forceAss },
+        params: {
+          force_ass: forceAss,
+          av1_main10_bt709_1080p24_6_3mbps_fmp4: av1Main10Bt7091080p24Fmp4,
+        },
       }),
       invalidatesTags: ["Playback"],
     }),

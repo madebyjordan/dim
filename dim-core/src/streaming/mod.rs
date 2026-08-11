@@ -246,7 +246,8 @@ pub const AVC1_LEVELS: [Avc1Level; 20] = [
 #[cfg(test)]
 mod compatibility_tests {
     use nightfall::profiles::{
-        AacTranscodeProfile, H264TranscodeProfile, ProfileContext, TranscodingProfile,
+        AacTranscodeProfile, H264TranscodeProfile, H264TransmuxProfile, ProfileContext,
+        TranscodingProfile,
     };
 
     #[test]
@@ -295,5 +296,19 @@ mod compatibility_tests {
         assert!(args
             .windows(2)
             .any(|args| args == ["-vf", "scale=1920:1080"]));
+    }
+
+    #[test]
+    fn verified_av1_can_use_the_existing_fragmented_mp4_remux_profile() {
+        let mut ctx = ProfileContext::default();
+        ctx.input_ctx.codec = "av1".into();
+        ctx.output_ctx.codec = "av1".into();
+
+        assert!(H264TransmuxProfile.supports(&ctx).is_ok());
+        let args = H264TransmuxProfile
+            .build(ctx)
+            .expect("AV1 remux profile should generate FFmpeg arguments");
+        assert!(args.windows(2).any(|args| args == ["-c:0", "copy"]));
+        assert!(args.iter().any(|arg| arg == "-hls_segment_type"));
     }
 }

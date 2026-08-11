@@ -286,6 +286,7 @@ struct TrackState {
 #[derive(Debug)]
 struct Session {
     owner: i64,
+    created_at: Instant,
     last_activity: Instant,
     tracks: Vec<TrackState>,
 }
@@ -314,10 +315,12 @@ impl StreamTracking {
 
     pub async fn create_session(&self, gid: Uuid, owner: i64, tracks: Vec<PlannedTrack>) {
         let mut inner = self.inner.write().await;
+        tracing::info!(session_id = %gid, owner, track_count = tracks.len(), "Playback session created");
         inner.sessions.insert(
             gid,
             Session {
                 owner,
+                created_at: Instant::now(),
                 last_activity: Instant::now(),
                 tracks: tracks
                     .into_iter()
@@ -344,6 +347,7 @@ impl StreamTracking {
         if session.owner != owner {
             return Err(TrackingError::NotOwner);
         }
+        tracing::debug!(session_id = %gid, owner, age_ms = session.created_at.elapsed().as_millis(), "Playback manifest activity");
         session.last_activity = Instant::now();
         Ok(session
             .tracks
@@ -369,6 +373,7 @@ impl StreamTracking {
         if session.owner != owner {
             return Err(TrackingError::NotOwner);
         }
+        tracing::debug!(session_id = %gid, owner, process_id, age_ms = session.created_at.elapsed().as_millis(), "Playback segment activity");
         session.last_activity = Instant::now();
         Ok(gid)
     }
@@ -446,13 +451,25 @@ impl StreamTracking {
             .iter()
             .filter(|track| track.process_id.is_some())
             .count();
-        check_admission(
+        tracing::info!(
+            session_id = %gid,
+            owner,
+            global_active,
+            user_active,
+            session_active,
+            requested,
+            "Playback admission requested"
+        );
+        if let Err(error) = check_admission(
             self.policy,
             global_active,
             user_active,
             session_active,
             requested,
-        )?;
+        ) {
+            tracing::warn!(session_id = %gid, owner, %error, "Playback admission rejected");
+            return Err(error);
+        }
 
         let session = inner
             .sessions
@@ -511,6 +528,7 @@ impl StreamTracking {
                 }
             };
             activated.push(process_id.clone());
+            tracing::info!(session_id = %gid, owner, process_id, "Playback process created");
             track.process_id = Some(process_id);
         }
         for process_id in activated {
@@ -571,6 +589,14 @@ impl StreamTracking {
             if session.owner != owner {
                 return Err(TrackingError::NotOwner);
             }
+            tracing::info!(
+                session_id = %gid,
+                owner,
+                age_ms = session.created_at.elapsed().as_millis(),
+                inactive_ms = session.last_activity.elapsed().as_millis(),
+                process_count = session.tracks.iter().filter(|track| track.process_id.is_some()).count(),
+                "Playback session removal started"
+            );
             let session = inner.sessions.remove(gid).ok_or(TrackingError::NotFound)?;
             let ids = session
                 .tracks
@@ -583,8 +609,16 @@ impl StreamTracking {
             ids
         };
         for id in process_ids {
-            let _ = state.die(id).await;
+            match state.die(id.clone()).await {
+                Ok(()) => {
+                    tracing::info!(session_id = %gid, owner, process_id = id, "Playback process terminated")
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %gid, owner, process_id = id, %error, "Playback process termination failed")
+                }
+            }
         }
+        tracing::info!(session_id = %gid, owner, "Playback session removed");
         Ok(())
     }
 
@@ -595,8 +629,16 @@ impl StreamTracking {
                 .sessions
                 .iter()
                 .filter_map(|(gid, session)| {
-                    (session.last_activity.elapsed() >= self.policy.session_ttl)
-                        .then_some((*gid, session.owner))
+                    (session.last_activity.elapsed() >= self.policy.session_ttl).then(|| {
+                        tracing::info!(
+                            session_id = %gid,
+                            owner = session.owner,
+                            age_ms = session.created_at.elapsed().as_millis(),
+                            inactive_ms = session.last_activity.elapsed().as_millis(),
+                            "Playback session expired"
+                        );
+                        (*gid, session.owner)
+                    })
                 })
                 .collect::<Vec<_>>();
             let active = inner

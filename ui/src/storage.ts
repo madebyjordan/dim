@@ -24,3 +24,30 @@ export const clearPlaybackSession = () => {
   sessionStorage.removeItem(storageKeys.playbackSession);
   sessionStorage.removeItem(legacyPlaybackSessionKey);
 };
+
+type PlaybackSessionRemover = (gid: string) => Promise<unknown>;
+
+const isMissingPlaybackSession = (error: unknown) =>
+  typeof error === "object" && error !== null && "status" in error
+    ? error.status === 404
+    : false;
+
+export const terminatePlaybackSession = async (
+  gid: string,
+  remove: PlaybackSessionRemover
+) => {
+  try {
+    await remove(gid);
+  } catch (error) {
+    if (!isMissingPlaybackSession(error)) throw error;
+  }
+
+  if (getPlaybackSession() === gid) clearPlaybackSession();
+};
+
+export const reclaimPlaybackSession = async (
+  remove: PlaybackSessionRemover
+) => {
+  const gid = getPlaybackSession();
+  if (gid) await terminatePlaybackSession(gid, remove);
+};

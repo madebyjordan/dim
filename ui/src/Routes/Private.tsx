@@ -6,7 +6,7 @@ import { fetchUser } from "../actions/user.js";
 import { useAppDispatch, useAppSelector } from "../hooks/store";
 import { getAuthTokenCookie } from "./SessionControllers";
 import { apiRequest } from "../api/transport";
-import { clearPlaybackSession, getPlaybackSession } from "../storage";
+import { getPlaybackSession, terminatePlaybackSession } from "../storage";
 
 function PrivateRoute() {
   const dispatch = useAppDispatch();
@@ -25,13 +25,12 @@ function PrivateRoute() {
 
     if (!GID) return;
 
-    (async () => {
-      await apiRequest(`stream/${GID}/state/kill`, {
+    void terminatePlaybackSession(GID, (gid) =>
+      apiRequest(`stream/${gid}/state/kill`, {
         method: "DELETE",
         token,
-      }).catch(() => undefined);
-      clearPlaybackSession();
-    })();
+      })
+    ).catch(() => undefined);
   }, [location.pathname, token]);
 
   useEffect(() => {

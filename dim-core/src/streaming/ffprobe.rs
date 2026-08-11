@@ -77,6 +77,9 @@ pub struct Stream {
     pub duration: Option<String>,
     pub color_range: Option<String>,
     pub color_space: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_primaries: Option<String>,
+    pub chroma_location: Option<String>,
     pub disposition: Option<Disposition>,
 }
 

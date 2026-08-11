@@ -35,6 +35,8 @@ pub struct VirtualManifestParams {
     gid: Option<String>,
     #[serde(default)]
     force_ass: bool,
+    #[serde(default)]
+    av1_main10_bt709_1080p24_6_3mbps_fmp4: bool,
 }
 
 pub async fn return_virtual_manifest(
@@ -46,6 +48,7 @@ pub async fn return_virtual_manifest(
     Path(id): Path<i64>,
     Query(params): Query<VirtualManifestParams>,
     Extension(user): Extension<User>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
     let owner = user.id.get();
     if let Some(gid) = params.gid.and_then(|value| Uuid::parse_str(&value).ok()) {
@@ -61,7 +64,15 @@ pub async fn return_virtual_manifest(
     }
 
     let (info, reused_probe) = load_probe(&media).await?;
-    let (tracks, plan) = build_tracks(&info, &media, &user.prefs, params.force_ass)?;
+    let capabilities = BrowserCapabilities {
+        av1_main10_bt709_1080p24_6_3mbps_fmp4: params.av1_main10_bt709_1080p24_6_3mbps_fmp4
+            && headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(is_verified_chromium_151_macos),
+        ..BrowserCapabilities::default()
+    };
+    let (tracks, plan) = build_tracks(&info, &media, &user.prefs, params.force_ass, &capabilities)?;
     let gid = Uuid::new_v4();
     stream_tracking.create_session(gid, owner, tracks).await;
     Ok(Json(json!({
@@ -71,6 +82,13 @@ pub async fn return_virtual_manifest(
         "probe_source": if reused_probe { "ingestion" } else { "fallback" },
     }))
     .into_response())
+}
+
+fn is_verified_chromium_151_macos(user_agent: &str) -> bool {
+    user_agent.contains("Macintosh; Intel Mac OS X 10_15_7")
+        && user_agent.contains(" Chrome/151.")
+        && !user_agent.contains(" Edg/")
+        && !user_agent.contains(" OPR/")
 }
 
 async fn load_probe(media: &MediaFile) -> Result<(FFPStream, bool), DimErrorWrapper> {
@@ -120,6 +138,7 @@ fn build_tracks(
     media: &MediaFile,
     prefs: &UserSettings,
     force_ass: bool,
+    capabilities: &BrowserCapabilities,
 ) -> Result<(Vec<PlannedTrack>, PlaybackPlan), DimErrorWrapper> {
     let video = info
         .get_primary("video")
@@ -156,26 +175,41 @@ fn build_tracks(
     let plan = plan_video(
         &VideoSource {
             codec: video.codec_name.clone(),
+            profile: video.profile.clone(),
+            pixel_format: video.pix_fmt.clone(),
+            level: video.level,
+            color_range: video.color_range.clone(),
+            color_space: video.color_space.clone(),
+            color_transfer: video.color_transfer.clone(),
+            color_primaries: video.color_primaries.clone(),
+            chroma_location: video.chroma_location.clone(),
+            width,
             height,
             bitrate,
+            frame_rate,
         },
-        &BrowserCapabilities::default(),
+        capabilities,
     );
     let mut tracks = Vec::new();
 
     if plan.direct_play_supported {
         let id = Uuid::new_v4().to_string();
-        let codec = video
-            .level
-            .and_then(level_to_tag)
-            .unwrap_or_else(|| get_avc1_tag(width, height, bitrate, frame_rate));
+        let (output_codec, codec_tag) = if video.codec_name == "av1" {
+            ("av1", "av01.0.08M.10.0.111.01.01.01.0".to_string())
+        } else {
+            let codec = video
+                .level
+                .and_then(level_to_tag)
+                .unwrap_or_else(|| get_avc1_tag(width, height, bitrate, frame_rate));
+            ("h264", codec.to_string())
+        };
         let mut input_ctx: nightfall::profiles::InputCtx = video.clone().into();
         input_ctx.fps = frame_rate as f64;
         let context = ProfileContext {
             file: media.target_file.clone(),
             input_ctx,
             output_ctx: OutputCtx {
-                codec: "h264".into(),
+                codec: output_codec.into(),
                 start_num: 0,
                 target_gop: 10,
                 ..Default::default()
@@ -187,7 +221,7 @@ fn build_tracks(
                 .set_direct()
                 .set_mime("video/mp4")
                 .set_duration(Some(duration))
-                .set_codecs(codec.to_string())
+                .set_codecs(codec_tag)
                 .set_bandwidth(bitrate)
                 .set_args([("width", width), ("height", height)])
                 .set_is_default(matches!(
@@ -761,6 +795,23 @@ mod tests {
         assert_eq!(fallback_audio_bitrate(2), 128_000);
         assert_eq!(fallback_audio_bitrate(6), 384_000);
         assert_eq!(fallback_audio_bitrate(8), 512_000);
+    }
+
+    #[test]
+    fn av1_client_evidence_is_limited_to_the_verified_browser_runtime() {
+        let verified = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+            AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+        assert!(is_verified_chromium_151_macos(verified));
+        assert!(!is_verified_chromium_151_macos(
+            &verified.replace("Chrome/151", "Chrome/152")
+        ));
+        assert!(!is_verified_chromium_151_macos(&verified.replace(
+            "Macintosh; Intel Mac OS X 10_15_7",
+            "Windows NT 10.0"
+        )));
+        assert!(!is_verified_chromium_151_macos(&format!(
+            "{verified} Edg/151.0"
+        )));
     }
 
     #[tokio::test]

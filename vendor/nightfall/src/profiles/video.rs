@@ -111,12 +111,14 @@ impl TranscodingProfile for H264TransmuxProfile {
             ));
         }
 
-        if ctx.input_ctx.codec == ctx.output_ctx.codec && ctx.input_ctx.codec == "h264" {
+        if ctx.input_ctx.codec == ctx.output_ctx.codec
+            && matches!(ctx.input_ctx.codec.as_str(), "h264" | "av1")
+        {
             return Ok(());
         }
 
         Err(NightfallError::ProfileNotSupported(
-            "Profile only supports h264 input and output codecs.".into(),
+            "Profile only supports matching h264 or av1 input and output codecs.".into(),
         ))
     }
 
