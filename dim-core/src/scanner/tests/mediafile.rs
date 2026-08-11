@@ -214,6 +214,55 @@ async fn durable_rescan_of_existing_file_releases_writer_for_item_update() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn durable_scan_counts_probe_failures() {
+    let directory = super::temp_dir(["Unreadable By Ffprobe (2026).mkv"]);
+    let path = directory.path().join("Unreadable By Ffprobe (2026).mkv");
+    std::fs::write(&path, b"not a media container").unwrap();
+    let mut conn = dim_database::get_conn_memory()
+        .await
+        .expect("Failed to obtain an in-memory db pool.");
+    let library = create_library(&mut conn).await;
+    let scan_id = {
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        let scan_id = dim_database::ingestion::ScanRun::begin(&mut tx, library, "full")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        scan_id
+    };
+
+    let work = super::super::insert_mediafiles_for_scan(
+        &mut conn,
+        library,
+        vec![directory.path().to_path_buf()],
+        Some(scan_id),
+    )
+    .await
+    .unwrap();
+    assert!(work.is_empty());
+
+    let aggregate: i64 = sqlx::query_scalar("SELECT failed FROM ingestion_scan WHERE id = ?")
+        .bind(scan_id)
+        .fetch_one(conn.read_ref())
+        .await
+        .unwrap();
+    assert_eq!(aggregate, 1);
+
+    let item: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT stage, status, error_class FROM ingestion_item WHERE scan_id = ? AND path = ?",
+    )
+    .bind(scan_id)
+    .bind(path.to_string_lossy().as_ref())
+    .fetch_one(conn.read_ref())
+    .await
+    .unwrap();
+    assert_eq!(item.0, "probing");
+    assert_eq!(item.1, "failed");
+    assert_eq!(item.2.as_deref(), Some("corrupt_media"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_instances() {
     let files = (0..1024)
         .map(|i| format!("Movie{i}.mkv"))

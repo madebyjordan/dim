@@ -373,11 +373,8 @@ async fn insert_mediafiles_for_scan(
                 }
                 Err(error) => {
                     if let Some(scan_id) = scan_id {
-                        let status = if error.retryable() {
-                            "retryable"
-                        } else {
-                            "failed"
-                        };
+                        let retryable = error.retryable();
+                        let status = if retryable { "retryable" } else { "failed" };
                         let stage = if matches!(
                             &error,
                             CreatorError::FileUnstable | CreatorError::FileMissing
@@ -398,6 +395,13 @@ async fn insert_mediafiles_for_scan(
                             Some(&error.to_string()),
                         )
                         .await?;
+                        if !retryable {
+                            let mut lock = conn.writer().lock_owned().await;
+                            let mut tx = dim_database::write_tx(&mut lock).await?;
+                            dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "failed")
+                                .await?;
+                            tx.commit().await?;
+                        }
                     }
                     warn!(
                         ?error,

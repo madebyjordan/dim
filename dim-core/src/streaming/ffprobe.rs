@@ -53,6 +53,9 @@ impl Default for FFPStream {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stream {
     pub index: i64,
+    // ffprobe omits codec_name for some non-media streams, such as Matroska text attachments.
+    // Keep those streams observable without rejecting otherwise valid video/audio metadata.
+    #[serde(default)]
     pub codec_name: String,
     pub profile: Option<String>,
     pub codec_type: String,
@@ -377,6 +380,27 @@ mod tests {
     #[test]
     fn does_not_invent_a_stream_bitrate() {
         assert_eq!(Stream::default().get_bitrate(), None);
+    }
+
+    #[test]
+    fn accepts_attachment_without_codec_name() {
+        let probe: FFPStream = serde_json::from_str(
+            r#"{
+                "streams": [
+                    {"index": 0, "codec_name": "av1", "codec_type": "video"},
+                    {
+                        "index": 1,
+                        "codec_type": "attachment",
+                        "tags": {"filename": "encode.txt", "mimetype": "text/plain"}
+                    }
+                ],
+                "format": {}
+            }"#,
+        )
+        .expect("an attachment does not need to identify a media codec");
+
+        assert_eq!(probe.get_video_codec().as_deref(), Some("av1"));
+        assert_eq!(probe.find_by_type("attachment")[0].codec_name, "");
     }
 
     #[tokio::test]
