@@ -347,9 +347,9 @@ macro_rules! json_expect_expr_comma {
 
 pub fn quality_to_label(q_bitrate: u64, q_height: u64, brate: Option<u64>) -> String {
     let bandwidth_ident = if brate.unwrap_or(q_bitrate) > 1_000_000 {
-        "MB"
+        "Mb/s"
     } else {
-        "KB"
+        "kb/s"
     };
 
     let bandwidth_norm = if brate.unwrap_or(q_bitrate) > 1_000_000 {
@@ -359,6 +359,17 @@ pub fn quality_to_label(q_bitrate: u64, q_height: u64, brate: Option<u64>) -> St
     };
 
     format!("{}p@{}{}", q_height, bandwidth_norm, bandwidth_ident)
+}
+
+#[cfg(test)]
+mod quality_label_tests {
+    use super::quality_to_label;
+
+    #[test]
+    fn labels_bit_rates_as_bits_per_second() {
+        assert_eq!(quality_to_label(6_277_855, 1080, None), "1080p@6Mb/s");
+        assert_eq!(quality_to_label(1_000_000, 480, None), "480p@1000kb/s");
+    }
 }
 
 pub fn ts_to_xml(t: u64) -> String {

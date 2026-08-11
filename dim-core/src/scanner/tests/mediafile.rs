@@ -154,6 +154,66 @@ async fn rescan_keeps_metadata_aligned_after_existing_files_are_filtered() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn durable_rescan_of_existing_file_releases_writer_for_item_update() {
+    let (tempdir, files) = super::temp_dir_symlink(
+        ["Already Here (1999).mp4"].into_iter(),
+        super::TEST_MP4_PATH,
+    );
+    let mut conn = dim_database::get_conn_memory()
+        .await
+        .expect("Failed to obtain an in-memory db pool.");
+    let library = create_library(&mut conn).await;
+
+    let existing = InsertableMediaFile {
+        library_id: library,
+        target_file: files[0].to_string_lossy().into_owned(),
+        raw_name: "Already Here".into(),
+        raw_year: Some(1999),
+        ..Default::default()
+    };
+    let scan_id = {
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        existing.insert(&mut tx).await.unwrap();
+        let scan_id = dim_database::ingestion::ScanRun::begin(&mut tx, library, "full")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        scan_id
+    };
+
+    let work = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::super::insert_mediafiles_for_scan(
+            &mut conn,
+            library,
+            vec![tempdir.path().to_path_buf()],
+            Some(scan_id),
+        ),
+    )
+    .await
+    .expect("existing-file rescan deadlocked on the SQLite writer")
+    .unwrap();
+    assert!(work.is_empty());
+
+    let item = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT stage, status, error_class FROM ingestion_item WHERE scan_id = ?",
+    )
+    .bind(scan_id)
+    .fetch_one(conn.read_ref())
+    .await
+    .unwrap();
+    assert_eq!(
+        item,
+        (
+            "commit".into(),
+            "skipped".into(),
+            Some("already_catalogued".into())
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_instances() {
     let files = (0..1024)
         .map(|i| format!("Movie{i}.mkv"))

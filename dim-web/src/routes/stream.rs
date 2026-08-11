@@ -255,16 +255,16 @@ fn build_tracks(
     }
 
     for audio in info.find_by_type("audio") {
+        let channels = audio
+            .channels
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0);
         let bitrate = audio
             .bit_rate
             .as_deref()
             .and_then(|value| value.parse::<u64>().ok())
             .or_else(|| audio.get_bitrate())
-            .unwrap_or(128_000);
-        let channels = audio
-            .channels
-            .and_then(|value| u64::try_from(value).ok())
-            .filter(|value| *value > 0);
+            .unwrap_or_else(|| fallback_audio_bitrate(channels.unwrap_or(2)));
         let language = audio.get_language();
         let is_default = info.get_primary("audio") == Some(audio);
         let context = ProfileContext {
@@ -350,6 +350,12 @@ fn build_tracks(
         });
     }
     Ok((tracks, plan))
+}
+
+fn fallback_audio_bitrate(channels: u64) -> u64 {
+    // The native AAC encoder receives one total bitrate for every channel. Keep the established
+    // 128 kb/s stereo floor, but do not divide that same budget across larger channel layouts.
+    channels.saturating_mul(64_000).max(128_000)
 }
 
 #[derive(Deserialize)]
@@ -747,6 +753,14 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=7-"), 10), Ok(Some((7, 9))));
         assert_eq!(parse_range(Some("bytes=-3"), 10), Ok(Some((7, 9))));
         assert!(parse_range(Some("bytes=12-14"), 10).is_err());
+    }
+
+    #[test]
+    fn fallback_audio_bitrate_scales_with_channel_count() {
+        assert_eq!(fallback_audio_bitrate(1), 128_000);
+        assert_eq!(fallback_audio_bitrate(2), 128_000);
+        assert_eq!(fallback_audio_bitrate(6), 384_000);
+        assert_eq!(fallback_audio_bitrate(8), 512_000);
     }
 
     #[tokio::test]

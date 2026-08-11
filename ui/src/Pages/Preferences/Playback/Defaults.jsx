@@ -61,7 +61,7 @@ function Defaults() {
 
   if (!isDirectPlay) {
     const norm_brate = default_quality.resolution[1] / 1_000_000;
-    CS = `${default_quality.resolution[0]}p - ${norm_brate}MB`;
+    CS = `${default_quality.resolution[0]}p - ${norm_brate}Mb/s`;
   }
 
   return (
@@ -89,7 +89,7 @@ function Defaults() {
                   setVideoQuality({ resolution: [resolution, brate] })
                 }
               >
-                {`${resolution}p - ${brate / 1_000_000}MB`}
+                {`${resolution}p - ${brate / 1_000_000}Mb/s`}
               </button>
             ))}
           </div>

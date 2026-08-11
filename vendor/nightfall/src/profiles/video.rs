@@ -166,7 +166,7 @@ impl TranscodingProfile for H264TranscodeProfile {
         if let Some(height) = ctx.output_ctx.height {
             let width = ctx.output_ctx.width.unwrap_or(-2); // defaults to scaling by 2
             args.push("-vf".into());
-            args.push(format!("scale={}:{}", height, width));
+            args.push(format!("scale={}:{}", width, height));
         }
 
         if let Some(bitrate) = ctx.output_ctx.bitrate {

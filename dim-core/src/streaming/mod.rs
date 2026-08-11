@@ -280,4 +280,20 @@ mod compatibility_tests {
             .iter()
             .any(|arg| arg == "movflags=frag_custom+dash+delay_moov+frag_discont"));
     }
+
+    #[test]
+    fn h264_scale_filter_uses_width_then_height() {
+        let mut ctx = ProfileContext::default();
+        ctx.output_ctx.codec = "h264".into();
+        ctx.output_ctx.width = Some(1920);
+        ctx.output_ctx.height = Some(1080);
+
+        let args = H264TranscodeProfile
+            .build(ctx)
+            .expect("H264 profile should generate FFmpeg arguments");
+
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["-vf", "scale=1920:1080"]));
+    }
 }

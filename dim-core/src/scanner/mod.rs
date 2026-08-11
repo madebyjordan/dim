@@ -345,14 +345,16 @@ async fn insert_mediafiles_for_scan(
             match result {
                 Ok(insertable) => insertables.push((insertable, metadata)),
                 Err(CreatorError::FileExists) => {
-                    let mut lock = conn.writer().lock_owned().await;
-                    let mut tx = dim_database::write_tx(&mut lock).await?;
-                    sqlx::query("UPDATE mediafile SET missing_since = NULL WHERE library_id = ? AND target_file = ?")
-                        .bind(library_id)
-                        .bind(path.to_string_lossy().into_owned())
-                        .execute(&mut tx)
-                        .await?;
-                    tx.commit().await?;
+                    {
+                        let mut lock = conn.writer().lock_owned().await;
+                        let mut tx = dim_database::write_tx(&mut lock).await?;
+                        sqlx::query("UPDATE mediafile SET missing_since = NULL WHERE library_id = ? AND target_file = ?")
+                            .bind(library_id)
+                            .bind(path.to_string_lossy().into_owned())
+                            .execute(&mut tx)
+                            .await?;
+                        tx.commit().await?;
+                    }
                     if let Some(scan_id) = scan_id {
                         update_item(
                             conn,
