@@ -335,16 +335,23 @@ fn build_tracks(
     }
 
     for audio in info.find_by_type("audio") {
-        let channels = audio
+        let source_channels = audio
             .channels
             .and_then(|value| u64::try_from(value).ok())
-            .filter(|value| *value > 0);
-        let bitrate = audio
+            .filter(|value| *value > 0)
+            .unwrap_or(2);
+        let output = browser_aac_output(source_channels, audio.channel_layout.as_deref());
+        let source_bitrate = audio
             .bit_rate
             .as_deref()
             .and_then(|value| value.parse::<u64>().ok())
             .or_else(|| audio.get_bitrate())
-            .unwrap_or_else(|| fallback_audio_bitrate(channels.unwrap_or(2)));
+            .unwrap_or_else(|| fallback_audio_bitrate(source_channels));
+        let bitrate = if output.channels < source_channels {
+            fallback_audio_bitrate(output.channels)
+        } else {
+            source_bitrate
+        };
         let language = audio.get_language();
         let is_default = info.get_primary("audio") == Some(audio);
         let context = ProfileContext {
@@ -354,7 +361,9 @@ fn build_tracks(
                 codec: "aac".into(),
                 start_num: 0,
                 bitrate: Some(bitrate),
-                audio_channels: channels.unwrap_or(2),
+                audio_channels: output.channels,
+                audio_channel_layout: Some(output.layout.into()),
+                audio_filter: output.filter.map(Into::into),
                 ..Default::default()
             },
             ..Default::default()
@@ -366,7 +375,7 @@ fn build_tracks(
                 .and_then(dim_core::utils::lang_from_iso639)
                 .unwrap_or("Unknown"),
             dim_core::utils::codec_pretty(audio.get_codec()),
-            dim_core::utils::channels_pretty(audio.channels.unwrap_or(2))
+            dim_core::utils::channels_pretty(output.channels as i64)
         );
         tracks.push(PlannedTrack {
             manifest: VirtualManifest::new(Uuid::new_v4().to_string(), ContentType::Audio)
@@ -377,7 +386,7 @@ fn build_tracks(
                 .set_is_default(is_default)
                 .set_label(label)
                 .set_lang(language)
-                .set_audio_channels(channels),
+                .set_audio_channels(Some(output.channels)),
             context,
             profile: PlannedProfile::Audio,
         });
@@ -430,6 +439,47 @@ fn build_tracks(
         });
     }
     Ok((tracks, plan))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrowserAacOutput {
+    channels: u64,
+    layout: &'static str,
+    filter: Option<&'static str>,
+}
+
+fn browser_aac_output(channels: u64, layout: Option<&str>) -> BrowserAacOutput {
+    let compatible_layout = match (channels, layout) {
+        (1, Some("mono")) => Some("mono"),
+        (2, Some("stereo")) => Some("stereo"),
+        (3, Some("3.0")) => Some("3.0"),
+        (4, Some("4.0")) => Some("4.0"),
+        (5, Some("5.0")) => Some("5.0"),
+        (6, Some("5.1")) => Some("5.1"),
+        (8, Some("7.1")) => Some("7.1"),
+        _ => None,
+    };
+    if let Some(layout) = compatible_layout {
+        return BrowserAacOutput {
+            channels,
+            layout,
+            filter: None,
+        };
+    }
+
+    if channels == 6 && layout == Some("5.1(side)") {
+        return BrowserAacOutput {
+            channels: 6,
+            layout: "5.1",
+            filter: Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR"),
+        };
+    }
+
+    BrowserAacOutput {
+        channels: 2,
+        layout: "stereo",
+        filter: None,
+    }
 }
 
 fn fallback_audio_bitrate(channels: u64) -> u64 {
@@ -877,6 +927,43 @@ mod tests {
         assert_eq!(fallback_audio_bitrate(2), 128_000);
         assert_eq!(fallback_audio_bitrate(6), 384_000);
         assert_eq!(fallback_audio_bitrate(8), 512_000);
+    }
+
+    #[test]
+    fn browser_aac_normalizes_five_one_side_without_losing_surround() {
+        assert_eq!(
+            browser_aac_output(6, Some("5.1(side)")),
+            BrowserAacOutput {
+                channels: 6,
+                layout: "5.1",
+                filter: Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR"),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_aac_preserves_standard_seven_one() {
+        assert_eq!(
+            browser_aac_output(8, Some("7.1")),
+            BrowserAacOutput {
+                channels: 8,
+                layout: "7.1",
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn browser_aac_falls_back_to_stereo_for_unverified_layouts() {
+        assert_eq!(
+            browser_aac_output(6, None),
+            BrowserAacOutput {
+                channels: 2,
+                layout: "stereo",
+                filter: None,
+            }
+        );
+        assert_eq!(fallback_audio_bitrate(2), 128_000);
     }
 
     #[test]

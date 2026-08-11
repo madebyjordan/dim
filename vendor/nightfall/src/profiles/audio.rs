@@ -42,11 +42,16 @@ impl TranscodingProfile for AacTranscodeProfile {
             "aac".into(),
         ];
 
-        if ctx.input_ctx.audio_channels != ctx.output_ctx.audio_channels {
-            args.append(&mut vec![
-                "-af".into(),
-                "pan=stereo|FL=0.5*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.5*FC+0.707*FR+0.707*BR+0.5*LFE".into(),
-            ]);
+        if let Some(filter) = ctx.output_ctx.audio_filter.as_ref() {
+            args.push("-af".into());
+            args.push(filter.clone());
+        }
+
+        args.push("-ac".into());
+        args.push(ctx.output_ctx.audio_channels.to_string());
+        if let Some(layout) = ctx.output_ctx.audio_channel_layout.as_ref() {
+            args.push("-channel_layout".into());
+            args.push(layout.clone());
         }
 
         let ab = ctx.output_ctx.bitrate.unwrap_or(120_000).to_string();
@@ -131,5 +136,51 @@ impl TranscodingProfile for AacTranscodeProfile {
 
     fn tag(&self) -> &str {
         "aac"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn normalized_surround_contract_is_explicit_in_ffmpeg_arguments() {
+        let mut ctx = ProfileContext::default();
+        ctx.output_ctx.codec = "aac".into();
+        ctx.output_ctx.audio_channels = 6;
+        ctx.output_ctx.audio_channel_layout = Some("5.1".into());
+        ctx.output_ctx.audio_filter =
+            Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR".into());
+        ctx.output_ctx.bitrate = Some(576_000);
+
+        let args = AacTranscodeProfile.build(ctx).unwrap();
+        assert_eq!(value_after(&args, "-ac"), Some("6"));
+        assert_eq!(value_after(&args, "-channel_layout"), Some("5.1"));
+        assert_eq!(value_after(&args, "-ab"), Some("576000"));
+        assert_eq!(
+            value_after(&args, "-af"),
+            Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR")
+        );
+    }
+
+    #[test]
+    fn standard_seven_one_contract_is_preserved_without_remapping() {
+        let mut ctx = ProfileContext::default();
+        ctx.output_ctx.codec = "aac".into();
+        ctx.output_ctx.audio_channels = 8;
+        ctx.output_ctx.audio_channel_layout = Some("7.1".into());
+        ctx.output_ctx.bitrate = Some(512_000);
+
+        let args = AacTranscodeProfile.build(ctx).unwrap();
+        assert_eq!(value_after(&args, "-ac"), Some("8"));
+        assert_eq!(value_after(&args, "-channel_layout"), Some("7.1"));
+        assert_eq!(value_after(&args, "-ab"), Some("512000"));
+        assert_eq!(value_after(&args, "-af"), None);
     }
 }
