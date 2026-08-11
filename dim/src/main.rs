@@ -1,11 +1,14 @@
+mod runtime;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 use dim::streaming;
+use dim_core as dim;
+use runtime::ApplicationContext;
 use xtra::spawn::Tokio;
 
-use dim_core as dim;
 #[derive(Debug, clap::Parser)]
 #[clap(name = "Dim", about = "Dim, a media manager fueled by dark forces.")]
 #[clap(version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"))]
@@ -23,17 +26,12 @@ async fn shutdown_signal() {
                 .expect("Failed to register SIGTERM handler");
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
-                if let Err(error) = result {
-                    tracing::error!(?error, "SIGINT handler failed");
-                }
+                if let Err(error) = result { tracing::error!(?error, "SIGINT handler failed"); }
                 tracing::info!("SIGINT received, shutting down");
             }
-            _ = terminate.recv() => {
-                tracing::info!("SIGTERM received, shutting down");
-            }
+            _ = terminate.recv() => tracing::info!("SIGTERM received, shutting down"),
         }
     }
-
     #[cfg(not(unix))]
     {
         if let Err(error) = tokio::signal::ctrl_c().await {
@@ -45,144 +43,137 @@ async fn shutdown_signal() {
 
 fn main() {
     let args = Args::parse();
-    let _ = std::fs::create_dir_all(dim::utils::ffpath("config"));
-
     let config_path = args
         .config
-        .map(|x| x.to_string_lossy().to_string())
-        .unwrap_or(dim::utils::ffpath("config/config.toml"));
+        .unwrap_or_else(|| PathBuf::from(dim::utils::ffpath("config/config.toml")));
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create a tokio runtime");
+    if let Err(error) = runtime.block_on(run(config_path)) {
+        eprintln!("Dim startup failed: {error}");
+        std::process::exit(1);
+    }
+}
 
-    // initialize global settings.
-    dim::init_global_settings(Some(config_path)).expect("Failed to initialize global settings.");
+async fn run(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let mut context = ApplicationContext::build(config_path.clone()).await?;
+    let global_settings = context.settings.running().clone();
 
-    let global_settings = dim::get_global_settings();
+    // Compatibility boundaries for scanner/artwork code not yet converted to injection. Runtime
+    // ownership remains with `context`; these accessors are initialized once and never live-reload.
+    dim::init_global_settings(Some(config_path.to_string_lossy().into_owned()))?;
+    dim_database::set_conn(context.database.clone());
+    dim_database::set_key(
+        global_settings
+            .secret_key
+            .expect("context always provisions a key"),
+    );
+    let _ = dim_core::core::METADATA_PATH.set(global_settings.metadata_dir.clone());
 
-    // never panics because we set a default value to metadata_dir
-    let _ = std::fs::create_dir_all(global_settings.metadata_dir.clone());
-
-    // set our jwt secret key
-    let settings_clone = global_settings.clone();
-    let secret_key = global_settings.secret_key.unwrap_or_else(move || {
-        let secret_key = dim_database::generate_key();
-        dim::set_global_settings(dim::GlobalSettings {
-            secret_key: Some(secret_key),
-            ..settings_clone
-        })
-        .expect("Failed to save JWT secret_key.");
-        secret_key
-    });
-
-    dim_database::set_key(secret_key);
-
-    dim_core::core::METADATA_PATH
-        .set(global_settings.metadata_dir.clone())
-        .expect("Failed to set METADATA_PATH");
-
-    // Keep the nonblocking logging worker alive until all shutdown cleanup has completed. Dropping
-    // this guard flushes buffered log records.
-    let _logging_guard = dim::setup_logging(global_settings.verbose);
-
-    {
-        let failed = streaming::ffcheck()
-            .into_iter()
-            .fold(false, |failed, item| match item {
-                Ok(stdout) => {
-                    tracing::info!("{}", stdout);
-                    failed
-                }
-
-                Err(program) => {
-                    tracing::error!("Could not find: {}", program);
-                    true
-                }
-            });
-
-        if failed {
-            drop(_logging_guard);
-            std::process::exit(1);
+    let _logging_guard = dim::setup_logging_at(&context.paths.logs, global_settings.verbose);
+    for diagnostic in dim::diagnostics::disk_diagnostics(&context.paths)? {
+        tracing::info!(path = %diagnostic.path.display(), available_bytes = diagnostic.available_bytes, "Writable-state disk diagnostic");
+        if diagnostic.available_bytes < 1024 * 1024 * 1024 {
+            tracing::warn!(path = %diagnostic.path.display(), available_bytes = diagnostic.available_bytes, "Less than 1 GiB is available");
         }
     }
-
-    // The mediafile scanner is super hungry for fds. Increase our limits here as much as possible.
-    if let Some(limit) = fdlimit::raise_fd_limit() {
-        tracing::info!(limit, "Raising fd limit.");
+    let reconciliation = dim::diagnostics::reconcile(&context.database, &context.paths).await?;
+    if reconciliation.missing_media_files > 0 || reconciliation.missing_metadata_files > 0 {
+        tracing::warn!(
+            missing_media_files = reconciliation.missing_media_files,
+            missing_metadata_files = reconciliation.missing_metadata_files,
+            samples = ?reconciliation.samples,
+            "Database/filesystem differences detected; no files or rows were changed"
+        );
     }
 
-    nightfall::profiles::profiles_init(crate::streaming::FFMPEG_BIN.to_string());
-
-    let async_main = async move {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let pool = dim_database::get_conn().await.unwrap();
-        let library_workers = dim::workers::LibraryWorkers::default();
-
-        // Before we start making DB-calls we need to initialize our CDC pipeline.
-        let reactor_handle = {
-            let mut lock = pool.writer().lock_owned().await;
-            let mut reactor_core = dim::reactor::ReactorCore::new();
-            reactor_core.register(&mut lock).await;
-
-            let reactor = dim::reactor::handler::EventReactor::new(pool.clone())
-                .with_websocket(event_tx.clone());
-
-            tokio::spawn(reactor_core.react(reactor))
-        };
-
-        let stream_manager = nightfall::StateManager::new(
-            &mut Tokio::Global,
-            global_settings.cache_dir.clone(),
-            crate::streaming::FFMPEG_BIN.to_string(),
-        );
-
-        let stream_manager_clone = stream_manager.clone();
-
-        // GC the stream manager every second.
-        let gc_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(1000));
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                let _ = stream_manager_clone.garbage_collect().await.unwrap();
+    let failed = streaming::ffcheck()
+        .into_iter()
+        .fold(false, |failed, item| match item {
+            Ok(stdout) => {
+                tracing::info!("{}", stdout);
+                failed
+            }
+            Err(program) => {
+                tracing::error!("Could not find: {}", program);
+                true
             }
         });
+    if failed {
+        return Err("FFmpeg/FFprobe startup validation failed".into());
+    }
 
-        if !global_settings.quiet_boot {
-            tracing::info!("Scanning for media files...");
-            dim::core::run_scanners(event_tx.clone(), &library_workers).await;
+    if let Some(limit) = fdlimit::raise_fd_limit() {
+        tracing::info!(limit, "Raising fd limit");
+    }
+    nightfall::profiles::profiles_init(crate::streaming::FFMPEG_BIN.to_string());
+
+    let outbox_reactor = dim::reactor::handler::EventReactor::new(context.database.clone())
+        .with_websocket(context.event_tx.clone());
+    let outbox_handle = tokio::spawn(
+        dim::reactor::OutboxDispatcher::new(context.database.clone(), outbox_reactor)
+            .run(context.shutdown_receiver()),
+    );
+
+    let stream_manager = nightfall::StateManager::new(
+        &mut Tokio::Global,
+        global_settings.cache_dir.clone(),
+        crate::streaming::FFMPEG_BIN.to_string(),
+    );
+    let gc_manager = stream_manager.clone();
+    let mut gc_shutdown = context.shutdown_receiver();
+    let gc_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => if let Err(error) = gc_manager.garbage_collect().await { tracing::warn!(?error, "Stream garbage collection failed"); },
+                changed = gc_shutdown.changed() => if changed.is_err() || *gc_shutdown.borrow() { break; },
+            }
         }
+    });
 
-        tracing::info!("Launching Dim");
-
-        let address = std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-            global_settings.port,
-        );
-
-        dim_web::start_webserver(
-            address,
-            event_tx,
-            stream_manager.clone(),
-            event_rx,
-            library_workers.clone(),
-            shutdown_signal(),
+    if !global_settings.quiet_boot {
+        tracing::info!("Scanning for media files...");
+        dim::core::run_scanners(
+            context.database.clone(),
+            context.event_tx.clone(),
+            &context.library_workers,
         )
         .await;
+    }
 
-        library_workers.shutdown().await;
+    let shutdown_tx = context.shutdown_sender();
+    let signal_handle = tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
+    let mut web_shutdown = context.shutdown_receiver();
+    let web_shutdown_future =
+        async move { while !*web_shutdown.borrow() && web_shutdown.changed().await.is_ok() {} };
+    let address = std::net::SocketAddr::from(([0, 0, 0, 0], global_settings.port));
+    tracing::info!(%address, "Launching Dim");
+    let event_rx = context.take_event_rx();
+    dim_web::start_webserver(
+        address,
+        context.database.clone(),
+        context.settings.clone(),
+        context.event_tx.clone(),
+        stream_manager.clone(),
+        event_rx,
+        context.library_workers.clone(),
+        web_shutdown_future,
+    )
+    .await;
 
-        gc_handle.abort();
-        let _ = gc_handle.await;
-
-        if let Err(error) = stream_manager.shutdown_all().await {
-            tracing::error!(?error, "Failed to stop all transcoding sessions");
-        }
-
-        reactor_handle.abort();
-        let _ = reactor_handle.await;
-        tracing::info!("Shutdown complete");
-    };
-
-    tokio::runtime::Runtime::new()
-        .expect("Failed to create a tokio runtime.")
-        .block_on(async_main);
+    context.request_shutdown();
+    context.shutdown().await;
+    let _ = gc_handle.await;
+    if let Err(error) = stream_manager.shutdown_all().await {
+        tracing::error!(?error, "Failed to stop all transcoding sessions");
+    }
+    let _ = outbox_handle.await;
+    if !signal_handle.is_finished() {
+        signal_handle.abort();
+    }
+    let _ = signal_handle.await;
+    tracing::info!("Shutdown complete");
+    Ok(())
 }

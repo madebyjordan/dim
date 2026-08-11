@@ -79,6 +79,15 @@ async fn open_file_pool(path: &str) -> sqlx::Result<DbConnection> {
     Ok(rw_pool::SqlitePool::new(writer, reader))
 }
 
+/// Open and validate an explicitly owned file-backed database. Runtime code should prefer this
+/// over the legacy process-global accessor.
+pub async fn open_at(path: impl AsRef<std::path::Path>) -> sqlx::Result<DbConnection> {
+    let path = path.as_ref().to_string_lossy();
+    let pool = open_file_pool(&path).await?;
+    prepare_connection(&pool).await?;
+    Ok(pool)
+}
+
 /// Function runs all migrations embedded to make sure the database works as expected.
 ///
 /// # Arguments

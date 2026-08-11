@@ -31,6 +31,7 @@ pub mod utils;
 
 /// Module contains our core initialization logic.
 pub mod core;
+pub mod diagnostics;
 /// Module contains all the error definitions used in dim, and returned by the web-service.
 pub mod errors;
 /// Contains the code for fetching assets like posters and stills.
@@ -39,6 +40,7 @@ pub mod fetcher;
 pub mod inspect;
 /// Sqlite CDC implementation
 pub mod reactor;
+pub mod runtime_paths;
 /// New generation scanner infrastructure.
 pub mod scanner;
 /// Global settings management.
@@ -61,13 +63,21 @@ pub use settings::GlobalSettings;
 
 /// Function builds a logger drain that drains to a json file located in logs/ and also to stdout.
 pub fn setup_logging(_debug: bool) -> tracing_appender::non_blocking::WorkerGuard {
-    let _ = create_dir_all("logs");
+    setup_logging_at("logs", _debug)
+}
+
+pub fn setup_logging_at(
+    directory: impl AsRef<std::path::Path>,
+    _debug: bool,
+) -> tracing_appender::non_blocking::WorkerGuard {
+    let directory = directory.as_ref();
+    let _ = create_dir_all(directory);
 
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info,tower_http=trace");
     }
 
-    let log_appender = tracing_appender::rolling::daily("./logs", "dim-log.log");
+    let log_appender = tracing_appender::rolling::daily(directory, "dim-log.log");
     let (non_blocking_file, guard) = tracing_appender::non_blocking(log_appender);
 
     let subscriber = tracing_subscriber::registry()

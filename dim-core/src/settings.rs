@@ -13,8 +13,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub enum SettingsError {
-    Io { path: PathBuf, source: std::io::Error },
-    Parse { path: PathBuf, source: toml::de::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
     Serialize(toml::ser::Error),
     Invalid(String),
 }
@@ -22,8 +28,16 @@ pub enum SettingsError {
 impl fmt::Display for SettingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io { path, source } => write!(formatter, "could not access settings file {}: {source}", path.display()),
-            Self::Parse { path, source } => write!(formatter, "settings file {} is malformed: {source}", path.display()),
+            Self::Io { path, source } => write!(
+                formatter,
+                "could not access settings file {}: {source}",
+                path.display()
+            ),
+            Self::Parse { path, source } => write!(
+                formatter,
+                "settings file {} is malformed: {source}",
+                path.display()
+            ),
             Self::Serialize(source) => write!(formatter, "could not serialize settings: {source}"),
             Self::Invalid(message) => write!(formatter, "invalid settings: {message}"),
         }
@@ -42,7 +56,7 @@ impl Error for SettingsError {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct GlobalSettings {
     pub enable_ssl: bool,
     pub port: u16,
@@ -80,13 +94,17 @@ impl Default for GlobalSettings {
 impl GlobalSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
         if self.port == 0 {
-            return Err(SettingsError::Invalid("port must be between 1 and 65535".into()));
+            return Err(SettingsError::Invalid(
+                "port must be between 1 and 65535".into(),
+            ));
         }
         if self.cache_dir.trim().is_empty() {
             return Err(SettingsError::Invalid("cache_dir must not be empty".into()));
         }
         if self.metadata_dir.trim().is_empty() {
-            return Err(SettingsError::Invalid("metadata_dir must not be empty".into()));
+            return Err(SettingsError::Invalid(
+                "metadata_dir must not be empty".into(),
+            ));
         }
         if self.enable_ssl || self.priv_key.is_some() || self.ssl_cert.is_some() {
             return Err(SettingsError::Invalid(
@@ -104,7 +122,16 @@ impl GlobalSettings {
     /// Host settings are startup-only in Milestone 4. Persisting changes never mutates running
     /// components, so callers can accurately report that a restart is required.
     pub fn restart_required(&self, running: &Self) -> bool {
-        self != running
+        self.enable_ssl != running.enable_ssl
+            || self.port != running.port
+            || self.priv_key != running.priv_key
+            || self.ssl_cert != running.ssl_cert
+            || self.cache_dir != running.cache_dir
+            || self.metadata_dir != running.metadata_dir
+            || self.quiet_boot != running.quiet_boot
+            || self.disable_auth != running.disable_auth
+            || self.verbose != running.verbose
+            || self.enable_hwaccel != running.enable_hwaccel
     }
 }
 
@@ -112,6 +139,7 @@ impl GlobalSettings {
 pub struct SettingsStore {
     path: Arc<PathBuf>,
     running: Arc<GlobalSettings>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl SettingsStore {
@@ -120,36 +148,65 @@ impl SettingsStore {
         let settings = if path.exists() {
             let mut content = String::new();
             File::open(&path)
-                .map_err(|source| SettingsError::Io { path: path.clone(), source })?
+                .map_err(|source| SettingsError::Io {
+                    path: path.clone(),
+                    source,
+                })?
                 .read_to_string(&mut content)
-                .map_err(|source| SettingsError::Io { path: path.clone(), source })?;
-            toml::from_str::<GlobalSettings>(&content)
-                .map_err(|source| SettingsError::Parse { path: path.clone(), source })?
+                .map_err(|source| SettingsError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            toml::from_str::<GlobalSettings>(&content).map_err(|source| SettingsError::Parse {
+                path: path.clone(),
+                source,
+            })?
         } else {
             let settings = GlobalSettings::default();
             persist_atomic(&path, &settings)?;
             settings
         };
         settings.validate()?;
-        Ok(Self { path: Arc::new(path), running: Arc::new(settings) })
+        Ok(Self {
+            path: Arc::new(path),
+            running: Arc::new(settings),
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
-    pub fn path(&self) -> &Path { self.path.as_path() }
-    pub fn running(&self) -> &GlobalSettings { self.running.as_ref() }
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+    pub fn running(&self) -> &GlobalSettings {
+        self.running.as_ref()
+    }
 
     pub fn persisted(&self) -> Result<GlobalSettings, SettingsError> {
         let mut content = String::new();
         File::open(self.path())
-            .map_err(|source| SettingsError::Io { path: self.path().to_owned(), source })?
+            .map_err(|source| SettingsError::Io {
+                path: self.path().to_owned(),
+                source,
+            })?
             .read_to_string(&mut content)
-            .map_err(|source| SettingsError::Io { path: self.path().to_owned(), source })?;
-        let settings = toml::from_str::<GlobalSettings>(&content)
-            .map_err(|source| SettingsError::Parse { path: self.path().to_owned(), source })?;
+            .map_err(|source| SettingsError::Io {
+                path: self.path().to_owned(),
+                source,
+            })?;
+        let settings =
+            toml::from_str::<GlobalSettings>(&content).map_err(|source| SettingsError::Parse {
+                path: self.path().to_owned(),
+                source,
+            })?;
         settings.validate()?;
         Ok(settings)
     }
 
     pub fn save_for_restart(&self, settings: &GlobalSettings) -> Result<bool, SettingsError> {
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         settings.validate()?;
         persist_atomic(self.path(), settings)?;
         Ok(settings.restart_required(self.running()))
@@ -160,9 +217,18 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn persist_atomic(path: &Path, settings: &GlobalSettings) -> Result<(), SettingsError> {
     settings.validate()?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|source| SettingsError::Io { path: parent.to_owned(), source })?;
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("config.toml");
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| SettingsError::Io {
+        path: parent.to_owned(),
+        source,
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = parent.join(format!(".{name}.tmp-{}-{sequence}", std::process::id()));
 
@@ -174,27 +240,49 @@ fn persist_atomic(path: &Path, settings: &GlobalSettings) -> Result<(), Settings
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temp).map_err(|source| SettingsError::Io { path: temp.clone(), source })?;
+        let mut file = options.open(&temp).map_err(|source| SettingsError::Io {
+            path: temp.clone(),
+            source,
+        })?;
         let encoded = toml::to_string_pretty(settings).map_err(SettingsError::Serialize)?;
-        file.write_all(encoded.as_bytes()).map_err(|source| SettingsError::Io { path: temp.clone(), source })?;
-        file.sync_all().map_err(|source| SettingsError::Io { path: temp.clone(), source })?;
+        file.write_all(encoded.as_bytes())
+            .map_err(|source| SettingsError::Io {
+                path: temp.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| SettingsError::Io {
+            path: temp.clone(),
+            source,
+        })?;
         drop(file);
-        fs::rename(&temp, path).map_err(|source| SettingsError::Io { path: path.to_owned(), source })?;
+        fs::rename(&temp, path).map_err(|source| SettingsError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
         #[cfg(unix)]
-        File::open(parent).and_then(|directory| directory.sync_all())
-            .map_err(|source| SettingsError::Io { path: parent.to_owned(), source })?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| SettingsError::Io {
+                path: parent.to_owned(),
+                source,
+            })?;
         Ok(())
     })();
-    if result.is_err() { let _ = fs::remove_file(&temp); }
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
     result
 }
 
 // Compatibility accessors for older scanner/streaming call sites. New runtime code owns a
 // SettingsStore and injects it explicitly.
-static GLOBAL_SETTINGS: Lazy<Mutex<GlobalSettings>> = Lazy::new(|| Mutex::new(GlobalSettings::default()));
+static GLOBAL_SETTINGS: Lazy<Mutex<GlobalSettings>> =
+    Lazy::new(|| Mutex::new(GlobalSettings::default()));
 static SETTINGS_PATH: OnceCell<String> = OnceCell::new();
 
-pub fn get_global_settings() -> GlobalSettings { GLOBAL_SETTINGS.lock().unwrap().clone() }
+pub fn get_global_settings() -> GlobalSettings {
+    GLOBAL_SETTINGS.lock().unwrap().clone()
+}
 
 pub fn init_global_settings(path: Option<String>) -> Result<(), Box<dyn Error>> {
     let path = path.unwrap_or(ffpath("config/config.toml"));
@@ -205,7 +293,10 @@ pub fn init_global_settings(path: Option<String>) -> Result<(), Box<dyn Error>> 
 }
 
 pub fn set_global_settings(settings: GlobalSettings) -> Result<(), Box<dyn Error>> {
-    let path = SETTINGS_PATH.get().cloned().unwrap_or(ffpath("config/config.toml"));
+    let path = SETTINGS_PATH
+        .get()
+        .cloned()
+        .unwrap_or(ffpath("config/config.toml"));
     persist_atomic(Path::new(&path), &settings)?;
     *GLOBAL_SETTINGS.lock().unwrap() = settings;
     Ok(())
@@ -221,7 +312,10 @@ mod tests {
         let path = directory.path().join("config.toml");
         fs::write(&path, "port = definitely-not-a-number").unwrap();
         let before = fs::read(&path).unwrap();
-        assert!(matches!(SettingsStore::load(&path), Err(SettingsError::Parse { .. })));
+        assert!(matches!(
+            SettingsStore::load(&path),
+            Err(SettingsError::Parse { .. })
+        ));
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 
@@ -239,7 +333,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -247,7 +344,11 @@ mod tests {
     fn rejects_unimplemented_security_switches() {
         let mut settings = GlobalSettings::default();
         settings.disable_auth = true;
-        assert!(settings.validate().unwrap_err().to_string().contains("not implemented"));
+        assert!(settings
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not implemented"));
         settings.disable_auth = false;
         settings.enable_ssl = true;
         assert!(settings.validate().unwrap_err().to_string().contains("TLS"));

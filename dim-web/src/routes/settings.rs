@@ -5,8 +5,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::Extension;
 
-use dim_core::settings;
-use dim_core::settings::{set_global_settings, GlobalSettings};
+use dim_core::settings::GlobalSettings;
 use dim_database::user::UpdateableUser;
 use dim_database::user::User;
 use dim_database::user::UserSettings;
@@ -30,6 +29,8 @@ pub struct HostSettings {
     pub verbose: bool,
     pub enable_hwaccel: bool,
     pub version: String,
+    #[serde(default)]
+    pub restart_required: bool,
 }
 
 impl From<GlobalSettings> for HostSettings {
@@ -46,6 +47,7 @@ impl From<GlobalSettings> for HostSettings {
             verbose: settings.verbose,
             enable_hwaccel: settings.enable_hwaccel,
             version: settings.version,
+            restart_required: false,
         }
     }
 }
@@ -98,27 +100,41 @@ pub async fn post_user_settings(
     Ok(axum::response::Json(&new_settings).into_response())
 }
 
-fn get_host_settings() -> HostSettings {
-    let mut global_settings: GlobalSettings = settings::get_global_settings();
+fn get_host_settings(settings: &dim_core::settings::SettingsStore) -> Result<HostSettings, String> {
+    let mut global_settings = settings.persisted().map_err(|error| error.to_string())?;
+    let restart_required = global_settings.restart_required(settings.running());
     let git_tag = String::from(env!("GIT_TAG")).to_owned();
     let mut git_sha = String::from(env!("GIT_SHA_256")).to_owned();
     git_sha.truncate(8);
     let version = git_tag + " " + git_sha.as_str();
     global_settings.version = version;
-    global_settings.into()
+    let mut host: HostSettings = global_settings.into();
+    host.restart_required = restart_required;
+    Ok(host)
 }
 
-pub async fn http_get_global_settings(_owner: Owner) -> Result<Response, AuthError> {
-    Ok(axum::response::Json(&get_host_settings()).into_response())
+pub async fn http_get_global_settings(
+    _owner: Owner,
+    State(AppState { settings, .. }): State<AppState>,
+) -> Result<Response, AuthError> {
+    Ok(
+        axum::response::Json(&get_host_settings(&settings).map_err(AuthError::BadRequest)?)
+            .into_response(),
+    )
 }
 
 pub async fn http_set_global_settings(
     _owner: Owner,
+    State(AppState { settings, .. }): State<AppState>,
     Json(new_settings): Json<HostSettings>,
 ) -> Result<Response, AuthError> {
-    let secret_key = settings::get_global_settings().secret_key;
-    set_global_settings(new_settings.into_global_settings(secret_key))
+    let secret_key = settings
+        .persisted()
+        .map_err(|error| AuthError::BadRequest(error.to_string()))?
+        .secret_key;
+    settings
+        .save_for_restart(&new_settings.into_global_settings(secret_key))
         .map_err(|error| AuthError::BadRequest(error.to_string()))?;
 
-    Ok(Json(&get_host_settings()).into_response())
+    Ok(Json(&get_host_settings(&settings).map_err(AuthError::BadRequest)?).into_response())
 }

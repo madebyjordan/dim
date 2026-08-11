@@ -505,13 +505,16 @@ async fn run_scan_custom(
 ) -> Result<(), Error> {
     info!(library_id, "Scanning library");
 
-    if let Err(error) = tx.send(
-        dim_events::Message {
-            id: library_id,
-            event_type: dim_events::PushEventType::EventStartedScanning,
-        }
-        .to_string(),
-    ) {
+    if let Err(error) = tx
+        .send(
+            dim_events::Message {
+                id: library_id,
+                event_type: dim_events::PushEventType::EventStartedScanning,
+            }
+            .to_string(),
+        )
+        .await
+    {
         warn!(?error, library_id, "Could not publish scan start event");
     }
 
@@ -641,13 +644,16 @@ async fn run_scan_custom(
         "Finished scanning library."
     );
 
-    if let Err(error) = tx.send(
-        dim_events::Message {
-            id: library_id,
-            event_type: dim_events::PushEventType::EventStoppedScanning,
-        }
-        .to_string(),
-    ) {
+    if let Err(error) = tx
+        .send(
+            dim_events::Message {
+                id: library_id,
+                event_type: dim_events::PushEventType::EventStoppedScanning,
+            }
+            .to_string(),
+        )
+        .await
+    {
         warn!(
             ?error,
             library_id, "Could not publish scan completion event"

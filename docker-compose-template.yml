@@ -8,6 +8,9 @@ services:
       - 8000:8000
     volumes:
       - /<host_config_folder>:/opt/dim/config
+      - /<host_metadata_folder>:/opt/dim/metadata
+      - /<host_cache_folder>:/opt/dim/streaming_cache
+      - /<host_logs_folder>:/opt/dim/logs
       - /<host_media_path>:/media
       # Add more folders like so:
       # - /<host_media_path>:/media2
@@ -16,3 +19,6 @@ services:
       - /<device>:/<device>
       # VAAPI Device example:
       # - /dev/dri/renderD128:/dev/dri/renderD128
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s

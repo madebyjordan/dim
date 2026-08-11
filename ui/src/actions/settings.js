@@ -168,14 +168,17 @@ export const updateGlobalSettings = (data) => async (dispatch, getState) => {
       return;
     }
 
+    const savedSettings = await res.json();
     dispatch({
       type: UPDATE_GLOBAL_SETTINGS,
-      payload: newSettings,
+      payload: savedSettings,
     });
 
     dispatch(
       addNotification({
-        msg: "Successfuly saved your changes.",
+        msg: savedSettings.restart_required
+          ? "Saved. Restart Dim to apply host setting changes."
+          : "Successfully saved your changes.",
       })
     );
   } catch (err) {

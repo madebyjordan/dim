@@ -79,13 +79,15 @@ async fn spawn_library_scan(
                 Ok(()) => {}
                 Err(error) => {
                     tracing::error!(?error, library_id = id, "Library scan failed");
-                    let _ = failure_tx.send(
-                        dim_events::Message {
-                            id,
-                            event_type: dim_events::PushEventType::EventScanFailed,
-                        }
-                        .to_string(),
-                    );
+                    let _ = failure_tx
+                        .send(
+                            dim_events::Message {
+                                id,
+                                event_type: dim_events::PushEventType::EventScanFailed,
+                            }
+                            .to_string(),
+                        )
+                        .await;
                 }
             }
         })

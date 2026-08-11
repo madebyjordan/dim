@@ -86,13 +86,21 @@ async fn test_app() -> TestApp {
     let user_token = dim_database::user::Login::create_cookie(user.id);
 
     let (socket_tx, _socket_rx) = tokio::sync::mpsc::channel::<CtrlEvent<SocketAddr, String>>(16);
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(128);
     let state = nightfall::StateManager::new(
         &mut Tokio::Global,
         cache.to_string_lossy().into_owned(),
         "/bin/false".to_owned(),
     );
-    let app = AppState::new(conn, socket_tx, event_tx, state, StreamTracking::default());
+    let settings = dim_core::settings::SettingsStore::load(&config_path).unwrap();
+    let app = AppState::new(
+        conn,
+        socket_tx,
+        event_tx,
+        state,
+        StreamTracking::default(),
+        settings,
+    );
 
     TestApp {
         router: build_router(app),

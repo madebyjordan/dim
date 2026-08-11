@@ -1,204 +1,235 @@
+//! Durable, transactionally safe application-domain event delivery.
+//!
+//! SQLite triggers append to `runtime_event_outbox` in the same transaction as domain writes.
+//! This dispatcher reads committed rows in sequence order and deletes each row only after the
+//! consumer succeeds. A crash or consumer error therefore retries from the first undelivered row.
+
 pub mod handler;
 mod types;
 
 use async_trait::async_trait;
-
-use libsqlite3_sys::sqlite3;
-use rusqlite::hooks::Action;
-use rusqlite::Connection;
-use sqlx::SqliteConnection;
-
-use std::os::raw::c_char;
-use std::os::raw::c_int;
-use std::os::raw::c_void;
-use std::panic::catch_unwind;
-use std::sync::Arc;
-use std::sync::Mutex;
+use dim_database::DbConnection;
+use sqlx::Row;
 use std::time::Duration;
-use std::time::Instant;
-
-use tokio::sync::mpsc::unbounded_channel;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::OwnedMutexGuard;
-
-use tracing::error;
-use tracing::instrument;
-use tracing::warn;
-
-use types::Event;
-use types::Table;
-
-const MAX_COMMIT_DURATION: Duration = Duration::from_millis(1);
+use tokio::sync::watch;
+use tracing::{error, warn};
+use types::{Event, EventType, Table};
 
 #[async_trait]
 pub trait Reactor {
     type Error: ::std::error::Error;
-
     async fn react(&mut self, event: Event) -> Result<(), Self::Error>;
 }
 
-#[derive(Clone)]
-struct Context {
-    uncommited_buffer: Arc<Mutex<Vec<Event>>>,
-    tx: UnboundedSender<Event>,
+pub struct OutboxDispatcher<R> {
+    pool: DbConnection,
+    reactor: R,
+    poll_interval: Duration,
 }
 
-impl Context {
-    pub fn new(tx: UnboundedSender<Event>) -> Self {
+impl<R> OutboxDispatcher<R>
+where
+    R: Reactor,
+{
+    pub fn new(pool: DbConnection, reactor: R) -> Self {
         Self {
-            tx,
-            uncommited_buffer: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-pub struct ReactorCore {
-    hook_ctx: Context,
-    recvr: UnboundedReceiver<Event>,
-}
-
-impl ReactorCore {
-    pub fn new() -> Self {
-        let (tx, rx) = unbounded_channel();
-
-        Self {
-            hook_ctx: Context::new(tx),
-            recvr: rx,
+            pool,
+            reactor,
+            poll_interval: Duration::from_millis(250),
         }
     }
 
-    pub async fn register(&mut self, lock: &mut OwnedMutexGuard<SqliteConnection>) {
-        let mut handle_lock = lock.lock_handle().await.unwrap();
-        let handle = handle_lock.as_raw_handle();
-
-        Self::wal_commit_hook_raw(handle.as_ptr(), self.wal_hook());
-
-        // SAFETY: Its safe to construct the connection from a handle because we lock it above
-        // which ensures the access is synchronized.
-        let conn = unsafe { Connection::from_handle(handle.as_ptr()).unwrap() };
-
-        conn.update_hook(Some(self.update_hook()));
-        conn.rollback_hook(Some(self.rollback_hook()));
-
-        // SAFETY: We need to forget `conn` otherwise its destructor runs and our hooks get
-        // deleted.
-        core::mem::forget(conn);
+    #[cfg(test)]
+    fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
     }
 
-    pub async fn react<E: ::std::error::Error>(mut self, mut reactor: impl Reactor<Error = E>) {
-        while let Some(event) = self.recvr.recv().await {
-            if let Err(e) = reactor.react(event).await {
-                error!(error = ?e, ?event, "Reactor returned an when processing event.");
+    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
+        loop {
+            if *shutdown.borrow() {
+                break;
             }
-        }
-    }
-
-    fn update_hook(&self) -> impl FnMut(Action, &str, &str, i64) + Send + 'static {
-        let context = self.hook_ctx.clone();
-
-        // NOTE: This callback must complete as quickly as it can as it is called directly after
-        // our database operations and not asynchronously. Sqlite will wait for this function to
-        // complete executing and then the database operation will also be completed. If this
-        // function never ends, the clients operating on the database will lock as well.
-        move |action, _, table, rowid| {
-            let Ok(source_table): Result<Table, _> = table.try_into() else {
-                // Early return because the source table is not something we are watching.
-                return;
-            };
-
-            // Ignore any events which are invalid
-            if matches!(action, Action::UNKNOWN) {
-                return;
-            }
-
-            let mut buffer = context.uncommited_buffer.lock().unwrap();
-
-            buffer.push(Event {
-                id: rowid,
-                table: source_table,
-                event_type: action.into(),
-            });
-        }
-    }
-
-    fn rollback_hook(&self) -> impl FnMut() + Send + 'static {
-        let context = self.hook_ctx.clone();
-
-        // NOTE: If we get a rollback, we automatically assume that our current buffer of
-        // uncommited events is dirty and will not be applied to the real database, thus we can
-        // just clear them.
-        move || {
-            let mut buffer = context.uncommited_buffer.lock().unwrap();
-            buffer.clear();
-        }
-    }
-
-    #[instrument(skip_all)]
-    fn wal_hook(&self) -> impl FnMut() + Send + 'static {
-        let context = self.hook_ctx.clone();
-
-        // NOTE: If we get a commit we can assume our buffer of events is valid and can be reacted
-        // on because they are going to be written to the disk.
-        move || {
-            let now = Instant::now();
-            let mut buffer = context.uncommited_buffer.lock().unwrap();
-            let buffer_len = buffer.len();
-
-            while let Some(event) = buffer.pop() {
-                if let Err(_) = context.tx.send(event) {
-                    error!("Failed to send database event.");
+            match self.dispatch_batch().await {
+                Ok(0) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(self.poll_interval) => {}
+                        changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { break; }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "Outbox dispatch paused; the event remains durable for retry");
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { break; }
+                    }
                 }
             }
-
-            let elapsed = now.elapsed();
-            if elapsed > MAX_COMMIT_DURATION {
-                warn!(
-                    elapsed_ms = elapsed.as_millis(),
-                    buffer_len, "Commit hook took too long"
-                );
-            }
         }
     }
 
-    fn wal_commit_hook_raw<F: FnMut() + Send + 'static>(sqlite: *mut sqlite3, hook: F) {
-        // Unfortunately libsqlite3-sys doesnt expose this.
-        extern "C" {
-            pub fn sqlite3_wal_hook(
-                arg1: *mut sqlite3,
-                arg2: Option<
-                    unsafe extern "C" fn(
-                        arg1: *mut c_void,
-                        arg2: *mut sqlite3,
-                        arg3: *const c_char,
-                        arg4: c_int,
-                    ) -> c_int,
-                >,
-                arg3: *mut c_void,
-            ) -> *mut c_void;
-        }
+    async fn dispatch_batch(&mut self) -> Result<usize, DispatchError<R::Error>> {
+        let rows = sqlx::query(
+            "SELECT sequence, source_table, row_id, event_type FROM runtime_event_outbox ORDER BY sequence LIMIT 128",
+        )
+        .fetch_all(self.pool.read_ref())
+        .await
+        .map_err(DispatchError::Database)?;
 
-        unsafe extern "C" fn call_boxed_closure<F: FnMut()>(
-            p_arg: *mut c_void,
-            _: *mut sqlite3,
-            _: *const c_char,
-            _: c_int,
-        ) -> c_int {
-            let r = catch_unwind(|| {
-                let boxed_hook: *mut F = p_arg.cast::<F>();
-                (*boxed_hook)()
-            });
+        let count = rows.len();
+        for row in rows {
+            let sequence: i64 = row.try_get("sequence").map_err(DispatchError::Database)?;
+            let source_table: String = row
+                .try_get("source_table")
+                .map_err(DispatchError::Database)?;
+            let event_type: String = row.try_get("event_type").map_err(DispatchError::Database)?;
+            let event = Event {
+                id: row.try_get("row_id").map_err(DispatchError::Database)?,
+                table: Table::try_from(source_table.as_str())
+                    .map_err(|_| DispatchError::Invalid(sequence))?,
+                event_type: EventType::try_from(event_type.as_str())
+                    .map_err(|_| DispatchError::Invalid(sequence))?,
+            };
+            self.reactor
+                .react(event)
+                .await
+                .map_err(DispatchError::Consumer)?;
 
-            if let Ok(()) = r {
-                0
-            } else {
-                1
+            let mut lock = self.pool.writer().lock_owned().await;
+            let result = sqlx::query("DELETE FROM runtime_event_outbox WHERE sequence = ?")
+                .bind(sequence)
+                .execute(&mut *lock)
+                .await
+                .map_err(DispatchError::Database)?;
+            if result.rows_affected() != 1 {
+                warn!(sequence, "Outbox row was already acknowledged");
             }
         }
+        Ok(count)
+    }
+}
 
-        let boxed_hook: *mut F = Box::into_raw(Box::new(hook));
-        unsafe {
-            sqlite3_wal_hook(sqlite, Some(call_boxed_closure::<F>), boxed_hook.cast());
+#[derive(Debug)]
+enum DispatchError<E> {
+    Database(sqlx::Error),
+    Consumer(E),
+    Invalid(i64),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for DispatchError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Database(error) => write!(formatter, "database error: {error}"),
+            Self::Consumer(error) => write!(formatter, "consumer error: {error}"),
+            Self::Invalid(sequence) => {
+                write!(formatter, "invalid outbox row at sequence {sequence}")
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingReactor {
+        seen: Arc<Mutex<Vec<i64>>>,
+        fail_once: bool,
+    }
+
+    #[async_trait]
+    impl Reactor for RecordingReactor {
+        type Error = std::io::Error;
+        async fn react(&mut self, event: Event) -> Result<(), Self::Error> {
+            if self.fail_once {
+                self.fail_once = false;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "backpressure",
+                ));
+            }
+            self.seen.lock().unwrap().push(event.id);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn retains_order_and_retries_after_consumer_error() {
+        let pool = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = pool.writer().lock_owned().await;
+        sqlx::query("INSERT INTO library(id, name, media_type) VALUES (41, 'one', 'movie'), (42, 'two', 'movie')")
+            .execute(&mut *lock).await.unwrap();
+        drop(lock);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let reactor = RecordingReactor {
+            seen: seen.clone(),
+            fail_once: true,
+        };
+        let mut dispatcher = OutboxDispatcher::new(pool.clone(), reactor)
+            .with_poll_interval(Duration::from_millis(1));
+        assert!(dispatcher.dispatch_batch().await.is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runtime_event_outbox")
+                .fetch_one(pool.read_ref())
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(dispatcher.dispatch_batch().await.unwrap(), 2);
+        assert_eq!(*seen.lock().unwrap(), vec![41, 42]);
+    }
+
+    #[tokio::test]
+    async fn rolled_back_changes_never_enter_outbox() {
+        let pool = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = pool.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        sqlx::query("INSERT INTO library(id, name, media_type) VALUES (99, 'rollback', 'movie')")
+            .execute(&mut tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runtime_event_outbox")
+                .fetch_one(pool.read_ref())
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_dispatch_skips_stale_insert_without_blocking_later_delete() {
+        let pool = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = pool.writer().lock_owned().await;
+        sqlx::query(
+            "INSERT INTO library(id, name, media_type) VALUES (77, 'short-lived', 'movie')",
+        )
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM library WHERE id = 77")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        drop(lock);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        let reactor = handler::EventReactor::new(pool.clone()).with_websocket(event_tx);
+        let mut dispatcher = OutboxDispatcher::new(pool.clone(), reactor);
+        assert_eq!(dispatcher.dispatch_batch().await.unwrap(), 2);
+        assert!(event_rx
+            .recv()
+            .await
+            .unwrap()
+            .contains("EventRemoveLibrary"));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runtime_event_outbox")
+                .fetch_one(pool.read_ref())
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

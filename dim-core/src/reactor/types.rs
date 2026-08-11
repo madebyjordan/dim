@@ -1,5 +1,3 @@
-use rusqlite::hooks::Action;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Table {
     Library,
@@ -27,13 +25,15 @@ pub enum EventType {
     Delete,
 }
 
-impl From<Action> for EventType {
-    fn from(action: Action) -> EventType {
-        match action {
-            Action::SQLITE_INSERT => EventType::Insert,
-            Action::SQLITE_UPDATE => EventType::Update,
-            Action::SQLITE_DELETE => EventType::Delete,
-            _ => unimplemented!(),
+impl TryFrom<&str> for EventType {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "insert" => Ok(Self::Insert),
+            "update" => Ok(Self::Update),
+            "delete" => Ok(Self::Delete),
+            _ => Err(()),
         }
     }
 }

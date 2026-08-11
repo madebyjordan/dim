@@ -14,13 +14,13 @@ use dim_web::{build_router, AppState};
 use hyper::body::to_bytes;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tower::ServiceExt;
 use xtra::spawn::Tokio;
 
 struct TestApp {
     router: axum::Router,
-    event_rx: UnboundedReceiver<String>,
+    event_rx: Receiver<String>,
     root: PathBuf,
     workers: LibraryWorkers,
 }
@@ -64,15 +64,23 @@ async fn test_app() -> TestApp {
     drop(lock);
 
     let (socket_tx, _socket_rx) = tokio::sync::mpsc::channel::<CtrlEvent<SocketAddr, String>>(16);
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
     let state = nightfall::StateManager::new(
         &mut Tokio::Global,
         cache.to_string_lossy().into_owned(),
         "/bin/false".to_owned(),
     );
     let workers = LibraryWorkers::default();
-    let app = AppState::new(conn, socket_tx, event_tx, state, StreamTracking::default())
-        .with_library_workers(workers.clone());
+    let settings = dim_core::settings::SettingsStore::load(&config_path).unwrap();
+    let app = AppState::new(
+        conn,
+        socket_tx,
+        event_tx,
+        state,
+        StreamTracking::default(),
+        settings,
+    )
+    .with_library_workers(workers.clone());
 
     TestApp {
         router: build_router(app),

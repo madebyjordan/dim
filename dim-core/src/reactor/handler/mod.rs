@@ -47,7 +47,19 @@ impl EventReactor {
 
         // TODO (val): should we also handle updates to the library? Such as renaming etc.
         let event_type = match event.event_type {
-            EventType::Insert => PushEventType::EventNewLibrary,
+            EventType::Insert => {
+                let mut tx = self
+                    .pool
+                    .read_ref()
+                    .begin()
+                    .await
+                    .map_err(Error::ReadTransaction)?;
+                match Library::get_one(&mut tx, event.id).await {
+                    Ok(_) => PushEventType::EventNewLibrary,
+                    Err(error) if is_missing(&error) => return Ok(()),
+                    Err(error) => return Err(Error::LibraryQuery(error)),
+                }
+            }
             EventType::Delete => PushEventType::EventRemoveLibrary,
             EventType::Update => {
                 // NOTE: Library usually get marked as hidden before being deleted as a UX
@@ -59,9 +71,11 @@ impl EventReactor {
                     .await
                     .map_err(Error::ReadTransaction)?;
 
-                let Library { hidden, .. } = Library::get_one(&mut tx, event.id)
-                    .await
-                    .map_err(Error::LibraryQuery)?;
+                let Library { hidden, .. } = match Library::get_one(&mut tx, event.id).await {
+                    Ok(library) => library,
+                    Err(error) if is_missing(&error) => return Ok(()),
+                    Err(error) => return Err(Error::LibraryQuery(error)),
+                };
 
                 if !hidden {
                     return Ok(());
@@ -78,6 +92,7 @@ impl EventReactor {
 
         event_tx
             .send(serde_json::to_string(&event).expect("Serializing event should never fail"))
+            .await
             .map_err(Error::EventDispatch)?;
 
         Ok(())
@@ -101,9 +116,11 @@ impl EventReactor {
             remote_url,
             local_path,
             ..
-        } = Asset::get_by_id(&mut tx, event.id)
-            .await
-            .map_err(Error::AssetQuery)?;
+        } = match Asset::get_by_id(&mut tx, event.id).await {
+            Ok(asset) => asset,
+            Err(error) if is_missing(&error) => return Ok(()),
+            Err(error) => return Err(Error::AssetQuery(error)),
+        };
 
         if let Some(remote_url) = remote_url {
             let path = PathBuf::from(local_path);
@@ -123,18 +140,19 @@ impl EventReactor {
 
         assert_eq!(event.table, Table::Media);
 
-        let mut tx = self
-            .pool
-            .read_ref()
-            .begin()
-            .await
-            .map_err(Error::ReadTransaction)?;
-
         let event_type = match event.event_type {
             EventType::Insert => {
-                let (library_id, media_type) = Media::get_compact(&mut tx, event.id)
+                let mut tx = self
+                    .pool
+                    .read_ref()
+                    .begin()
                     .await
-                    .map_err(Error::MediaQuery)?;
+                    .map_err(Error::ReadTransaction)?;
+                let (library_id, media_type) = match Media::get_compact(&mut tx, event.id).await {
+                    Ok(media) => media,
+                    Err(error) if is_missing(&error) => return Ok(()),
+                    Err(error) => return Err(Error::MediaQuery(error)),
+                };
 
                 if !matches!(media_type, MediaType::Movie | MediaType::Tv) {
                     return Ok(());
@@ -153,10 +171,16 @@ impl EventReactor {
 
         event_tx
             .send(serde_json::to_string(&event).expect("Serializing event should never fail"))
+            .await
             .map_err(Error::EventDispatch)?;
 
         Ok(())
     }
+}
+
+fn is_missing(error: &dim_database::DatabaseError) -> bool {
+    let dim_database::DatabaseError::DatabaseError(error) = error;
+    matches!(error.as_ref(), sqlx::Error::RowNotFound)
 }
 
 #[async_trait]

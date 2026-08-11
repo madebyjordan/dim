@@ -8,18 +8,20 @@ pub mod tree;
 
 pub use axum;
 use axum::extract::{ConnectInfo, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 
 use dim_core::core::EventTx;
+use dim_core::settings::SettingsStore;
 use dim_core::stream_tracking::StreamTracking;
 use dim_core::workers::LibraryWorkers;
 use dim_database::DbConnection;
 
 use futures::{Future, SinkExt, StreamExt};
 use nightfall::StateManager;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 
 pub mod error;
 pub use error::DimErrorWrapper;
@@ -35,6 +37,7 @@ pub struct AppState {
     state: StateManager,
     stream_tracking: StreamTracking,
     library_workers: LibraryWorkers,
+    settings: SettingsStore,
 }
 
 impl AppState {
@@ -44,6 +47,7 @@ impl AppState {
         event_tx: EventTx,
         state: StateManager,
         stream_tracking: StreamTracking,
+        settings: SettingsStore,
     ) -> Self {
         Self {
             conn,
@@ -52,6 +56,7 @@ impl AppState {
             state,
             stream_tracking,
             library_workers: LibraryWorkers::default(),
+            settings,
         }
     }
 
@@ -277,6 +282,8 @@ pub fn build_router(app: AppState) -> Router {
         ));
 
     axum::Router::new()
+        .route("/health/live", get(|| async { StatusCode::OK }))
+        .route("/health/ready", get(readiness))
         .merge(auth_routes(app.clone()))
         .route("/images/*path", get(routes::statik::get_image))
         .route("/", get(routes::statik::react_routes))
@@ -288,22 +295,30 @@ pub fn build_router(app: AppState) -> Router {
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
+async fn readiness(State(AppState { conn, .. }): State<AppState>) -> StatusCode {
+    match sqlx::query("SELECT 1").execute(conn.read_ref()).await {
+        Ok(_) => StatusCode::OK,
+        Err(error) => {
+            tracing::warn!(?error, "Readiness database probe failed");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+}
+
 pub async fn start_webserver(
     address: SocketAddr,
+    conn: DbConnection,
+    settings: SettingsStore,
     event_tx: EventTx,
     stream_manager: StateManager,
-    event_rx: UnboundedReceiver<String>,
+    event_rx: Receiver<String>,
     library_workers: LibraryWorkers,
     shutdown_fut: impl Future<Output = ()> + Send + 'static,
 ) {
     let state = stream_manager;
     let stream_tracking = StreamTracking::default();
-    let conn = dim_database::get_conn()
-        .await
-        .expect("Failed to grab a handle to the connection pool.");
-
     let event_repeater = routes::websocket::event_repeater(
-        tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx),
+        tokio_stream::wrappers::ReceiverStream::new(event_rx),
         1024,
     );
 
@@ -327,7 +342,7 @@ pub async fn start_webserver(
 
     let shutdown_tracking = stream_tracking.clone();
     let shutdown_state = state.clone();
-    let app = AppState::new(conn, socket_tx, event_tx, state, stream_tracking)
+    let app = AppState::new(conn, socket_tx, event_tx, state, stream_tracking, settings)
         .with_library_workers(library_workers);
     let router = build_router(app);
 
