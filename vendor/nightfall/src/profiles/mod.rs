@@ -10,7 +10,7 @@ pub mod video;
 
 #[cfg(windows)]
 pub use amf::AmfTranscodeProfile;
-pub use audio::AacTranscodeProfile;
+pub use audio::{AacTranscodeProfile, AudioTransmuxProfile};
 #[cfg(all(unix, feature = "cuda"))]
 pub use cuda::CudaTranscodeProfile;
 #[cfg(feature = "ssa_transmux")]
@@ -35,6 +35,7 @@ static PROFILES: OnceCell<Vec<Box<dyn TranscodingProfile>>> = OnceCell::new();
 pub fn profiles_init(_ffmpeg_bin: String) {
     let profiles: Vec<Option<Box<dyn TranscodingProfile>>> = vec![
         Some(Box::new(AacTranscodeProfile)),
+        Some(Box::new(AudioTransmuxProfile)),
         Some(Box::new(H264TranscodeProfile)),
         Some(Box::new(H264TransmuxProfile)),
         Some(Box::new(RawVideoTranscodeProfile)),

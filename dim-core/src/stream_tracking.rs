@@ -201,6 +201,7 @@ impl VirtualManifest {
 #[derive(Clone, Debug)]
 pub enum PlannedProfile {
     DirectVideo,
+    DirectAudio,
     Video,
     Audio,
     Subtitle,
@@ -483,6 +484,11 @@ impl StreamTracking {
             let profiles = match track.plan.profile {
                 PlannedProfile::DirectVideo => get_profile_for_with_type(
                     StreamType::Video,
+                    ProfileType::Transmux,
+                    &track.plan.context,
+                ),
+                PlannedProfile::DirectAudio => get_profile_for_with_type(
+                    StreamType::Audio,
                     ProfileType::Transmux,
                     &track.plan.context,
                 ),
@@ -883,10 +889,20 @@ mod tests {
             .set_bandwidth(1024)
             .set_duration(Some(60))
             .activated("subtitle-process");
-        let xml = compile_manifest(&[manifest, subtitle], 0).unwrap();
+        let direct_eac3 = VirtualManifest::new("eac3".into(), ContentType::Audio)
+            .set_direct()
+            .set_mime("audio/mp4")
+            .set_codecs("ec-3")
+            .set_bandwidth(768_000)
+            .set_duration(Some(60))
+            .set_audio_channels(Some(6))
+            .activated("eac3-process");
+        let xml = compile_manifest(&[manifest, direct_eac3, subtitle], 0).unwrap();
         assert!(xml.contains("AdaptationSet"));
         assert!(!xml.contains("AdapationSet"));
         assert!(xml.contains("value=\"6\""));
+        assert!(xml.contains("codecs=\"ec-3\""));
+        assert!(xml.contains("eac3-process/data/init.mp4"));
         assert!(xml.contains("contentType=\"text\""));
         assert!(xml.contains("subtitle-process/data/stream.vtt"));
     }

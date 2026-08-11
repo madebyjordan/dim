@@ -105,6 +105,16 @@ export type VideoCapabilityRequest = {
   transfer_function?: string;
 };
 
+export type AudioCapabilityRequest = {
+  stream_index: number;
+  content_type: string;
+  codec: string;
+  codec_descriptor: string;
+  channels: number;
+  bitrate: number;
+  sample_rate: number;
+};
+
 export type PlaybackCapabilityInspection = {
   video: {
     content_type?: string;
@@ -119,6 +129,7 @@ export type PlaybackCapabilityInspection = {
     color_gamut?: string;
     transfer_function?: string;
   } | null;
+  audio: Array<AudioCapabilityRequest>;
   server_remux_supported: boolean;
   probe_source: "ingestion" | "fallback";
 };
@@ -132,11 +143,19 @@ export type PlaybackTrack = {
   chunk_path?: string;
 };
 
+export type AudioPlaybackPlan = {
+  source: Record<string, unknown>;
+  reported_capability: Record<string, unknown> | null;
+  chosen_action: "preserve" | "transcode_aac";
+  decision_reason: string;
+};
+
 export type PlaybackPlan = {
   preferred_strategy: "direct_play" | "transcode";
   direct_play_supported: boolean;
   decision_reason: string;
   renditions: Array<{ height: number; bitrate: number }>;
+  audio: Array<AudioPlaybackPlan>;
 };
 
 export type PlaybackSession = {

@@ -1,7 +1,19 @@
 import {
+  determineAudioPlaybackCapability,
   determineVideoPlaybackCapability,
+  type AudioCapabilityRequest,
   type VideoCapabilityRequest,
 } from "./VideoCapabilities";
+
+const matrixEac3: AudioCapabilityRequest = {
+  stream_index: 1,
+  content_type: 'audio/mp4; codecs="ec-3"',
+  codec: "eac3",
+  codec_descriptor: "ec-3",
+  channels: 6,
+  bitrate: 768_000,
+  sample_rate: 48_000,
+};
 
 const friday: VideoCapabilityRequest = {
   content_type: 'video/mp4; codecs="av01.0.08M.10.0.111.01.01.01.0"',
@@ -63,6 +75,8 @@ it.each([friday, matrix])(
       smooth: true,
       power_efficient: true,
       hdr_display: true,
+      can_play_type_result: "probably",
+      media_capabilities_result: "supported",
     });
     expect(navigator.mediaCapabilities.decodingInfo).toHaveBeenCalledWith({
       type: "media-source",
@@ -113,4 +127,52 @@ it("does not claim HDR direct play without a high-dynamic-range display", async 
 
 it("returns null when the server cannot derive a remux capability request", async () => {
   await expect(determineVideoPlaybackCapability(null)).resolves.toBeNull();
+});
+
+it("queries the exact Matrix E-AC-3 stream configuration", async () => {
+  await expect(determineAudioPlaybackCapability(matrixEac3)).resolves.toEqual({
+    stream_index: 1,
+    content_type: matrixEac3.content_type,
+    can_play_type: true,
+    media_source: true,
+    supported: true,
+    smooth: true,
+    power_efficient: true,
+    can_play_type_result: "probably",
+    media_capabilities_result: "supported",
+  });
+  expect(navigator.mediaCapabilities.decodingInfo).toHaveBeenCalledWith({
+    type: "media-source",
+    audio: {
+      contentType: matrixEac3.content_type,
+      channels: "6",
+      bitrate: 768_000,
+      samplerate: 48_000,
+    },
+  });
+});
+
+it("runs stronger discovery while retaining an ambiguous canPlayType result", async () => {
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("maybe");
+  await expect(
+    determineAudioPlaybackCapability(matrixEac3)
+  ).resolves.toMatchObject({
+    can_play_type: false,
+    can_play_type_result: "maybe",
+    media_capabilities_result: "supported",
+  });
+  expect(navigator.mediaCapabilities.decodingInfo).toHaveBeenCalled();
+});
+
+it("keeps limited audio evidence structured and negative", async () => {
+  vi.mocked(MediaSource.isTypeSupported).mockReturnValue(false);
+  await expect(
+    determineAudioPlaybackCapability(matrixEac3)
+  ).resolves.toMatchObject({
+    stream_index: 1,
+    media_source: false,
+    supported: false,
+    smooth: false,
+  });
+  expect(navigator.mediaCapabilities.decodingInfo).not.toHaveBeenCalled();
 });

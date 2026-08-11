@@ -19,6 +19,17 @@ pub struct VideoCapabilityRequest {
     pub transfer_function: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AudioCapabilityRequest {
+    pub stream_index: i64,
+    pub content_type: String,
+    pub codec: String,
+    pub codec_descriptor: String,
+    pub channels: u64,
+    pub bitrate: u64,
+    pub sample_rate: u64,
+}
+
 pub fn capability_request(
     stream: &Stream,
     width: u64,
@@ -46,9 +57,57 @@ pub fn capability_request(
     })
 }
 
+pub fn audio_capability_request(
+    stream: &Stream,
+    channels: u64,
+    bitrate: u64,
+    sample_rate: u64,
+) -> Option<AudioCapabilityRequest> {
+    let codec_descriptor = audio_codec_descriptor(stream)?;
+    Some(AudioCapabilityRequest {
+        stream_index: stream.index,
+        content_type: format!("audio/mp4; codecs=\"{codec_descriptor}\""),
+        codec: stream.codec_name.clone(),
+        codec_descriptor,
+        channels,
+        bitrate,
+        sample_rate,
+    })
+}
+
 pub fn remux_supported(stream: &Stream) -> bool {
     matches!(stream.codec_name.as_str(), "av1" | "h264" | "avc1")
         && codec_descriptor(stream).is_some()
+}
+
+pub fn audio_remux_supported(stream: &Stream) -> bool {
+    audio_codec_descriptor(stream).is_some()
+}
+
+pub fn audio_codec_descriptor(stream: &Stream) -> Option<String> {
+    match stream.codec_name.as_str() {
+        "aac" => aac_codec_descriptor(stream),
+        "eac3" => Some("ec-3".into()),
+        "ac3" => Some("ac-3".into()),
+        _ => None,
+    }
+}
+
+fn aac_codec_descriptor(stream: &Stream) -> Option<String> {
+    let object_type = stream
+        .extradata_bytes()
+        .and_then(|bytes| bytes.first().map(|byte| byte >> 3))
+        .filter(|object_type| *object_type > 0 && *object_type < 31)
+        .or_else(|| match stream.profile.as_deref()? {
+            "Main" => Some(1),
+            "LC" => Some(2),
+            "SSR" => Some(3),
+            "LTP" => Some(4),
+            "HE-AAC" => Some(5),
+            "HE-AACv2" => Some(29),
+            _ => None,
+        })?;
+    Some(format!("mp4a.40.{object_type}"))
 }
 
 pub fn has_exact_codec_configuration(stream: &Stream) -> bool {
@@ -355,5 +414,43 @@ mod tests {
         };
         assert!(has_exact_codec_configuration(&stream));
         assert_eq!(codec_descriptor(&stream).as_deref(), Some("avc1.640028"));
+    }
+
+    #[test]
+    fn derives_matrix_eac3_capability_request() {
+        let stream = Stream {
+            index: 1,
+            codec_name: "eac3".into(),
+            codec_type: "audio".into(),
+            channels: Some(6),
+            channel_layout: Some("5.1(side)".into()),
+            sample_rate: Some("48000".into()),
+            bit_rate: Some("768000".into()),
+            ..Default::default()
+        };
+        let request = audio_capability_request(&stream, 6, 768_000, 48_000).unwrap();
+        assert_eq!(request.content_type, "audio/mp4; codecs=\"ec-3\"");
+        assert_eq!(request.stream_index, 1);
+        assert_eq!(request.channels, 6);
+        assert!(audio_remux_supported(&stream));
+    }
+
+    #[test]
+    fn aac_descriptor_uses_the_actual_audio_object_type() {
+        let lc = Stream {
+            codec_name: "aac".into(),
+            codec_type: "audio".into(),
+            extradata: Some("\n00000000: 1210\n".into()),
+            ..Default::default()
+        };
+        assert_eq!(audio_codec_descriptor(&lc).as_deref(), Some("mp4a.40.2"));
+
+        let he = Stream {
+            codec_name: "aac".into(),
+            codec_type: "audio".into(),
+            profile: Some("HE-AAC".into()),
+            ..Default::default()
+        };
+        assert_eq!(audio_codec_descriptor(&he).as_deref(), Some("mp4a.40.5"));
     }
 }

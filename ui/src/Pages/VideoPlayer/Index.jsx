@@ -29,7 +29,7 @@ import BackButton from "./BackButton";
 import { PLAYBACK_ERROR_MESSAGE } from "./PlaybackFailure";
 import { buildPlaybackManifestUrl } from "./QualitySwitch";
 import { createPlaybackState } from "./Navigation";
-import { determineVideoPlaybackCapability } from "./VideoCapabilities";
+import { determinePlaybackCapabilities } from "./VideoCapabilities";
 import {
   reclaimPlaybackSession,
   setPlaybackSession,
@@ -143,13 +143,11 @@ function VideoPlayer() {
           params.fileID
         ).unwrap();
         if (cancelled) return;
-        const videoCapability = await determineVideoPlaybackCapability(
-          inspection.video
-        );
+        const capabilities = await determinePlaybackCapabilities(inspection);
         const payload = await createPlaybackSession({
           fileId: params.fileID,
           forceAss: force_ass,
-          videoCapability,
+          capabilities,
         }).unwrap();
         if (!payload.gid || !Array.isArray(payload.tracks)) {
           throw new Error("Manifest response was incomplete");

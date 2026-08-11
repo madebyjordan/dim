@@ -6,6 +6,93 @@ use super::TranscodingProfile;
 use crate::error::NightfallError;
 
 #[derive(Debug)]
+pub struct AudioTransmuxProfile;
+
+impl TranscodingProfile for AudioTransmuxProfile {
+    fn profile_type(&self) -> ProfileType {
+        ProfileType::Transmux
+    }
+
+    fn stream_type(&self) -> StreamType {
+        StreamType::Audio
+    }
+
+    fn name(&self) -> &str {
+        "AudioTransmuxProfile"
+    }
+
+    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
+        let start_num = ctx.output_ctx.start_num.to_string();
+        let stream = format!("0:{}", ctx.input_ctx.stream);
+        let init_seg = format!("{}_init.mp4", &start_num);
+        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
+        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
+        let mut args = vec![
+            "-y".into(),
+            "-ss".into(),
+            (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
+            "-i".into(),
+            ctx.file,
+            "-copyts".into(),
+            "-map".into(),
+            stream,
+            "-c:0".into(),
+            "copy".into(),
+            "-start_at_zero".into(),
+            "-avoid_negative_ts".into(),
+            "disabled".into(),
+            "-f".into(),
+            "hls".into(),
+            "-start_number".into(),
+            start_num,
+            "-hls_flags".into(),
+            "temp_file".into(),
+            "-max_delay".into(),
+            "5000000".into(),
+        ];
+        args.push("-hls_segment_options".into());
+        args.push(if ctx.output_ctx.start_num > 0 {
+            "movflags=frag_custom+dash+delay_moov+frag_discont".into()
+        } else {
+            "movflags=frag_custom+dash+delay_moov".into()
+        });
+        args.extend([
+            "-hls_fmp4_init_filename".into(),
+            init_seg,
+            "-hls_time".into(),
+            ctx.output_ctx.target_gop.to_string(),
+            "-hls_segment_type".into(),
+            "1".into(),
+            "-loglevel".into(),
+            "info".into(),
+            "-progress".into(),
+            "pipe:1".into(),
+            "-hls_segment_filename".into(),
+            seg_name,
+            outdir,
+        ]);
+        Some(args)
+    }
+
+    fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
+        if ctx.input_ctx.codec == ctx.output_ctx.codec
+            && matches!(ctx.input_ctx.codec.as_str(), "aac" | "eac3" | "ac3")
+            && ctx.output_ctx.bitrate.is_none()
+            && ctx.output_ctx.audio_filter.is_none()
+        {
+            return Ok(());
+        }
+        Err(NightfallError::ProfileNotSupported(
+            "Profile only supports unmodified MP4-compatible audio streams.".into(),
+        ))
+    }
+
+    fn tag(&self) -> &str {
+        "audio_copy"
+    }
+}
+
+#[derive(Debug)]
 pub struct AacTranscodeProfile;
 
 impl TranscodingProfile for AacTranscodeProfile {
@@ -147,6 +234,16 @@ mod tests {
         args.windows(2)
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn verified_eac3_is_copied_into_fragmented_mp4() {
+        let mut ctx = ProfileContext::default();
+        ctx.input_ctx.codec = "eac3".into();
+        ctx.output_ctx.codec = "eac3".into();
+        let args = AudioTransmuxProfile.build(ctx).unwrap();
+        assert_eq!(value_after(&args, "-c:0"), Some("copy"));
+        assert_eq!(value_after(&args, "-hls_segment_type"), Some("1"));
     }
 
     #[test]

@@ -11,9 +11,11 @@ pub enum PlaybackStrategy {
     Transcode,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct BrowserCapabilities {
     pub video: Option<BrowserVideoCapability>,
+    #[serde(default)]
+    pub audio: Vec<BrowserAudioCapability>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -25,6 +27,46 @@ pub struct BrowserVideoCapability {
     pub smooth: bool,
     pub power_efficient: Option<bool>,
     pub hdr_display: Option<bool>,
+    #[serde(default)]
+    pub can_play_type_result: CanPlayTypeResult,
+    #[serde(default)]
+    pub media_capabilities_result: MediaCapabilitiesResult,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanPlayTypeResult {
+    Probably,
+    Maybe,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCapabilitiesResult {
+    Supported,
+    Unsupported,
+    Unavailable,
+    Error,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct BrowserAudioCapability {
+    pub stream_index: i64,
+    pub content_type: String,
+    pub can_play_type: bool,
+    pub media_source: bool,
+    pub supported: bool,
+    pub smooth: bool,
+    pub power_efficient: Option<bool>,
+    #[serde(default)]
+    pub can_play_type_result: CanPlayTypeResult,
+    #[serde(default)]
+    pub media_capabilities_result: MediaCapabilitiesResult,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,11 +90,54 @@ pub struct VideoSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AudioSource {
+    pub stream_index: i64,
+    pub codec: String,
+    pub codec_descriptor: Option<String>,
+    pub channels: u64,
+    pub channel_layout: Option<String>,
+    pub bitrate: u64,
+    pub sample_rate: u64,
+    pub remux_supported: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioAction {
+    Preserve,
+    TranscodeAac,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AudioPlaybackPlan {
+    pub source: AudioSource,
+    pub reported_capability: Option<BrowserAudioCapability>,
+    pub chosen_action: AudioAction,
+    pub decision_reason: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlaybackPlan {
     pub preferred_strategy: PlaybackStrategy,
     pub direct_play_supported: bool,
     pub decision_reason: &'static str,
     pub renditions: Vec<Quality>,
+    pub audio: Vec<AudioPlaybackPlan>,
+}
+
+fn capability_is_inconclusive(
+    can_play_type: CanPlayTypeResult,
+    media_capabilities: MediaCapabilitiesResult,
+) -> bool {
+    matches!(
+        can_play_type,
+        CanPlayTypeResult::Maybe | CanPlayTypeResult::Unknown
+    ) || matches!(
+        media_capabilities,
+        MediaCapabilitiesResult::Unavailable
+            | MediaCapabilitiesResult::Error
+            | MediaCapabilitiesResult::Unknown
+    )
 }
 
 pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> PlaybackPlan {
@@ -72,6 +157,19 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
     });
     let hdr_output_supported =
         !source.hdr || capability.is_some_and(|capability| capability.hdr_display == Some(true));
+    let capability_inconclusive = capability.is_some_and(|capability| {
+        capability_is_inconclusive(
+            capability.can_play_type_result,
+            capability.media_capabilities_result,
+        )
+    });
+    let capability_rejected = capability.is_some_and(|capability| {
+        capability.can_play_type_result == CanPlayTypeResult::Unsupported
+            || !capability.media_source
+            || capability.media_capabilities_result == MediaCapabilitiesResult::Unsupported
+            || (capability.media_capabilities_result == MediaCapabilitiesResult::Supported
+                && (!capability.supported || !capability.smooth))
+    });
     let direct_play_supported = source.remux_supported
         && exact_source_match
         && browser_decode_supported
@@ -95,6 +193,10 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
             "client_capability_unavailable"
         } else if !exact_source_match {
             "client_capability_does_not_match_source"
+        } else if capability_rejected {
+            "client_rejected_source_configuration"
+        } else if capability_inconclusive {
+            "client_capability_inconclusive"
         } else if !browser_decode_supported {
             "client_rejected_source_configuration"
         } else if !hdr_output_supported {
@@ -103,6 +205,70 @@ pub fn plan_video(source: &VideoSource, capabilities: &BrowserCapabilities) -> P
             "source_not_verified_for_direct_play"
         },
         renditions,
+        audio: Vec::new(),
+    }
+}
+
+pub fn plan_audio(source: AudioSource, capabilities: &BrowserCapabilities) -> AudioPlaybackPlan {
+    let expected_content_type = source
+        .codec_descriptor
+        .as_ref()
+        .map(|codec| format!("audio/mp4; codecs=\"{codec}\""));
+    let capability = capabilities
+        .audio
+        .iter()
+        .find(|capability| capability.stream_index == source.stream_index)
+        .cloned();
+    let exact_source_match = capability
+        .as_ref()
+        .zip(expected_content_type.as_ref())
+        .is_some_and(|(capability, expected)| capability.content_type == *expected);
+    let browser_decode_supported = capability.as_ref().is_some_and(|capability| {
+        capability.can_play_type
+            && capability.media_source
+            && capability.supported
+            && capability.smooth
+    });
+    let preserve = source.remux_supported && exact_source_match && browser_decode_supported;
+    let capability_inconclusive = capability.as_ref().is_some_and(|capability| {
+        capability_is_inconclusive(
+            capability.can_play_type_result,
+            capability.media_capabilities_result,
+        )
+    });
+    let capability_rejected = capability.as_ref().is_some_and(|capability| {
+        capability.can_play_type_result == CanPlayTypeResult::Unsupported
+            || !capability.media_source
+            || capability.media_capabilities_result == MediaCapabilitiesResult::Unsupported
+            || (capability.media_capabilities_result == MediaCapabilitiesResult::Supported
+                && (!capability.supported || !capability.smooth))
+    });
+    let decision_reason = if preserve {
+        "client_verified_source_and_fmp4_remux"
+    } else if !source.remux_supported || source.codec_descriptor.is_none() {
+        "source_not_fmp4_remux_eligible"
+    } else if capability.is_none() {
+        "client_capability_unavailable"
+    } else if !exact_source_match {
+        "client_capability_does_not_match_source"
+    } else if capability_rejected {
+        "client_rejected_source_configuration"
+    } else if capability_inconclusive {
+        "client_capability_inconclusive"
+    } else if !browser_decode_supported {
+        "client_rejected_source_configuration"
+    } else {
+        "source_not_verified_for_direct_play"
+    };
+    AudioPlaybackPlan {
+        source,
+        reported_capability: capability,
+        chosen_action: if preserve {
+            AudioAction::Preserve
+        } else {
+            AudioAction::TranscodeAac
+        },
+        decision_reason,
     }
 }
 
@@ -161,7 +327,10 @@ mod tests {
                 smooth: true,
                 power_efficient: Some(true),
                 hdr_display: Some(true),
+                can_play_type_result: CanPlayTypeResult::Probably,
+                media_capabilities_result: MediaCapabilitiesResult::Supported,
             }),
+            audio: Vec::new(),
         }
     }
 
@@ -257,6 +426,95 @@ mod tests {
             plan.decision_reason,
             "client_capability_does_not_match_source"
         );
+    }
+
+    fn matrix_eac3_source() -> AudioSource {
+        AudioSource {
+            stream_index: 1,
+            codec: "eac3".into(),
+            codec_descriptor: Some("ec-3".into()),
+            channels: 6,
+            channel_layout: Some("5.1(side)".into()),
+            bitrate: 768_000,
+            sample_rate: 48_000,
+            remux_supported: true,
+        }
+    }
+
+    #[test]
+    fn matrix_eac3_is_preserved_only_with_exact_positive_client_evidence() {
+        let source = matrix_eac3_source();
+        let capabilities = BrowserCapabilities {
+            audio: vec![BrowserAudioCapability {
+                stream_index: source.stream_index,
+                content_type: "audio/mp4; codecs=\"ec-3\"".into(),
+                can_play_type: true,
+                media_source: true,
+                supported: true,
+                smooth: true,
+                power_efficient: Some(true),
+                can_play_type_result: CanPlayTypeResult::Probably,
+                media_capabilities_result: MediaCapabilitiesResult::Supported,
+            }],
+            ..Default::default()
+        };
+        let plan = plan_audio(source, &capabilities);
+        assert_eq!(plan.chosen_action, AudioAction::Preserve);
+        assert_eq!(
+            plan.decision_reason,
+            "client_verified_source_and_fmp4_remux"
+        );
+    }
+
+    #[test]
+    fn missing_or_limited_audio_capabilities_select_normalized_aac() {
+        let source = matrix_eac3_source();
+        let missing = plan_audio(source.clone(), &BrowserCapabilities::default());
+        assert_eq!(missing.chosen_action, AudioAction::TranscodeAac);
+        assert_eq!(missing.decision_reason, "client_capability_unavailable");
+
+        let capabilities = BrowserCapabilities {
+            audio: vec![BrowserAudioCapability {
+                stream_index: source.stream_index,
+                content_type: "audio/mp4; codecs=\"ec-3\"".into(),
+                can_play_type: true,
+                media_source: true,
+                supported: false,
+                smooth: false,
+                power_efficient: None,
+                can_play_type_result: CanPlayTypeResult::Probably,
+                media_capabilities_result: MediaCapabilitiesResult::Unsupported,
+            }],
+            ..Default::default()
+        };
+        let limited = plan_audio(source, &capabilities);
+        assert_eq!(limited.chosen_action, AudioAction::TranscodeAac);
+        assert_eq!(
+            limited.decision_reason,
+            "client_rejected_source_configuration"
+        );
+    }
+
+    #[test]
+    fn ambiguous_audio_evidence_is_inspectable_and_does_not_enable_preservation() {
+        let source = matrix_eac3_source();
+        let capabilities = BrowserCapabilities {
+            audio: vec![BrowserAudioCapability {
+                stream_index: source.stream_index,
+                content_type: "audio/mp4; codecs=\"ec-3\"".into(),
+                can_play_type: false,
+                media_source: true,
+                supported: true,
+                smooth: true,
+                power_efficient: Some(true),
+                can_play_type_result: CanPlayTypeResult::Maybe,
+                media_capabilities_result: MediaCapabilitiesResult::Supported,
+            }],
+            ..Default::default()
+        };
+        let plan = plan_audio(source, &capabilities);
+        assert_eq!(plan.chosen_action, AudioAction::TranscodeAac);
+        assert_eq!(plan.decision_reason, "client_capability_inconclusive");
     }
 
     #[test]

@@ -8,13 +8,14 @@ use dim_core::stream_tracking::{
     ContentType, PlannedProfile, PlannedTrack, StreamTracking, VirtualManifest,
 };
 use dim_core::streaming::codec::{
-    capability_request, codec_descriptor, has_exact_codec_configuration, hdr_peak_nits, is_hdr,
-    remux_supported,
+    audio_capability_request, audio_codec_descriptor, audio_remux_supported, capability_request,
+    codec_descriptor, has_exact_codec_configuration, hdr_peak_nits, is_hdr, remux_supported,
 };
 use dim_core::streaming::ffprobe::{FFPStream, FFProbeCtx};
 use dim_core::streaming::get_avc1_tag;
 use dim_core::streaming::planner::{
-    plan_video, BrowserCapabilities, BrowserVideoCapability, PlaybackPlan, VideoSource,
+    plan_audio, plan_video, AudioAction, AudioSource, BrowserCapabilities, BrowserVideoCapability,
+    PlaybackPlan, VideoSource,
 };
 use dim_core::utils::{bitrate_to_label, quality_to_label};
 use dim_database::mediafile::MediaFile;
@@ -41,6 +42,8 @@ pub struct VirtualManifestParams {
     force_ass: bool,
     #[serde(default)]
     video_capability: Option<String>,
+    #[serde(default)]
+    capabilities: Option<String>,
 }
 
 pub async fn return_virtual_manifest(
@@ -67,12 +70,17 @@ pub async fn return_virtual_manifest(
     }
 
     let (info, reused_probe) = load_probe(&media).await?;
-    let capabilities = BrowserCapabilities {
-        video: params
-            .video_capability
-            .as_deref()
-            .and_then(|value| serde_json::from_str::<BrowserVideoCapability>(value).ok()),
-    };
+    let capabilities = params
+        .capabilities
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<BrowserCapabilities>(value).ok())
+        .unwrap_or_else(|| BrowserCapabilities {
+            video: params
+                .video_capability
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<BrowserVideoCapability>(value).ok()),
+            audio: Vec::new(),
+        });
     let (tracks, plan) = build_tracks(&info, &media, &user.prefs, params.force_ass, &capabilities)?;
     let gid = Uuid::new_v4();
     stream_tracking.create_session(gid, owner, tracks).await;
@@ -113,9 +121,24 @@ pub async fn return_playback_capabilities(
         dim_core::errors::StreamingErrors::InvalidMetadata("video frame rate is missing".into())
     })?;
     let request = capability_request(video, width, height, bitrate, frame_rate);
+    let audio = info
+        .find_by_type("audio")
+        .into_iter()
+        .filter_map(|stream| {
+            let channels = u64::try_from(stream.channels?)
+                .ok()
+                .filter(|value| *value > 0)?;
+            let bitrate = stream
+                .get_bitrate()
+                .unwrap_or_else(|| fallback_audio_bitrate(channels));
+            let sample_rate = stream.sample_rate.as_deref()?.parse::<u64>().ok()?;
+            audio_capability_request(stream, channels, bitrate, sample_rate)
+        })
+        .collect::<Vec<_>>();
 
     Ok(Json(json!({
         "video": request,
+        "audio": audio,
         "server_remux_supported": remux_supported(video),
         "probe_source": if reused_probe { "ingestion" } else { "fallback" },
     }))
@@ -204,7 +227,7 @@ fn build_tracks(
     let frame_rate = video.frame_rate().unwrap_or(30);
     let source_codec_descriptor = codec_descriptor(&video);
     let source_is_hdr = is_hdr(&video);
-    let plan = plan_video(
+    let mut plan = plan_video(
         &VideoSource {
             codec: video.codec_name.clone(),
             profile: video.profile.clone(),
@@ -340,13 +363,33 @@ fn build_tracks(
             .and_then(|value| u64::try_from(value).ok())
             .filter(|value| *value > 0)
             .unwrap_or(2);
-        let output = browser_aac_output(source_channels, audio.channel_layout.as_deref());
         let source_bitrate = audio
             .bit_rate
             .as_deref()
             .and_then(|value| value.parse::<u64>().ok())
             .or_else(|| audio.get_bitrate())
             .unwrap_or_else(|| fallback_audio_bitrate(source_channels));
+        let source_sample_rate = audio
+            .sample_rate
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let audio_plan = plan_audio(
+            AudioSource {
+                stream_index: audio.index,
+                codec: audio.codec_name.clone(),
+                codec_descriptor: audio_codec_descriptor(audio),
+                channels: source_channels,
+                channel_layout: audio.channel_layout.clone(),
+                bitrate: source_bitrate,
+                sample_rate: source_sample_rate,
+                remux_supported: audio_remux_supported(audio),
+            },
+            capabilities,
+        );
+        let preserve = audio_plan.chosen_action == AudioAction::Preserve;
+        plan.audio.push(audio_plan);
+        let output = browser_aac_output(source_channels, audio.channel_layout.as_deref());
         let bitrate = if output.channels < source_channels {
             fallback_audio_bitrate(output.channels)
         } else {
@@ -358,37 +401,71 @@ fn build_tracks(
             file: media.target_file.clone(),
             input_ctx: audio.clone().into(),
             output_ctx: OutputCtx {
-                codec: "aac".into(),
+                codec: if preserve {
+                    audio.codec_name.clone()
+                } else {
+                    "aac".into()
+                },
                 start_num: 0,
-                bitrate: Some(bitrate),
-                audio_channels: output.channels,
-                audio_channel_layout: Some(output.layout.into()),
-                audio_filter: output.filter.map(Into::into),
+                bitrate: (!preserve).then_some(bitrate),
+                audio_channels: if preserve {
+                    source_channels
+                } else {
+                    output.channels
+                },
+                audio_channel_layout: (!preserve).then(|| output.layout.into()),
+                audio_filter: if preserve {
+                    None
+                } else {
+                    output.filter.map(Into::into)
+                },
                 ..Default::default()
             },
             ..Default::default()
         };
+        let manifest_codec = if preserve {
+            audio_codec_descriptor(audio).expect("preserved audio has a codec descriptor")
+        } else {
+            "mp4a.40.2".into()
+        };
+        let manifest_channels = if preserve {
+            source_channels
+        } else {
+            output.channels
+        };
         let label = format!(
-            "{} ({} {})",
+            "{} ({} {}{})",
             language
                 .as_deref()
                 .and_then(dim_core::utils::lang_from_iso639)
                 .unwrap_or("Unknown"),
             dim_core::utils::codec_pretty(audio.get_codec()),
-            dim_core::utils::channels_pretty(output.channels as i64)
+            dim_core::utils::channels_pretty(manifest_channels as i64),
+            if preserve { ", Direct Play" } else { "" }
         );
         tracks.push(PlannedTrack {
-            manifest: VirtualManifest::new(Uuid::new_v4().to_string(), ContentType::Audio)
-                .set_mime("audio/mp4")
-                .set_duration(Some(duration))
-                .set_codecs("mp4a.40.2")
-                .set_bandwidth(bitrate)
-                .set_is_default(is_default)
-                .set_label(label)
-                .set_lang(language)
-                .set_audio_channels(Some(output.channels)),
+            manifest: {
+                let manifest = VirtualManifest::new(Uuid::new_v4().to_string(), ContentType::Audio)
+                    .set_mime("audio/mp4")
+                    .set_duration(Some(duration))
+                    .set_codecs(manifest_codec)
+                    .set_bandwidth(if preserve { source_bitrate } else { bitrate })
+                    .set_is_default(is_default)
+                    .set_label(label)
+                    .set_lang(language)
+                    .set_audio_channels(Some(manifest_channels));
+                if preserve {
+                    manifest.set_direct()
+                } else {
+                    manifest
+                }
+            },
             context,
-            profile: PlannedProfile::Audio,
+            profile: if preserve {
+                PlannedProfile::DirectAudio
+            } else {
+                PlannedProfile::Audio
+            },
         });
     }
 

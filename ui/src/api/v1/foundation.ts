@@ -14,7 +14,7 @@ import type {
   ScanStatus,
 } from "../generated";
 import type {
-  BrowserVideoCapability,
+  BrowserCapabilities,
   PlaybackCapabilityInspection,
 } from "../../Pages/VideoPlayer/VideoCapabilities";
 
@@ -95,16 +95,14 @@ export const foundation = v1.injectEndpoints({
       {
         fileId: string;
         forceAss: boolean;
-        videoCapability: BrowserVideoCapability | null;
+        capabilities: BrowserCapabilities;
       }
     >({
-      query: ({ fileId, forceAss, videoCapability }) => ({
+      query: ({ fileId, forceAss, capabilities }) => ({
         url: `stream/${fileId}/manifest`,
         params: {
           force_ass: forceAss,
-          ...(videoCapability && {
-            video_capability: JSON.stringify(videoCapability),
-          }),
+          capabilities: JSON.stringify(capabilities),
         },
       }),
       invalidatesTags: ["Playback"],
