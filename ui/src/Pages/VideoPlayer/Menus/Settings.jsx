@@ -52,13 +52,21 @@ function VideoMenuSettings() {
           : video.tracks.audio.list;
 
       const playerTracks = player.getTracksFor(trackType);
-      const selectedTrack = playerTracks.filter(
+      const selectedTrack = playerTracks.find(
         (track) => track.id === tracks[i].set_id
       );
 
-      console.log("[video] changed track to", selectedTrack[0]);
+      if (!selectedTrack) {
+        console.warn(
+          `[video] ${trackType} track is not present in the loaded manifest`,
+          tracks[i]
+        );
+        return;
+      }
 
-      player.setCurrentTrack(selectedTrack[0]);
+      console.log("[video] changed track to", selectedTrack);
+
+      player.setCurrentTrack(selectedTrack);
 
       dispatch(
         updateTrack(trackType, {
