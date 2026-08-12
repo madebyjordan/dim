@@ -100,6 +100,8 @@ impl Session {
     }
 
     pub async fn start(&mut self) -> Result<(), io::Error> {
+        std::fs::create_dir_all(&self.profile_ctx.output_ctx.outdir)?;
+        crate::profiles::video::prepare_hdr_luts(&self.profile_ctx)?;
         let args = self
             .profile
             .build(self.profile_ctx.clone())
@@ -110,7 +112,6 @@ impl Session {
                 )
             })?;
 
-        let _ = std::fs::create_dir_all(&self.profile_ctx.output_ctx.outdir);
         let log_file = format!(
             "{}/ffmpeg_{}.log",
             &self.profile_ctx.output_ctx.outdir,

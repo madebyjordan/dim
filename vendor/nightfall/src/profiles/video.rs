@@ -275,14 +275,16 @@ fn browser_h264_filter(ctx: &ProfileContext) -> Option<String> {
         let width = ctx.output_ctx.width.unwrap_or(-2);
         format!("scale={width}:{height}")
     });
-    let format = ctx
-        .output_ctx
-        .pixel_format
-        .as_deref()
-        .unwrap_or("yuv420p");
+    let format = ctx.output_ctx.pixel_format.as_deref().unwrap_or("yuv420p");
 
     match ctx.output_ctx.hdr_transfer.as_deref() {
-        Some(transfer) => hdr_to_sdr_filter(scale.as_deref(), format, transfer, ctx.output_ctx.hdr_peak_nits),
+        Some(transfer) => hdr_to_sdr_filter(
+            scale.as_deref(),
+            format,
+            transfer,
+            ctx.output_ctx.hdr_peak_nits,
+            &ctx.output_ctx.outdir,
+        ),
         None => Some(match scale {
             Some(scale) => format!("{scale},format={format}"),
             None => format!("format={format}"),
@@ -295,19 +297,13 @@ fn hdr_to_sdr_filter(
     pixel_format: &str,
     transfer: &str,
     peak_nits: Option<f64>,
+    outdir: &str,
 ) -> Option<String> {
-    let sample = "min(max(val,0),1)";
-    let linearize = match transfer {
-        "smpte2084" => format!(
-            "pow(max(pow({sample},0.0126833135)-0.8359375,0)/(18.8515625-18.6875*pow({sample},0.0126833135)),6.277394636)*100"
-        ),
-        "arib-std-b67" => format!(
-            "if(lte({sample},0.5),pow({sample},2)/3,(exp(({sample}-0.55991073)/0.17883277)+0.28466892)/12)*10"
-        ),
-        _ => return None,
-    };
-    let bt709_oetf =
-        "if(lt(max(val,0),0.018),4.5*max(val,0),1.099*pow(max(val,0),0.45)-0.099)";
+    if !matches!(transfer, "smpte2084" | "arib-std-b67") {
+        return None;
+    }
+    let eotf_lut = format!("{outdir}/hdr_eotf.cube");
+    let oetf_lut = format!("{outdir}/bt709_oetf.cube");
     let peak = peak_nits.unwrap_or(1_000.0).clamp(100.0, 10_000.0) / 100.0;
     let mut filters = Vec::new();
     if let Some(scale) = scale {
@@ -315,12 +311,12 @@ fn hdr_to_sdr_filter(
     }
     filters.extend([
         "format=gbrpf32le".into(),
-        format!("lutrgb=r='{linearize}':g='{linearize}':b='{linearize}'"),
+        format!("lut1d=file='{eotf_lut}':interp=linear"),
         "setparams=range=pc:color_primaries=bt2020:color_trc=linear:colorspace=gbr".into(),
         "colorchannelmixer=rr=1.660491:rg=-0.587641:rb=-0.072850:gr=-0.124550:gg=1.132900:gb=-0.008349:br=-0.018151:bg=-0.100579:bb=1.118730".into(),
         "setparams=range=pc:color_primaries=bt709:color_trc=linear:colorspace=gbr".into(),
         format!("tonemap=hable:desat=0:peak={peak:.4}"),
-        format!("lutrgb=r='{bt709_oetf}':g='{bt709_oetf}':b='{bt709_oetf}'"),
+        format!("lut1d=file='{oetf_lut}':interp=linear"),
         "setparams=range=pc:color_primaries=bt709:color_trc=bt709:colorspace=gbr".into(),
         format!("colorspace=ispace=gbr:iprimaries=bt709:itrc=bt709:irange=pc:space=bt709:primaries=bt709:trc=bt709:range=tv:format={pixel_format}"),
         "sidedata=mode=delete:type=MASTERING_DISPLAY_METADATA".into(),
@@ -332,6 +328,72 @@ fn hdr_to_sdr_filter(
         "sidedata=mode=delete:type=AMBIENT_VIEWING_ENVIRONMENT".into(),
     ]);
     Some(filters.join(","))
+}
+
+const TRANSFER_LUT_SIZE: usize = 4096;
+
+pub(crate) fn prepare_hdr_luts(ctx: &ProfileContext) -> std::io::Result<()> {
+    let Some(transfer) = ctx.output_ctx.hdr_transfer.as_deref() else {
+        return Ok(());
+    };
+    let eotf: fn(f64) -> f64 = match transfer {
+        "smpte2084" => pq_eotf,
+        "arib-std-b67" => hlg_eotf,
+        _ => return Ok(()),
+    };
+    write_1d_lut(
+        &format!("{}/hdr_eotf.cube", ctx.output_ctx.outdir),
+        "HDR EOTF",
+        eotf,
+    )?;
+    write_1d_lut(
+        &format!("{}/bt709_oetf.cube", ctx.output_ctx.outdir),
+        "BT.709 OETF",
+        bt709_oetf,
+    )
+}
+
+fn write_1d_lut(path: &str, title: &str, transfer: fn(f64) -> f64) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(file, "TITLE \"{title}\"")?;
+    writeln!(file, "LUT_1D_SIZE {TRANSFER_LUT_SIZE}")?;
+    writeln!(file, "DOMAIN_MIN 0.0 0.0 0.0")?;
+    writeln!(file, "DOMAIN_MAX 1.0 1.0 1.0")?;
+    for index in 0..TRANSFER_LUT_SIZE {
+        let sample = index as f64 / (TRANSFER_LUT_SIZE - 1) as f64;
+        let value = transfer(sample);
+        writeln!(file, "{value:.12} {value:.12} {value:.12}")?;
+    }
+    file.flush()
+}
+
+fn pq_eotf(sample: f64) -> f64 {
+    let encoded = sample.clamp(0.0, 1.0).powf(0.0126833135);
+    ((encoded - 0.8359375).max(0.0) / (18.8515625 - 18.6875 * encoded)).powf(6.277394636) * 100.0
+}
+
+fn hlg_eotf(sample: f64) -> f64 {
+    let encoded = sample.clamp(0.0, 1.0);
+    if encoded <= 0.5 {
+        encoded.powi(2) / 3.0
+    } else {
+        ((encoded - 0.55991073) / 0.17883277)
+            .exp()
+            .mul_add(1.0, 0.28466892)
+            / 12.0
+            * 10.0
+    }
+}
+
+fn bt709_oetf(sample: f64) -> f64 {
+    let linear = sample.max(0.0);
+    if linear < 0.018 {
+        4.5 * linear
+    } else {
+        1.099 * linear.powf(0.45) - 0.099
+    }
 }
 
 pub(crate) fn hardware_h264_contract_supported(
@@ -541,11 +603,46 @@ mod tests {
             .build(browser_h264_context(true))
             .unwrap();
         let filter = value_after(&args, "-vf").unwrap();
+        assert!(filter.contains("format=gbrpf32le,lut1d=file="));
+        assert_eq!(filter.matches("lut1d=").count(), 2);
+        assert!(filter.contains("hdr_eotf.cube"));
+        assert!(filter.contains("bt709_oetf.cube"));
+        assert!(!filter.contains("lutrgb"));
+        assert!(!filter.contains("geq"));
         assert!(filter.contains("color_trc=linear"));
         assert!(filter.contains("tonemap=hable"));
         assert!(filter.contains("primaries=bt709:trc=bt709"));
         assert!(filter.contains("type=MASTERING_DISPLAY_METADATA"));
         assert_eq!(value_after(&args, "-pix_fmt"), Some("yuv420p"));
+    }
+
+    #[test]
+    fn hlg_fallback_keeps_transfer_math_in_float_rgb() {
+        let filter = hdr_to_sdr_filter(None, "yuv420p", "arib-std-b67", Some(1_000.0), "out")
+            .expect("HLG is a supported HDR transfer");
+        assert!(filter.starts_with("format=gbrpf32le,lut1d=file="));
+        assert_eq!(filter.matches("lut1d=").count(), 2);
+        assert!(!filter.contains("lutrgb"));
+        assert!(!filter.contains("geq"));
+    }
+
+    #[test]
+    fn hdr_luts_preserve_linear_values_above_sdr_white() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut context = browser_h264_context(true);
+        context.output_ctx.outdir = tempdir.path().to_string_lossy().into_owned();
+        prepare_hdr_luts(&context).unwrap();
+
+        let eotf = std::fs::read_to_string(tempdir.path().join("hdr_eotf.cube")).unwrap();
+        let oetf = std::fs::read_to_string(tempdir.path().join("bt709_oetf.cube")).unwrap();
+        assert_eq!(eotf.lines().count(), TRANSFER_LUT_SIZE + 4);
+        assert!(eotf.lines().last().unwrap().starts_with("100.000"));
+        assert!(oetf.lines().last().unwrap().starts_with("1.000"));
+
+        context.output_ctx.hdr_transfer = Some("arib-std-b67".into());
+        prepare_hdr_luts(&context).unwrap();
+        let hlg_eotf = std::fs::read_to_string(tempdir.path().join("hdr_eotf.cube")).unwrap();
+        assert!(hlg_eotf.lines().last().unwrap().starts_with("10.000"));
     }
 
     #[test]
