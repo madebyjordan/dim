@@ -30,7 +30,7 @@ impl TranscodingProfile for AudioTransmuxProfile {
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
+            format!("{:.6}", ctx.output_ctx.start_time()),
             "-i".into(),
             ctx.file,
             "-copyts".into(),
@@ -119,7 +119,7 @@ impl TranscodingProfile for AacTranscodeProfile {
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
+            format!("{:.6}", ctx.output_ctx.start_time()),
             "-i".into(),
             ctx.file,
             "-copyts".into(),
@@ -129,6 +129,11 @@ impl TranscodingProfile for AacTranscodeProfile {
             "aac".into(),
         ];
 
+        if let Some(duration) = ctx.output_ctx.media_duration {
+            args.push("-t".into());
+            args.push(format!("{duration:.6}"));
+        }
+
         if let Some(filter) = ctx.output_ctx.audio_filter.as_ref() {
             args.push("-af".into());
             args.push(filter.clone());
@@ -136,6 +141,10 @@ impl TranscodingProfile for AacTranscodeProfile {
 
         args.push("-ac".into());
         args.push(ctx.output_ctx.audio_channels.to_string());
+        if let Some(sample_rate) = ctx.output_ctx.audio_sample_rate {
+            args.push("-ar".into());
+            args.push(sample_rate.to_string());
+        }
         if let Some(layout) = ctx.output_ctx.audio_channel_layout.as_ref() {
             args.push("-channel_layout".into());
             args.push(layout.clone());
@@ -193,9 +202,12 @@ impl TranscodingProfile for AacTranscodeProfile {
 
         args.append(&mut vec![
             "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
+            format!("{:.9}", ctx.output_ctx.segment_duration()),
             "-force_key_frames".into(),
-            format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
+            format!(
+                "expr:gte(t,n_forced*{:.9})",
+                ctx.output_ctx.segment_duration()
+            ),
         ]);
 
         args.append(&mut vec!["-hls_segment_type".into(), "1".into()]);

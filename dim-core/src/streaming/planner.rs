@@ -196,7 +196,28 @@ pub fn plan_video_for_target(
         && exact_source_match
         && browser_decode_supported
         && hdr_output_supported;
-    let renditions = source_bounded_qualities(source.height, source.bitrate)
+    let mut bounded_qualities = source_bounded_qualities(source.height, source.bitrate);
+    if target == PlaybackTargetKind::Airplay
+        && source.height > 1080
+        && source.frame_rate <= 60
+        && super::get_avc1_tag(
+            source.width,
+            source.height,
+            source.bitrate,
+            source.frame_rate,
+        )
+        .level
+            <= 52
+    {
+        bounded_qualities.insert(
+            0,
+            Quality {
+                height: source.height,
+                bitrate: source.bitrate,
+            },
+        );
+    }
+    let renditions = bounded_qualities
         .into_iter()
         .filter(|quality| !direct_play_supported || quality.height < source.height)
         .map(|mut quality| {
@@ -204,6 +225,7 @@ pub fn plan_video_for_target(
             // anamorphic/wide sources inside a 1920-pixel encoded width while preserving aspect
             // ratio; ordinary 16:9 1080p sources remain unchanged.
             if target == PlaybackTargetKind::Airplay
+                && quality.height != source.height
                 && source.width.saturating_mul(quality.height)
                     > 1920_u64.saturating_mul(source.height)
             {
@@ -470,14 +492,16 @@ mod tests {
         assert_eq!(plan.target, PlaybackTargetKind::Airplay);
         assert_eq!(plan.capability_evidence, "webkit_route_availability_only");
         assert_eq!(plan.preferred_strategy, PlaybackStrategy::Transcode);
+        assert!(!plan.direct_play_supported);
         assert_eq!(plan.decision_reason, "client_capability_unavailable");
         assert_eq!(
             plan.renditions[0],
             Quality {
-                height: 800,
-                bitrate: 10_000_000
+                height: 1600,
+                bitrate: 11_618_576
             }
         );
+        assert_eq!(plan.renditions[1].height, 800);
     }
 
     #[test]

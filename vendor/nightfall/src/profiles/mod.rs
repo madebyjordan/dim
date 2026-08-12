@@ -27,6 +27,7 @@ pub use video::RawVideoTranscodeProfile;
 
 use crate::NightfallError;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
 
@@ -231,6 +232,7 @@ pub struct OutputCtx {
     pub height: Option<i64>,
     pub width: Option<i64>,
     pub audio_channels: u64,
+    pub audio_sample_rate: Option<u64>,
     pub audio_channel_layout: Option<String>,
     pub audio_filter: Option<String>,
     pub target_gop: u32,
@@ -243,6 +245,12 @@ pub struct OutputCtx {
     pub color_primaries: Option<String>,
     pub hdr_transfer: Option<String>,
     pub hdr_peak_nits: Option<f64>,
+    /// Exact source duration used to bound representation output. Remote HLS manifests depend on
+    /// this contract; integer container duration is not sufficiently precise.
+    pub media_duration: Option<f64>,
+    pub force_cfr: bool,
+    pub segment_durations: Option<Arc<Vec<f64>>>,
+    pub hls_segment_duration: Option<f64>,
 }
 
 impl Default for OutputCtx {
@@ -256,6 +264,7 @@ impl Default for OutputCtx {
             height: None,
             width: None,
             audio_channels: 2,
+            audio_sample_rate: None,
             audio_channel_layout: None,
             audio_filter: None,
             target_gop: 5,
@@ -268,7 +277,31 @@ impl Default for OutputCtx {
             color_primaries: None,
             hdr_transfer: None,
             hdr_peak_nits: None,
+            media_duration: None,
+            force_cfr: false,
+            segment_durations: None,
+            hls_segment_duration: None,
         }
+    }
+}
+
+impl OutputCtx {
+    pub fn start_time(&self) -> f64 {
+        self.segment_durations
+            .as_deref()
+            .map(|durations| {
+                durations
+                    .iter()
+                    .take(self.start_num as usize)
+                    .copied()
+                    .sum()
+            })
+            .unwrap_or_else(|| self.start_num as f64 * self.target_gop as f64)
+    }
+
+    pub fn segment_duration(&self) -> f64 {
+        self.hls_segment_duration
+            .unwrap_or(self.target_gop as f64)
     }
 }
 
@@ -297,4 +330,19 @@ pub enum StreamType {
     Video,
     Audio,
     Subtitle,
+}
+
+#[cfg(test)]
+mod output_context_tests {
+    use super::*;
+
+    #[test]
+    fn hard_seek_uses_the_advertised_representation_timeline() {
+        let context = OutputCtx {
+            start_num: 2,
+            segment_durations: Some(Arc::new(vec![5.005, 5.005, 2.0])),
+            ..Default::default()
+        };
+        assert!((context.start_time() - 10.01).abs() < 0.000_001);
+    }
 }

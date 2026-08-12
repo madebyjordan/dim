@@ -222,9 +222,14 @@ fn stream_routes(
             "/api/v1/stream/:gid/state/kill",
             delete(routes::stream::kill_session),
         )
+        .route(
+            "/api/v1/stream/:gid/state/remote-route",
+            get(routes::stream::get_remote_playback_status)
+                .put(routes::stream::update_remote_route_state),
+        )
 }
 
-fn remote_stream_routes() -> Router<AppState> {
+fn remote_stream_routes(app: AppState) -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/remote/:gid/master.m3u8",
@@ -242,7 +247,10 @@ fn remote_stream_routes() -> Router<AppState> {
             "/api/v1/remote/:gid/:track/:chunk",
             get(routes::stream::get_remote_chunk),
         )
-        .route_layer(axum::middleware::from_fn(middleware::trace_remote_playback))
+        .route_layer(axum::middleware::from_fn_with_state(
+            app,
+            middleware::trace_remote_playback,
+        ))
 }
 
 fn season_routes(_app: AppState) -> Router<AppState> {
@@ -361,7 +369,7 @@ pub fn build_router(app: AppState) -> Router {
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(readiness))
         .merge(auth_routes(app.clone()))
-        .merge(remote_stream_routes())
+        .merge(remote_stream_routes(app.clone()))
         .route("/images/*path", get(routes::statik::get_image))
         .route("/", get(routes::statik::react_routes))
         .route("/*path", get(routes::statik::react_routes))

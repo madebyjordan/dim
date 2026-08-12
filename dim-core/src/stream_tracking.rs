@@ -7,7 +7,7 @@ use crate::utils::ts_to_xml;
 use nightfall::profiles::{
     get_profile_for, get_profile_for_with_type, ProfileContext, ProfileType, StreamType,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use xmlwriter::*;
@@ -18,6 +18,49 @@ pub enum ContentType {
     Video,
     Audio,
     Subtitle,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemotePlaybackState {
+    Prepared,
+    HandoffRequested,
+    WirelessRouteReported,
+    MediaDeliveryConfirmed,
+    HandoffStalled,
+    Failed,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteRequestAttribution {
+    SenderPreflight,
+    SenderOrLocalProxy,
+    AppleMediaIntermediaryCandidate,
+    RemoteNetworkCandidate,
+    OriginUnresolved,
+    DisconnectedOrStale,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteHlsStage {
+    MasterPlaylist,
+    MediaPlaylist,
+    InitFragment,
+    MediaSegment,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemotePlaybackStatus {
+    pub state: RemotePlaybackState,
+    pub handoff_elapsed_ms: Option<u128>,
+    pub successful_remote_inits: usize,
+    pub successful_remote_segments: usize,
+    pub last_request_attribution: Option<RemoteRequestAttribution>,
+    pub last_request_stage: Option<RemoteHlsStage>,
 }
 
 impl std::fmt::Display for ContentType {
@@ -44,6 +87,7 @@ pub struct VirtualManifest {
     pub mime: String,
     pub codecs: String,
     pub bandwidth: u64,
+    pub average_bandwidth: u64,
     #[serde(flatten)]
     pub args: HashMap<String, String>,
     pub duration: Option<i32>,
@@ -54,6 +98,12 @@ pub struct VirtualManifest {
     pub lang: Option<String>,
     pub target_duration: u32,
     pub audio_channels: Option<u64>,
+    pub frame_rate: Option<f64>,
+    pub video_range: Option<String>,
+    /// The media timeline advertised to HLS clients. It is representation-specific and is not
+    /// part of the browser/DASH manifest API.
+    #[serde(skip)]
+    pub segment_durations: Vec<f64>,
 }
 
 impl VirtualManifest {
@@ -67,6 +117,7 @@ impl VirtualManifest {
             mime: String::new(),
             codecs: String::new(),
             bandwidth: 0,
+            average_bandwidth: 0,
             args: Default::default(),
             duration: None,
             label: String::new(),
@@ -75,6 +126,9 @@ impl VirtualManifest {
             chunk_path: String::new(),
             init_seg: None,
             audio_channels: None,
+            frame_rate: None,
+            video_range: None,
+            segment_durations: Vec::new(),
         }
     }
     pub fn set_direct(mut self) -> Self {
@@ -91,6 +145,11 @@ impl VirtualManifest {
     }
     pub fn set_bandwidth(mut self, value: u64) -> Self {
         self.bandwidth = value;
+        self.average_bandwidth = value;
+        self
+    }
+    pub fn set_average_bandwidth(mut self, value: u64) -> Self {
+        self.average_bandwidth = value;
         self
     }
     pub fn set_duration(mut self, value: Option<i32>) -> Self {
@@ -124,6 +183,18 @@ impl VirtualManifest {
     }
     pub fn set_audio_channels(mut self, value: Option<u64>) -> Self {
         self.audio_channels = value;
+        self
+    }
+    pub fn set_frame_rate(mut self, value: Option<f64>) -> Self {
+        self.frame_rate = value;
+        self
+    }
+    pub fn set_video_range(mut self, value: Option<impl Into<String>>) -> Self {
+        self.video_range = value.map(Into::into);
+        self
+    }
+    pub fn set_segment_durations(mut self, value: Vec<f64>) -> Self {
+        self.segment_durations = value;
         self
     }
     pub fn set_chunk_path(mut self, value: impl Into<String>) -> Self {
@@ -291,6 +362,12 @@ struct Session {
     last_activity: Instant,
     tracks: Vec<TrackState>,
     remote_access_token: Option<String>,
+    remote_playback_state: RemotePlaybackState,
+    handoff_started_at: Option<Instant>,
+    successful_remote_inits: HashSet<String>,
+    successful_remote_segments: HashSet<String>,
+    last_request_attribution: Option<RemoteRequestAttribution>,
+    last_request_stage: Option<RemoteHlsStage>,
 }
 #[derive(Debug)]
 struct Inner {
@@ -305,6 +382,9 @@ pub struct StreamTracking {
 }
 
 impl StreamTracking {
+    const HANDOFF_STALL_AFTER: Duration = Duration::from_secs(15);
+    const HANDOFF_CLEANUP_AFTER: Duration = Duration::from_secs(30);
+
     pub fn with_policy(policy: TranscodePolicy) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -336,6 +416,12 @@ impl StreamTracking {
                     })
                     .collect(),
                 remote_access_token: None,
+                remote_playback_state: RemotePlaybackState::Prepared,
+                handoff_started_at: None,
+                successful_remote_inits: HashSet::new(),
+                successful_remote_segments: HashSet::new(),
+                last_request_attribution: None,
+                last_request_stage: None,
             },
         );
     }
@@ -354,6 +440,163 @@ impl StreamTracking {
         session.remote_access_token = Some(token.clone());
         tracing::info!(session_id = %gid, owner, "Remote playback token issued");
         Ok(token)
+    }
+
+    pub async fn set_remote_playback_state(
+        &self,
+        gid: &Uuid,
+        owner: i64,
+        state: RemotePlaybackState,
+    ) -> Result<(), TrackingError> {
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get_mut(gid).ok_or(TrackingError::NotFound)?;
+        if session.owner != owner {
+            return Err(TrackingError::NotOwner);
+        }
+        if session.remote_playback_state == state {
+            return Ok(());
+        }
+        // A picker request and WebKit's route callback are reported independently. Ignore a late
+        // intent update after the stronger route signal, but reject client attempts to claim
+        // server-derived delivery/stall states or revive a terminal session.
+        if session.remote_playback_state == RemotePlaybackState::WirelessRouteReported
+            && state == RemotePlaybackState::HandoffRequested
+        {
+            return Ok(());
+        }
+        let transition_allowed = match (session.remote_playback_state, state) {
+            (
+                RemotePlaybackState::Prepared,
+                RemotePlaybackState::HandoffRequested
+                | RemotePlaybackState::WirelessRouteReported
+                | RemotePlaybackState::Failed
+                | RemotePlaybackState::Disconnected,
+            )
+            | (
+                RemotePlaybackState::HandoffRequested,
+                RemotePlaybackState::WirelessRouteReported
+                | RemotePlaybackState::Failed
+                | RemotePlaybackState::Disconnected,
+            )
+            | (
+                RemotePlaybackState::WirelessRouteReported,
+                RemotePlaybackState::Failed | RemotePlaybackState::Disconnected,
+            )
+            | (
+                RemotePlaybackState::MediaDeliveryConfirmed,
+                RemotePlaybackState::Failed | RemotePlaybackState::Disconnected,
+            ) => true,
+            _ => false,
+        };
+        if !transition_allowed {
+            return Err(TrackingError::InvalidSelection);
+        }
+        if matches!(
+            state,
+            RemotePlaybackState::HandoffRequested | RemotePlaybackState::WirelessRouteReported
+        ) && session.handoff_started_at.is_none()
+        {
+            session.handoff_started_at = Some(Instant::now());
+            session.successful_remote_inits.clear();
+            session.successful_remote_segments.clear();
+        }
+        session.remote_playback_state = state;
+        session.last_activity = Instant::now();
+        tracing::info!(session_id = %gid, owner, remote_playback_state = ?state, "AirPlay playback state updated");
+        Ok(())
+    }
+
+    pub async fn remote_playback_state(&self, gid: &Uuid) -> Option<RemotePlaybackState> {
+        self.inner
+            .read()
+            .await
+            .sessions
+            .get(gid)
+            .map(|session| session.remote_playback_state)
+    }
+
+    pub async fn remote_playback_status(
+        &self,
+        gid: &Uuid,
+        owner: i64,
+    ) -> Result<RemotePlaybackStatus, TrackingError> {
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get_mut(gid).ok_or(TrackingError::NotFound)?;
+        if session.owner != owner {
+            return Err(TrackingError::NotOwner);
+        }
+        let elapsed = session.handoff_started_at.map(|started| started.elapsed());
+        if matches!(
+            session.remote_playback_state,
+            RemotePlaybackState::HandoffRequested | RemotePlaybackState::WirelessRouteReported
+        ) && elapsed.is_some_and(|value| value >= Self::HANDOFF_STALL_AFTER)
+        {
+            session.remote_playback_state = RemotePlaybackState::HandoffStalled;
+            tracing::warn!(
+                session_id = %gid,
+                owner,
+                successful_remote_inits = session.successful_remote_inits.len(),
+                successful_remote_segments = session.successful_remote_segments.len(),
+                "AirPlay handoff stalled without confirmed remote media delivery"
+            );
+        }
+        session.last_activity = Instant::now();
+        Ok(RemotePlaybackStatus {
+            state: session.remote_playback_state,
+            handoff_elapsed_ms: elapsed.map(|value| value.as_millis()),
+            successful_remote_inits: session.successful_remote_inits.len(),
+            successful_remote_segments: session.successful_remote_segments.len(),
+            last_request_attribution: session.last_request_attribution,
+            last_request_stage: session.last_request_stage,
+        })
+    }
+
+    pub async fn observe_remote_hls_response(
+        &self,
+        gid: &Uuid,
+        stage: RemoteHlsStage,
+        attribution: RemoteRequestAttribution,
+        path: &str,
+        successful: bool,
+    ) {
+        let mut inner = self.inner.write().await;
+        let Some(session) = inner.sessions.get_mut(gid) else {
+            return;
+        };
+        session.last_request_attribution = Some(attribution);
+        session.last_request_stage = Some(stage);
+        if !successful
+            || session.remote_playback_state != RemotePlaybackState::WirelessRouteReported
+            || !matches!(
+                attribution,
+                RemoteRequestAttribution::AppleMediaIntermediaryCandidate
+                    | RemoteRequestAttribution::RemoteNetworkCandidate
+            )
+        {
+            return;
+        }
+        match stage {
+            RemoteHlsStage::InitFragment => {
+                session.successful_remote_inits.insert(path.to_owned());
+            }
+            RemoteHlsStage::MediaSegment => {
+                session.successful_remote_segments.insert(path.to_owned());
+            }
+            _ => {}
+        }
+        // Two distinct successful post-route segments demonstrate sustained remote-bound media
+        // delivery. This is intentionally not called proof that a physical display rendered it.
+        if session.successful_remote_segments.len() >= 2 {
+            session.remote_playback_state = RemotePlaybackState::MediaDeliveryConfirmed;
+            tracing::info!(
+                session_id = %gid,
+                owner = session.owner,
+                attribution = ?attribution,
+                successful_remote_inits = session.successful_remote_inits.len(),
+                successful_remote_segments = session.successful_remote_segments.len(),
+                "AirPlay remote media delivery confirmed"
+            );
+        }
     }
 
     pub async fn authenticate_remote(&self, gid: &Uuid, token: &str) -> Result<i64, TrackingError> {
@@ -462,6 +705,107 @@ impl StreamTracking {
             .ok_or(TrackingError::NotFound)?)
     }
 
+    /// Activate a track selected by a remote HLS client.
+    ///
+    /// An HLS receiver may inspect one video rendition and then select another. A remote
+    /// playback session owns one active video recipe, so an init-fragment request for a new
+    /// rendition replaces the previous recipe instead of consuming another admission slot.
+    /// Segment requests cannot initiate that replacement: this prevents late requests for the
+    /// retired rendition from switching playback back during an ABR transition.
+    pub async fn activate_remote_track(
+        &self,
+        state: &StateManager,
+        gid: &Uuid,
+        public_id: &str,
+        owner: i64,
+        allow_video_replacement: bool,
+    ) -> Result<String, TrackingError> {
+        let mut inner = self.inner.write().await;
+        let session = inner.sessions.get(gid).ok_or(TrackingError::NotFound)?;
+        if session.owner != owner {
+            return Err(TrackingError::NotOwner);
+        }
+        let requested = session
+            .tracks
+            .iter()
+            .find(|track| track.plan.manifest.id == public_id)
+            .ok_or(TrackingError::NotFound)?;
+        if let Some(process_id) = requested.process_id.clone() {
+            return Ok(process_id);
+        }
+
+        let retiring = if requested.plan.manifest.content_type == ContentType::Video {
+            session
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| {
+                    track.plan.manifest.content_type == ContentType::Video
+                        && track.plan.manifest.id != public_id
+                })
+                .filter_map(|(index, track)| Some((index, track.process_id.clone()?)))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !retiring.is_empty() && !allow_video_replacement {
+            tracing::debug!(
+                session_id = %gid,
+                owner,
+                track_id = public_id,
+                "Ignored late remote HLS request for an inactive video rendition"
+            );
+            return Err(TrackingError::InvalidSelection);
+        }
+
+        // Admit against the post-swap process count. StateManager::create registers a lazy
+        // Nightfall process; FFmpeg starts only after this method returns and the init request is
+        // dispatched, so the retiring and replacement transcoders do not run concurrently.
+        for (index, process_id) in &retiring {
+            inner.process_index.remove(process_id);
+            inner.sessions.get_mut(gid).unwrap().tracks[*index].process_id = None;
+        }
+        if let Err(error) = self
+            .activate_locked(state, &mut inner, *gid, owner, &[public_id.to_string()])
+            .await
+        {
+            for (index, process_id) in &retiring {
+                inner.process_index.insert(process_id.clone(), *gid);
+                inner.sessions.get_mut(gid).unwrap().tracks[*index].process_id =
+                    Some(process_id.clone());
+            }
+            return Err(error);
+        }
+        let process_id = inner.sessions[gid]
+            .tracks
+            .iter()
+            .find(|track| track.plan.manifest.id == public_id)
+            .and_then(|track| track.process_id.clone())
+            .ok_or(TrackingError::NotFound)?;
+        drop(inner);
+
+        for (_, retired_process_id) in retiring {
+            tracing::info!(
+                session_id = %gid,
+                owner,
+                track_id = public_id,
+                old_process_id = retired_process_id,
+                new_process_id = process_id,
+                "Remote HLS video rendition replaced"
+            );
+            if let Err(error) = state.die(retired_process_id.clone()).await {
+                tracing::warn!(
+                    session_id = %gid,
+                    owner,
+                    process_id = retired_process_id,
+                    %error,
+                    "Retired remote video process cleanup failed"
+                );
+            }
+        }
+        Ok(process_id)
+    }
+
     async fn activate_locked(
         &self,
         state: &StateManager,
@@ -547,7 +891,9 @@ impl StreamTracking {
                 ),
                 PlannedProfile::Video => {
                     let profiles = get_profile_for(StreamType::Video, &track.plan.context);
-                    if crate::settings::get_global_settings().enable_hwaccel {
+                    if crate::settings::get_global_settings().enable_hwaccel
+                        && !track.plan.context.output_ctx.force_cfr
+                    {
                         profiles
                     } else {
                         profiles
@@ -785,16 +1131,30 @@ impl StreamTracking {
                 .sessions
                 .iter()
                 .filter_map(|(gid, session)| {
-                    (session.last_activity.elapsed() >= self.policy.session_ttl).then(|| {
-                        tracing::info!(
-                            session_id = %gid,
-                            owner = session.owner,
-                            age_ms = session.created_at.elapsed().as_millis(),
-                            inactive_ms = session.last_activity.elapsed().as_millis(),
-                            "Playback session expired"
-                        );
-                        (*gid, session.owner)
-                    })
+                    let abandoned_handoff = session.handoff_started_at.is_some_and(|started| {
+                        started.elapsed() >= Self::HANDOFF_CLEANUP_AFTER
+                            && matches!(
+                                session.remote_playback_state,
+                                RemotePlaybackState::HandoffRequested
+                                    | RemotePlaybackState::WirelessRouteReported
+                                    | RemotePlaybackState::HandoffStalled
+                                    | RemotePlaybackState::Failed
+                                    | RemotePlaybackState::Disconnected
+                            )
+                    });
+                    (session.last_activity.elapsed() >= self.policy.session_ttl
+                        || abandoned_handoff)
+                        .then(|| {
+                            tracing::info!(
+                                session_id = %gid,
+                                owner = session.owner,
+                                age_ms = session.created_at.elapsed().as_millis(),
+                                inactive_ms = session.last_activity.elapsed().as_millis(),
+                                abandoned_handoff,
+                                "Playback session expired"
+                            );
+                            (*gid, session.owner)
+                        })
                 })
                 .collect::<Vec<_>>();
             let active = inner
@@ -1022,6 +1382,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_playback_state_requires_the_session_owner() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking.create_session(gid, 7, vec![planned_track()]).await;
+        assert_eq!(
+            tracking.remote_playback_state(&gid).await,
+            Some(RemotePlaybackState::Prepared)
+        );
+        assert_eq!(
+            tracking
+                .set_remote_playback_state(&gid, 8, RemotePlaybackState::WirelessRouteReported,)
+                .await,
+            Err(TrackingError::NotOwner)
+        );
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::HandoffRequested)
+            .await
+            .unwrap();
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        assert_eq!(
+            tracking.remote_playback_state(&gid).await,
+            Some(RemotePlaybackState::WirelessRouteReported)
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delivery_requires_sustained_non_sender_segment_traffic() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking.create_session(gid, 7, vec![planned_track()]).await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::HandoffRequested)
+            .await
+            .unwrap();
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        tracking
+            .observe_remote_hls_response(
+                &gid,
+                RemoteHlsStage::MediaSegment,
+                RemoteRequestAttribution::SenderOrLocalProxy,
+                "/video/0.m4s",
+                true,
+            )
+            .await;
+        assert_eq!(
+            tracking.remote_playback_state(&gid).await,
+            Some(RemotePlaybackState::WirelessRouteReported)
+        );
+        for path in ["/video/0.m4s", "/video/1.m4s"] {
+            tracking
+                .observe_remote_hls_response(
+                    &gid,
+                    RemoteHlsStage::MediaSegment,
+                    RemoteRequestAttribution::RemoteNetworkCandidate,
+                    path,
+                    true,
+                )
+                .await;
+        }
+        assert_eq!(
+            tracking.remote_playback_state(&gid).await,
+            Some(RemotePlaybackState::MediaDeliveryConfirmed)
+        );
+    }
+
+    #[tokio::test]
+    async fn route_report_without_remote_traffic_becomes_stalled() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking.create_session(gid, 7, vec![planned_track()]).await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::HandoffRequested)
+            .await
+            .unwrap();
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        tracking.inner.write().await.sessions.get_mut(&gid).unwrap().handoff_started_at =
+            Some(Instant::now() - StreamTracking::HANDOFF_STALL_AFTER);
+        let status = tracking.remote_playback_status(&gid, 7).await.unwrap();
+        assert_eq!(status.state, RemotePlaybackState::HandoffStalled);
+        assert_eq!(status.successful_remote_segments, 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_handoff_cleanup_revokes_the_session_and_token() {
+        let tracking = StreamTracking::with_policy(TranscodePolicy {
+            session_ttl: Duration::from_secs(60),
+            ..policy()
+        });
+        let gid = Uuid::new_v4();
+        tracking.create_session(gid, 7, vec![planned_track()]).await;
+        let token = tracking.enable_remote_access(&gid, 7).await.unwrap();
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::HandoffRequested)
+            .await
+            .unwrap();
+        tracking.inner.write().await.sessions.get_mut(&gid).unwrap().handoff_started_at =
+            Some(Instant::now() - StreamTracking::HANDOFF_CLEANUP_AFTER);
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateManager::new(
+            &mut Tokio::Global,
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        assert_eq!(tracking.cleanup_expired(&state).await, 1);
+        assert_eq!(
+            tracking.authenticate_remote(&gid, &token).await,
+            Err(TrackingError::NotFound)
+        );
+    }
+
+    #[tokio::test]
     async fn video_replacement_uses_post_swap_admission_and_retires_the_old_recipe() {
         nightfall::profiles::profiles_init("/bin/false".into());
         let tracking = StreamTracking::with_policy(TranscodePolicy {
@@ -1105,6 +1585,58 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert!(active.iter().any(|(track, _)| track.id == "video-a"));
         assert!(active.iter().any(|(track, _)| track.id == "audio"));
+    }
+
+    #[tokio::test]
+    async fn remote_init_replaces_video_without_consuming_another_admission_slot() {
+        nightfall::profiles::profiles_init("/bin/false".into());
+        let tracking = StreamTracking::with_policy(TranscodePolicy {
+            global_limit: 2,
+            per_user_limit: 2,
+            per_session_limit: 2,
+            session_ttl: Duration::from_secs(60),
+        });
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session(
+                gid,
+                7,
+                vec![
+                    direct_video("video-a"),
+                    direct_video("video-b"),
+                    audio_track("audio"),
+                ],
+            )
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateManager::new(
+            &mut Tokio::Global,
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        tracking
+            .activate_and_compile(&state, &gid, 7, 0, vec!["video-a".into(), "audio".into()])
+            .await
+            .unwrap();
+
+        tracking
+            .activate_remote_track(&state, &gid, "video-b", 7, true)
+            .await
+            .unwrap();
+        let active = tracking.active_manifests(&gid, 7).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|(track, _)| track.id == "video-b"));
+        assert!(active.iter().any(|(track, _)| track.id == "audio"));
+
+        assert_eq!(
+            tracking
+                .activate_remote_track(&state, &gid, "video-a", 7, false)
+                .await,
+            Err(TrackingError::InvalidSelection)
+        );
+        let active = tracking.active_manifests(&gid, 7).await.unwrap();
+        assert!(active.iter().any(|(track, _)| track.id == "video-b"));
+        assert!(!active.iter().any(|(track, _)| track.id == "video-a"));
     }
 
     #[tokio::test]

@@ -31,7 +31,7 @@ impl TranscodingProfile for H264TransmuxProfile {
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
+            format!("{:.6}", ctx.output_ctx.start_time()),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -76,14 +76,17 @@ impl TranscodingProfile for H264TransmuxProfile {
 
         args.append(&mut vec![
             "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
+            format!("{:.9}", ctx.output_ctx.segment_duration()),
         ]);
 
         args.append(&mut get_discont_flags(&ctx));
 
         args.append(&mut vec![
             "-force_key_frames".into(),
-            format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
+            format!(
+                "expr:gte(t,n_forced*{:.9})",
+                ctx.output_ctx.segment_duration()
+            ),
         ]);
 
         args.append(&mut vec!["-hls_segment_type".into(), 1.to_string()]);
@@ -153,7 +156,7 @@ impl TranscodingProfile for H264TranscodeProfile {
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
+            format!("{:.6}", ctx.output_ctx.start_time()),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -164,6 +167,19 @@ impl TranscodingProfile for H264TranscodeProfile {
             "-preset".into(),
             "veryfast".into(),
         ];
+
+        if let Some(duration) = ctx.output_ctx.media_duration {
+            args.push("-t".into());
+            args.push(format!("{duration:.6}"));
+        }
+        if ctx.output_ctx.force_cfr {
+            args.extend([
+                "-fps_mode".into(),
+                "cfr".into(),
+                "-r".into(),
+                format!("{:.12}", ctx.input_ctx.fps),
+            ]);
+        }
 
         if let Some(filter) = browser_h264_filter(&ctx) {
             args.push("-vf".into());
@@ -197,11 +213,24 @@ impl TranscodingProfile for H264TranscodeProfile {
         if let Some(bitrate) = ctx.output_ctx.bitrate {
             args.push("-b:v".into());
             args.push(bitrate.to_string());
+            if ctx.output_ctx.force_cfr {
+                // The remote HLS master is published before this lazy rendition is encoded.
+                // Bound the encoder so its advertised peak can be derived from the encoding
+                // contract instead of incorrectly treating the target average as a peak.
+                args.push("-maxrate".into());
+                args.push(bitrate.to_string());
+                args.push("-bufsize".into());
+                args.push(bitrate.div_ceil(2).to_string());
+            }
         }
 
         args.append(&mut vec![
             "-vsync".into(),
-            "passthrough".into(),
+            if ctx.output_ctx.force_cfr {
+                "cfr".into()
+            } else {
+                "passthrough".into()
+            },
             "-avoid_negative_ts".into(),
             "make_non_negative".into(),
             "-max_muxing_queue_size".into(),
@@ -234,11 +263,14 @@ impl TranscodingProfile for H264TranscodeProfile {
         args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
         args.append(&mut vec![
             "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
+            format!("{:.9}", ctx.output_ctx.segment_duration()),
         ]);
         args.append(&mut vec![
             "-force_key_frames".into(),
-            format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
+            format!(
+                "expr:gte(t,n_forced*{:.9})",
+                ctx.output_ctx.segment_duration()
+            ),
         ]);
 
         args.append(&mut vec!["-hls_segment_type".into(), 1.to_string()]);
@@ -595,6 +627,24 @@ mod tests {
         assert_eq!(value_after(&args, "-color_trc"), Some("bt709"));
         assert_eq!(value_after(&args, "-color_primaries"), Some("bt709"));
         assert_eq!(value_after(&args, "-color_range"), Some("tv"));
+    }
+
+    #[test]
+    fn remote_hls_transcode_uses_one_clock_aligned_cfr_contract() {
+        let mut context = browser_h264_context(false);
+        context.input_ctx.fps = 24_000.0 / 1_001.0;
+        context.output_ctx.force_cfr = true;
+        context.output_ctx.hls_segment_duration = Some(5.005);
+        let args = H264TranscodeProfile.build(context).unwrap();
+        assert_eq!(value_after(&args, "-fps_mode"), Some("cfr"));
+        assert_eq!(value_after(&args, "-vsync"), Some("cfr"));
+        assert_eq!(value_after(&args, "-hls_time"), Some("5.005000000"));
+        assert_eq!(value_after(&args, "-maxrate"), Some("10000000"));
+        assert_eq!(value_after(&args, "-bufsize"), Some("5000000"));
+        assert_eq!(
+            value_after(&args, "-force_key_frames"),
+            Some("expr:gte(t,n_forced*5.005000000)")
+        );
     }
 
     #[test]

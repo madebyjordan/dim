@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use dim_core::core::StateManager;
 use dim_core::stream_tracking::{
-    ContentType, PlannedProfile, PlannedTrack, StreamTracking, VirtualManifest,
+    ContentType, PlannedProfile, PlannedTrack, RemotePlaybackState, StreamTracking, VirtualManifest,
 };
 use dim_core::streaming::codec::{
     audio_capability_request, audio_codec_descriptor, audio_remux_supported, capability_request,
@@ -245,7 +245,19 @@ fn build_tracks(
         .ok_or_else(|| {
             dim_core::errors::StreamingErrors::InvalidMetadata("duration is missing".into())
         })?;
-    let frame_rate = video.frame_rate().unwrap_or(30);
+    let precise_duration = video
+        .duration
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .or_else(|| info.get_precise_duration())
+        .ok_or_else(|| {
+            dim_core::errors::StreamingErrors::InvalidMetadata(
+                "precise video duration is missing".into(),
+            )
+        })?;
+    let precise_frame_rate = video.precise_frame_rate().unwrap_or(30.0);
+    let frame_rate = precise_frame_rate.round().max(1.0) as u64;
     let source_codec_descriptor = codec_descriptor(&video);
     let source_is_hdr = is_hdr(&video);
     let mut plan = plan_video_for_target(
@@ -312,6 +324,12 @@ fn build_tracks(
                 .set_args([("width", width), ("height", height)])
                 .set_is_default(direct_is_default)
                 .set_target_duration(10)
+                .set_frame_rate(Some(precise_frame_rate))
+                .set_video_range(Some(match video.color_transfer.as_deref() {
+                    Some("smpte2084") => "PQ",
+                    Some("arib-std-b67") => "HLG",
+                    _ => "SDR",
+                }))
                 .set_label(direct_play_label(height, stream_bitrate)),
             context,
             profile: PlannedProfile::DirectVideo,
@@ -335,8 +353,13 @@ fn build_tracks(
             && (is_preferred_resolution || first_transcode && !preferred_resolution_available);
         assigned_default |= is_default;
         let mut input_ctx: nightfall::profiles::InputCtx = video.clone().into();
-        input_ctx.fps = frame_rate as f64;
+        input_ctx.fps = precise_frame_rate;
         let avc_level = get_avc1_tag(target_width, quality.height, quality.bitrate, frame_rate);
+        let segment_durations = if target == PlaybackTargetKind::Airplay {
+            cfr_video_segment_durations(precise_duration, precise_frame_rate, 5.0)?
+        } else {
+            Vec::new()
+        };
         let context = ProfileContext {
             file: media.target_file.clone(),
             input_ctx,
@@ -357,6 +380,11 @@ fn build_tracks(
                     .then(|| video.color_transfer.clone())
                     .flatten(),
                 hdr_peak_nits: source_is_hdr.then(|| hdr_peak_nits(&video)).flatten(),
+                media_duration: (target == PlaybackTargetKind::Airplay).then_some(precise_duration),
+                force_cfr: target == PlaybackTargetKind::Airplay,
+                segment_durations: (!segment_durations.is_empty())
+                    .then(|| std::sync::Arc::new(segment_durations.clone())),
+                hls_segment_duration: segment_durations.first().copied(),
                 ..Default::default()
             },
             ..Default::default()
@@ -366,9 +394,15 @@ fn build_tracks(
                 .set_mime("video/mp4")
                 .set_duration(Some(duration))
                 .set_codecs(avc_level.to_string())
-                .set_bandwidth(quality.bitrate)
+                .set_bandwidth(hls_transcode_peak_bandwidth(quality.bitrate))
+                // The master is intentionally available before lazy encoding. An exact
+                // average is not known yet, and AVERAGE-BANDWIDTH is optional in HLS.
+                .set_average_bandwidth(0)
                 .set_args([("width", target_width), ("height", quality.height)])
                 .set_is_default(is_default)
+                .set_frame_rate(Some(precise_frame_rate))
+                .set_video_range(Some("SDR"))
+                .set_segment_durations(segment_durations)
                 .set_label(quality_to_label(
                     quality.bitrate,
                     quality.height,
@@ -396,6 +430,17 @@ fn build_tracks(
             .as_deref()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
+        let audio_duration = audio
+            .duration
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .or_else(|| info.get_precise_duration())
+            .ok_or_else(|| {
+                dim_core::errors::StreamingErrors::InvalidMetadata(
+                    "precise audio duration is missing".into(),
+                )
+            })?;
         let audio_plan = plan_audio_for_target(
             AudioSource {
                 stream_index: audio.index,
@@ -430,6 +475,11 @@ fn build_tracks(
         };
         let language = audio.get_language();
         let is_default = info.get_primary("audio") == Some(audio);
+        let segment_durations = if target == PlaybackTargetKind::Airplay && !preserve {
+            aac_segment_durations(audio_duration, 48_000, 5.0)?
+        } else {
+            Vec::new()
+        };
         let context = ProfileContext {
             file: media.target_file.clone(),
             input_ctx: audio.clone().into(),
@@ -446,12 +496,19 @@ fn build_tracks(
                 } else {
                     output.channels
                 },
+                audio_sample_rate: (target == PlaybackTargetKind::Airplay && !preserve)
+                    .then_some(48_000),
                 audio_channel_layout: (!preserve).then(|| output.layout.into()),
                 audio_filter: if preserve {
                     None
                 } else {
                     output.filter.map(Into::into)
                 },
+                media_duration: (target == PlaybackTargetKind::Airplay && !preserve)
+                    .then_some(audio_duration),
+                segment_durations: (!segment_durations.is_empty())
+                    .then(|| std::sync::Arc::new(segment_durations.clone())),
+                hls_segment_duration: segment_durations.first().copied(),
                 ..Default::default()
             },
             ..Default::default()
@@ -482,11 +539,29 @@ fn build_tracks(
                     .set_mime("audio/mp4")
                     .set_duration(Some(duration))
                     .set_codecs(manifest_codec)
-                    .set_bandwidth(if preserve { source_bitrate } else { bitrate })
+                    .set_bandwidth(if preserve {
+                        source_bitrate
+                    } else if target == PlaybackTargetKind::Airplay {
+                        hls_transcode_peak_bandwidth(bitrate)
+                    } else {
+                        bitrate
+                    })
+                    .set_average_bandwidth(if target == PlaybackTargetKind::Airplay && !preserve {
+                        0
+                    } else if preserve {
+                        source_bitrate
+                    } else {
+                        bitrate
+                    })
                     .set_is_default(is_default)
                     .set_label(label)
                     .set_lang(language)
                     .set_audio_channels(Some(manifest_channels));
+                let manifest = if target == PlaybackTargetKind::Airplay && !preserve {
+                    manifest.set_segment_durations(segment_durations)
+                } else {
+                    manifest
+                };
                 if preserve {
                     manifest.set_direct()
                 } else {
@@ -549,6 +624,90 @@ fn build_tracks(
         });
     }
     Ok((tracks, plan))
+}
+
+fn cfr_video_segment_durations(
+    duration: f64,
+    frame_rate: f64,
+    target: f64,
+) -> Result<Vec<f64>, DimErrorWrapper> {
+    if !duration.is_finite()
+        || duration <= 0.0
+        || !frame_rate.is_finite()
+        || frame_rate <= 0.0
+        || !target.is_finite()
+        || target <= 0.0
+    {
+        return Err(dim_core::errors::StreamingErrors::InvalidMetadata(
+            "invalid HLS video timing metadata".into(),
+        )
+        .into());
+    }
+    let total_frames = (duration * frame_rate).round().max(1.0) as u64;
+    let cadence_frames = (target * frame_rate).ceil().max(1.0) as u64;
+    let mut durations = Vec::new();
+    let mut previous = 0_u64;
+    while previous < total_frames {
+        let boundary = previous.saturating_add(cadence_frames).min(total_frames);
+        if boundary <= previous {
+            return Err(dim_core::errors::StreamingErrors::InvalidMetadata(
+                "non-advancing HLS video timeline".into(),
+            )
+            .into());
+        }
+        durations.push((boundary - previous) as f64 / frame_rate);
+        previous = boundary;
+    }
+    Ok(durations)
+}
+
+/// A remote HLS rendition is advertised before its lazy encoder starts. The video encoder uses
+/// `maxrate = target` with a half-second VBV buffer, so over a five-second HLS window its encoded
+/// payload is bounded to 110% of target. Reserve a further 10% for fMP4/AAC container overhead and
+/// integer rounding instead of claiming that the target average itself is the peak segment rate.
+fn hls_transcode_peak_bandwidth(target: u64) -> u64 {
+    target.saturating_mul(6).div_ceil(5)
+}
+
+fn aac_segment_durations(
+    duration: f64,
+    sample_rate: u64,
+    target: f64,
+) -> Result<Vec<f64>, DimErrorWrapper> {
+    if !duration.is_finite()
+        || duration <= 0.0
+        || sample_rate == 0
+        || !target.is_finite()
+        || target <= 0.0
+    {
+        return Err(dim_core::errors::StreamingErrors::InvalidMetadata(
+            "invalid HLS audio timing metadata".into(),
+        )
+        .into());
+    }
+    const AAC_FRAME_SAMPLES: f64 = 1024.0;
+    // FFmpeg's native AAC encoder contributes one encoded frame of delay when output is bounded
+    // with -t. Interior HLS boundaries are whole AAC frames; the final fragment carries the
+    // remaining presentation duration.
+    let total = duration + AAC_FRAME_SAMPLES / sample_rate as f64;
+    let mut durations = Vec::new();
+    let mut previous = 0.0;
+    let cadence_frames = (target * sample_rate as f64 / AAC_FRAME_SAMPLES)
+        .ceil()
+        .max(1.0);
+    let cadence = cadence_frames * AAC_FRAME_SAMPLES / sample_rate as f64;
+    while previous + 0.000_000_5 < total {
+        let boundary = (previous + cadence).min(total);
+        if boundary <= previous {
+            return Err(dim_core::errors::StreamingErrors::InvalidMetadata(
+                "non-advancing HLS audio timeline".into(),
+            )
+            .into());
+        }
+        durations.push(boundary - previous);
+        previous = boundary;
+    }
+    Ok(durations)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -625,52 +784,122 @@ pub struct RemoteAccessParams {
     token: String,
 }
 
+#[derive(Deserialize)]
+pub struct RemoteRouteState {
+    state: RemotePlaybackState,
+}
+
+pub async fn update_remote_route_state(
+    State(AppState {
+        stream_tracking, ..
+    }): State<AppState>,
+    Path(gid): Path<String>,
+    Extension(user): Extension<User>,
+    Json(state): Json<RemoteRouteState>,
+) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let gid =
+        Uuid::parse_str(&gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
+    stream_tracking
+        .set_remote_playback_state(&gid, user.id.get(), state.state)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_remote_playback_status(
+    State(AppState {
+        stream_tracking, ..
+    }): State<AppState>,
+    Path(gid): Path<String>,
+    Extension(user): Extension<User>,
+) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let gid =
+        Uuid::parse_str(&gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
+    Ok(Json(
+        stream_tracking
+            .remote_playback_status(&gid, user.id.get())
+            .await?,
+    ))
+}
+
 fn compile_remote_master(
     tracks: &[VirtualManifest],
     gid: Uuid,
     token: &str,
 ) -> Result<String, dim_core::errors::StreamingErrors> {
-    let video = tracks
+    let videos = tracks
         .iter()
-        .find(|track| track.content_type == ContentType::Video && track.is_default)
-        .or_else(|| {
-            tracks
-                .iter()
-                .find(|track| track.content_type == ContentType::Video)
+        .filter(|track| {
+            track.content_type == ContentType::Video && !track.segment_durations.is_empty()
         })
-        .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+        .collect::<Vec<_>>();
+    if videos.is_empty() {
+        return Err(dim_core::errors::StreamingErrors::InvalidRequest);
+    }
     let audio = tracks
         .iter()
-        .find(|track| track.content_type == ContentType::Audio && track.is_default)
+        .find(|track| {
+            track.content_type == ContentType::Audio
+                && track.is_default
+                && !track.segment_durations.is_empty()
+        })
         .or_else(|| {
-            tracks
-                .iter()
-                .find(|track| track.content_type == ContentType::Audio)
+            tracks.iter().find(|track| {
+                track.content_type == ContentType::Audio && !track.segment_durations.is_empty()
+            })
         });
     let audio_group = audio.map(|track| {
         format!(
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{}\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"{}\",URI=\"/api/v1/remote/{gid}/{}/index.m3u8?token={token}\"\n",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio-aac-stereo\",NAME=\"{}\",LANGUAGE=\"{}\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"{}\",URI=\"/api/v1/remote/{gid}/{}/index.m3u8?token={token}\"\n",
             track.label.replace('"', ""),
+            track.lang.as_deref().unwrap_or("und").replace('"', ""),
             track.audio_channels.unwrap_or(2),
             track.id,
         )
     });
-    let codecs = audio
-        .map(|track| format!("{},{}", video.codecs, track.codecs))
-        .unwrap_or_else(|| video.codecs.clone());
-    let bandwidth = video.bandwidth + audio.map(|track| track.bandwidth).unwrap_or(0);
-    let resolution = video
-        .args
-        .get("width")
-        .zip(video.args.get("height"))
-        .map(|(width, height)| format!(",RESOLUTION={width}x{height}"))
-        .unwrap_or_default();
-    let audio_attribute = audio.map(|_| ",AUDIO=\"audio\"").unwrap_or_default();
-    Ok(format!(
-        "#EXTM3U\n#EXT-X-VERSION:7\n{}#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codecs}\"{resolution}{audio_attribute}\n/api/v1/remote/{gid}/{}/index.m3u8?token={token}\n",
-        audio_group.unwrap_or_default(),
-        video.id,
-    ))
+    let mixed_video_range = videos
+        .iter()
+        .any(|track| track.video_range.as_deref() != Some("SDR"));
+    let mut body = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n{}",
+        audio_group.unwrap_or_default()
+    );
+    for video in videos {
+        let codecs = audio
+            .map(|track| format!("{},{}", video.codecs, track.codecs))
+            .unwrap_or_else(|| video.codecs.clone());
+        let audio_bandwidth = audio.map(|track| track.bandwidth).unwrap_or(0);
+        let audio_average = audio.map(|track| track.average_bandwidth).unwrap_or(0);
+        let bandwidth = video.bandwidth.saturating_add(audio_bandwidth);
+        let average_bandwidth = video.average_bandwidth.saturating_add(audio_average);
+        let (width, height) = video
+            .args
+            .get("width")
+            .zip(video.args.get("height"))
+            .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+        let frame_rate = video
+            .frame_rate
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+        let video_range = if mixed_video_range {
+            format!(
+                ",VIDEO-RANGE={}",
+                video.video_range.as_deref().unwrap_or("SDR")
+            )
+        } else {
+            String::new()
+        };
+        let audio_attribute = audio
+            .map(|_| ",AUDIO=\"audio-aac-stereo\"")
+            .unwrap_or_default();
+        let average_attribute = (average_bandwidth > 0)
+            .then(|| format!(",AVERAGE-BANDWIDTH={average_bandwidth}"))
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{average_attribute},CODECS=\"{codecs}\",RESOLUTION={width}x{height},FRAME-RATE={frame_rate:.3}{video_range}{audio_attribute},CLOSED-CAPTIONS=NONE\n/api/v1/remote/{gid}/{}/index.m3u8?token={token}\n",
+            video.id,
+        ));
+    }
+    Ok(body)
 }
 
 fn compile_remote_media_playlist(
@@ -678,21 +907,28 @@ fn compile_remote_media_playlist(
     gid: Uuid,
     token: &str,
 ) -> Result<String, dim_core::errors::StreamingErrors> {
-    let duration = track
-        .duration
-        .filter(|duration| *duration > 0)
-        .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)? as u64;
-    let segment_duration = u64::from(track.target_duration.max(1));
-    let segment_count = duration.div_ceil(segment_duration);
+    if track.segment_durations.is_empty()
+        || track
+            .segment_durations
+            .iter()
+            .any(|duration| !duration.is_finite() || *duration <= 0.0)
+    {
+        return Err(dim_core::errors::StreamingErrors::InvalidRequest);
+    }
+    let target_duration = track
+        .segment_durations
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .round()
+        .max(1.0) as u64;
     let mut body = format!(
-        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{segment_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"/api/v1/remote/{gid}/{}/init.mp4?token={token}\"\n",
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"/api/v1/remote/{gid}/{}/init.mp4?token={token}\"\n",
         track.id,
     );
-    for index in 0..segment_count {
-        let elapsed = index * segment_duration;
-        let length = (duration - elapsed).min(segment_duration);
+    for (index, length) in track.segment_durations.iter().enumerate() {
         body.push_str(&format!(
-            "#EXTINF:{length}.000,\n/api/v1/remote/{gid}/{}/{index}.m4s?token={token}\n",
+            "#EXTINF:{length:.6},\n/api/v1/remote/{gid}/{}/{index}.m4s?token={token}\n",
             track.id,
         ));
     }
@@ -725,9 +961,7 @@ pub async fn return_remote_master(
 
 pub async fn return_remote_media_playlist(
     State(AppState {
-        state,
-        stream_tracking,
-        ..
+        stream_tracking, ..
     }): State<AppState>,
     Path((gid, public_id)): Path<(String, String)>,
     Query(params): Query<RemoteAccessParams>,
@@ -737,18 +971,18 @@ pub async fn return_remote_media_playlist(
     let owner = stream_tracking
         .authenticate_remote(&gid, &params.token)
         .await?;
-    let (_, process_id) = stream_tracking
-        .remote_track(&gid, owner, &public_id)
-        .await?;
-    if process_id.is_none() {
-        stream_tracking
-            .activate_public_track(&state, &public_id, owner)
-            .await?;
-    }
     let (track, process_id) = stream_tracking
         .remote_track(&gid, owner, &public_id)
         .await?;
-    let _process_id = process_id.ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+    tracing::info!(
+        session_id = %gid,
+        owner,
+        track_id = public_id,
+        content_type = %track.content_type,
+        codec = track.codecs,
+        active = process_id.is_some(),
+        "Remote HLS rendition playlist inspected"
+    );
     let body = compile_remote_media_playlist(&track, gid, &params.token)?;
     Ok((
         [
@@ -760,14 +994,35 @@ pub async fn return_remote_media_playlist(
 }
 
 async fn resolve_remote_process(
+    state: &StateManager,
     tracking: &StreamTracking,
     gid: &str,
     public_id: &str,
     token: &str,
+    allow_video_replacement: bool,
 ) -> Result<(Uuid, i64, String), DimErrorWrapper> {
     let gid = Uuid::parse_str(gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
     let owner = tracking.authenticate_remote(&gid, token).await?;
-    let (_, process_id) = tracking.remote_track(&gid, owner, public_id).await?;
+    let (track, mut process_id) = tracking.remote_track(&gid, owner, public_id).await?;
+    if process_id.is_none() {
+        tracing::info!(
+            session_id = %gid,
+            owner,
+            track_id = public_id,
+            content_type = %track.content_type,
+            codec = track.codecs,
+            bandwidth = track.bandwidth,
+            width = track.args.get("width").map(String::as_str).unwrap_or(""),
+            height = track.args.get("height").map(String::as_str).unwrap_or(""),
+            video_range = track.video_range.as_deref().unwrap_or(""),
+            "HLS rendition activated on first media fetch"
+        );
+        process_id = Some(
+            tracking
+                .activate_remote_track(state, &gid, public_id, owner, allow_video_replacement)
+                .await?,
+        );
+    }
     Ok((
         gid,
         owner,
@@ -785,8 +1040,15 @@ pub async fn get_remote_init(
     Query(params): Query<RemoteAccessParams>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, DimErrorWrapper> {
-    let (gid, owner, process_id) =
-        resolve_remote_process(&stream_tracking, &gid, &public_id, &params.token).await?;
+    let (gid, owner, process_id) = resolve_remote_process(
+        &state,
+        &stream_tracking,
+        &gid,
+        &public_id,
+        &params.token,
+        true,
+    )
+    .await?;
     match timeout_segment(
         || state.chunk_init_request(process_id.clone(), 0),
         Duration::from_millis(100),
@@ -816,8 +1078,15 @@ pub async fn get_remote_chunk(
         .strip_suffix(".m4s")
         .and_then(|value| value.parse::<u32>().ok())
         .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
-    let (gid, owner, process_id) =
-        resolve_remote_process(&stream_tracking, &gid, &public_id, &params.token).await?;
+    let (gid, owner, process_id) = resolve_remote_process(
+        &state,
+        &stream_tracking,
+        &gid,
+        &public_id,
+        &params.token,
+        false,
+    )
+    .await?;
     match timeout_segment(
         || state.chunk_request(process_id.clone(), chunk_num),
         Duration::from_millis(100),
@@ -1252,6 +1521,9 @@ mod tests {
             .set_bandwidth(10_000_000)
             .set_duration(Some(12))
             .set_args([("width", 1920), ("height", 800)])
+            .set_frame_rate(Some(24.0))
+            .set_video_range(Some("SDR"))
+            .set_segment_durations(vec![5.0, 5.0, 2.0])
             .set_is_default(true);
         let audio = VirtualManifest::new("audio".into(), ContentType::Audio)
             .set_mime("audio/mp4")
@@ -1259,12 +1531,15 @@ mod tests {
             .set_bandwidth(128_000)
             .set_duration(Some(12))
             .set_audio_channels(Some(2))
+            .set_segment_durations(vec![5.0, 5.0, 2.0])
             .set_label("English (AAC Stereo)".into())
             .set_is_default(true);
         let gid = Uuid::nil();
         let master = compile_remote_master(&[video.clone(), audio], gid, "secret").unwrap();
         assert!(master.contains("CODECS=\"avc1.640028,mp4a.40.2\""));
         assert!(master.contains("RESOLUTION=1920x800"));
+        assert!(master.contains("AVERAGE-BANDWIDTH=10128000"));
+        assert!(master.contains("FRAME-RATE=24.000"));
         assert!(master.contains("CHANNELS=\"2\""));
         assert!(master.contains("/audio/index.m3u8?token=secret"));
         assert!(master.contains("/video/index.m3u8?token=secret"));
@@ -1272,9 +1547,66 @@ mod tests {
         let media = compile_remote_media_playlist(&video, gid, "secret").unwrap();
         assert!(media.contains("#EXT-X-MAP:URI="));
         assert_eq!(media.matches("#EXTINF:").count(), 3);
-        assert!(media.contains("#EXTINF:2.000,"));
+        assert!(media.contains("#EXTINF:2.000000,"));
         assert!(media.ends_with("#EXT-X-ENDLIST\n"));
         assert_eq!(media.matches("token=secret").count(), 4);
+    }
+
+    #[test]
+    fn hls_lazy_transcodes_use_a_peak_envelope_and_omit_unproven_average() {
+        assert_eq!(hls_transcode_peak_bandwidth(5_000_000), 6_000_000);
+        let video = VirtualManifest::new("video".into(), ContentType::Video)
+            .set_codecs("avc1.640028")
+            .set_bandwidth(hls_transcode_peak_bandwidth(5_000_000))
+            .set_average_bandwidth(0)
+            .set_args([("width", 1280), ("height", 720)])
+            .set_frame_rate(Some(24.0))
+            .set_segment_durations(vec![5.0]);
+        let master = compile_remote_master(&[video], Uuid::nil(), "token").unwrap();
+        assert!(master.contains("BANDWIDTH=6000000"));
+        assert!(!master.contains("AVERAGE-BANDWIDTH"));
+    }
+
+    #[test]
+    fn hls_master_signals_mixed_codec_and_dynamic_range_candidates() {
+        let source = VirtualManifest::new("source".into(), ContentType::Video)
+            .set_direct()
+            .set_mime("video/mp4")
+            .set_codecs("av01.0.12M.10.0.110.09.16.09.0")
+            .set_bandwidth(11_618_576)
+            .set_duration(Some(12))
+            .set_args([("width", 3840), ("height", 1600)])
+            .set_frame_rate(Some(23.976))
+            .set_segment_durations(vec![5.005, 5.005, 1.99])
+            .set_video_range(Some("PQ"));
+        let fallback = VirtualManifest::new("fallback".into(), ContentType::Video)
+            .set_mime("video/mp4")
+            .set_codecs("avc1.640033")
+            .set_bandwidth(11_618_576)
+            .set_duration(Some(12))
+            .set_args([("width", 3840), ("height", 1600)])
+            .set_frame_rate(Some(23.976))
+            .set_segment_durations(vec![5.005, 5.005, 1.99])
+            .set_video_range(Some("SDR"));
+        let audio = VirtualManifest::new("audio".into(), ContentType::Audio)
+            .set_mime("audio/mp4")
+            .set_codecs("mp4a.40.2")
+            .set_bandwidth(128_000)
+            .set_duration(Some(12))
+            .set_audio_channels(Some(2))
+            .set_segment_durations(vec![5.013333, 4.992, 1.994667])
+            .set_lang(Some("eng".into()))
+            .set_label("English (AAC Stereo)".into())
+            .set_is_default(true);
+
+        let master = compile_remote_master(&[source, fallback, audio], Uuid::nil(), "token")
+            .expect("multivariant master");
+        assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 2);
+        assert!(master.contains("VIDEO-RANGE=PQ"));
+        assert!(master.contains("VIDEO-RANGE=SDR"));
+        assert!(master.contains("CODECS=\"av01.0.12M.10.0.110.09.16.09.0,mp4a.40.2\""));
+        assert!(master.contains("CODECS=\"avc1.640033,mp4a.40.2\""));
+        assert!(master.contains("LANGUAGE=\"eng\""));
     }
 
     #[test]
@@ -1283,6 +1615,54 @@ mod tests {
         assert_eq!(fallback_audio_bitrate(2), 128_000);
         assert_eq!(fallback_audio_bitrate(6), 384_000);
         assert_eq!(fallback_audio_bitrate(8), 512_000);
+    }
+
+    #[test]
+    fn hls_video_timeline_follows_the_output_frame_clock() {
+        let timeline = cfr_video_segment_durations(12.262, 24_000.0 / 1_001.0, 5.0).unwrap();
+        assert_eq!(timeline.len(), 3);
+        assert!((timeline[0] - 5.005).abs() < 0.000_001);
+        assert!((timeline[1] - 5.005).abs() < 0.000_001);
+        assert!((timeline[2] - 2.25225).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn hls_aac_timeline_follows_whole_codec_frames() {
+        let timeline = aac_segment_durations(12.3, 48_000, 5.0).unwrap();
+        assert_eq!(timeline.len(), 3);
+        assert!((timeline[0] - 5.013333333).abs() < 0.000_001);
+        assert!((timeline[1] - 5.013333333).abs() < 0.000_001);
+        assert!((timeline[2] - 2.294666667).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn hls_refuses_a_representation_without_a_proven_timeline() {
+        let video = VirtualManifest::new("video".into(), ContentType::Video)
+            .set_mime("video/mp4")
+            .set_codecs("avc1.640028")
+            .set_bandwidth(1_000_000)
+            .set_args([("width", 1280), ("height", 720)])
+            .set_frame_rate(Some(24.0));
+        assert!(compile_remote_media_playlist(&video, Uuid::nil(), "token").is_err());
+    }
+
+    #[test]
+    fn hls_master_omits_unproven_source_packaging_but_keeps_valid_fallbacks() {
+        let source = VirtualManifest::new("source".into(), ContentType::Video)
+            .set_direct()
+            .set_codecs("avc1.640028")
+            .set_bandwidth(8_000_000)
+            .set_args([("width", 1920), ("height", 1080)])
+            .set_frame_rate(Some(24.0));
+        let fallback = VirtualManifest::new("fallback".into(), ContentType::Video)
+            .set_codecs("avc1.64001f")
+            .set_bandwidth(5_000_000)
+            .set_args([("width", 1280), ("height", 720)])
+            .set_frame_rate(Some(24.0))
+            .set_segment_durations(vec![5.0, 5.0]);
+        let master = compile_remote_master(&[source, fallback], Uuid::nil(), "token").unwrap();
+        assert!(!master.contains("/source/index.m3u8"));
+        assert!(master.contains("/fallback/index.m3u8"));
     }
 
     #[test]

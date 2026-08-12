@@ -9,8 +9,44 @@ use dim_database::DbConnection;
 use crate::error::REQUEST_ID_HEADER;
 use crate::DimErrorWrapper;
 use dim_core::settings::SettingsStore;
+use dim_core::stream_tracking::{RemoteHlsStage, RemotePlaybackState, RemoteRequestAttribution};
+use uuid::Uuid;
+
+fn classify_hls_request_origin(
+    playback_state: Option<RemotePlaybackState>,
+    peer_ip: Option<std::net::IpAddr>,
+    host_ip: Option<std::net::IpAddr>,
+    user_agent: &str,
+) -> RemoteRequestAttribution {
+    match playback_state {
+        Some(RemotePlaybackState::Prepared | RemotePlaybackState::HandoffRequested) | None => {
+            RemoteRequestAttribution::SenderPreflight
+        }
+        Some(
+            RemotePlaybackState::HandoffStalled
+            | RemotePlaybackState::Failed
+            | RemotePlaybackState::Disconnected,
+        ) => RemoteRequestAttribution::DisconnectedOrStale,
+        Some(
+            RemotePlaybackState::WirelessRouteReported
+            | RemotePlaybackState::MediaDeliveryConfirmed,
+        ) => match (peer_ip, host_ip) {
+            (Some(peer), Some(host)) if peer != host => {
+                RemoteRequestAttribution::RemoteNetworkCandidate
+            }
+            (Some(_), Some(_))
+                if user_agent.contains("AppleCoreMedia") || user_agent.contains("AirPlay") =>
+            {
+                RemoteRequestAttribution::AppleMediaIntermediaryCandidate
+            }
+            (Some(_), Some(_)) => RemoteRequestAttribution::SenderOrLocalProxy,
+            _ => RemoteRequestAttribution::OriginUnresolved,
+        },
+    }
+}
 
 pub async fn trace_remote_playback<B>(
+    State(state): State<crate::AppState>,
     req: axum::http::Request<B>,
     next: axum::middleware::Next<B>,
 ) -> axum::response::Response {
@@ -31,35 +67,119 @@ pub async fn trace_remote_playback<B>(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("none")
         .to_owned();
+    let host_ip = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())
+        .and_then(|value| value.parse::<std::net::IpAddr>().ok());
+    let session_id = path
+        .strip_prefix("/api/v1/remote/")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let remote_playback_state = match session_id {
+        Some(gid) => state.stream_tracking.remote_playback_state(&gid).await,
+        None => None,
+    };
+    let request_attribution = classify_hls_request_origin(
+        remote_playback_state,
+        peer.map(|value| value.ip()),
+        host_ip,
+        &user_agent,
+    );
     let stage = if path.ends_with("/master.m3u8") {
-        "master_playlist"
+        RemoteHlsStage::MasterPlaylist
     } else if path.ends_with("/index.m3u8") {
-        "media_playlist"
+        RemoteHlsStage::MediaPlaylist
     } else if path.ends_with("/init.mp4") {
-        "init_fragment"
+        RemoteHlsStage::InitFragment
     } else if path.ends_with(".m4s") {
-        "media_segment"
+        RemoteHlsStage::MediaSegment
     } else {
-        "unknown"
+        RemoteHlsStage::Unknown
     };
 
     tracing::info!(
-        remote_stage = stage,
+        hls_stage = ?stage,
         remote_path = %path,
+        remote_playback_state = ?remote_playback_state,
+        request_attribution = ?request_attribution,
         peer = ?peer,
         user_agent = %user_agent,
         range = %range,
-        "Remote playback request started"
+        "HLS transport request started"
     );
     let response = next.run(req).await;
+    let successful = response.status().is_success();
     tracing::info!(
-        remote_stage = stage,
+        hls_stage = ?stage,
         remote_path = %path,
+        remote_playback_state = ?remote_playback_state,
+        request_attribution = ?request_attribution,
         peer = ?peer,
         status = %response.status(),
-        "Remote playback request finished"
+        "HLS transport request finished"
     );
+    if let Some(gid) = session_id {
+        state
+            .stream_tracking
+            .observe_remote_hls_response(&gid, stage, request_attribution, &path, successful)
+            .await;
+    }
     response
+}
+
+#[cfg(test)]
+mod remote_playback_tests {
+    use super::*;
+
+    #[test]
+    fn preflight_is_never_attributed_to_a_receiver() {
+        let sender = "192.168.1.160".parse().unwrap();
+        let receiver = "192.168.1.80".parse().unwrap();
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::Prepared),
+                Some(receiver),
+                Some(sender),
+                "AppleCoreMedia"
+            ),
+            RemoteRequestAttribution::SenderPreflight
+        );
+    }
+
+    #[test]
+    fn wireless_sender_proxy_and_direct_receiver_evidence_are_distinct() {
+        let sender = "192.168.1.160".parse().unwrap();
+        let receiver = "192.168.1.80".parse().unwrap();
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::WirelessRouteReported),
+                Some(sender),
+                Some(sender),
+                "Mozilla/5.0 Safari/605.1.15"
+            ),
+            RemoteRequestAttribution::SenderOrLocalProxy
+        );
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::WirelessRouteReported),
+                Some(receiver),
+                Some(sender),
+                "AppleCoreMedia/1.0"
+            ),
+            RemoteRequestAttribution::RemoteNetworkCandidate
+        );
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::WirelessRouteReported),
+                Some(sender),
+                Some(sender),
+                "AppleCoreMedia/1.0"
+            ),
+            RemoteRequestAttribution::AppleMediaIntermediaryCandidate
+        );
+    }
 }
 
 pub async fn request_id<B>(

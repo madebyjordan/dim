@@ -31,7 +31,7 @@ impl TranscodingProfile for AmfTranscodeProfile {
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            (ctx.output_ctx.start_num * ctx.output_ctx.target_gop).to_string(),
+            format!("{:.6}", ctx.output_ctx.start_time()),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
