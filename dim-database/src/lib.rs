@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
-use sqlx::{ConnectOptions, Row};
+use sqlx::{ConnectOptions, Connection, Row};
 use tracing::{info, instrument};
 
 use once_cell::sync::OnceCell;
@@ -50,6 +50,7 @@ lazy_static::lazy_static! {
 
 static __GLOBAL: OnceCell<DbConnection> = OnceCell::new();
 const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/");
+const SCAN_PROGRESS_MIGRATION: i64 = 20260816130000;
 
 /// How long SQLite waits for another connection to release a lock before returning `BUSY`.
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -103,7 +104,82 @@ pub async fn open_at(path: impl AsRef<std::path::Path>) -> sqlx::Result<DbConnec
 /// * `conn` - diesel connection
 async fn run_migrations(conn: &crate::DbConnection) -> Result<(), sqlx::migrate::MigrateError> {
     let mut lock = conn.writer().lock_owned().await;
+    apply_populated_scan_progress_migration(&mut lock).await?;
     MIGRATOR.run(&mut *lock).await
+}
+
+/// SQLite cannot add a column with `DEFAULT CURRENT_TIMESTAMP` to a table that already has rows.
+/// The released scan-progress migration is valid for new databases, so retain its checksum and
+/// pre-apply an equivalent, data-preserving form only for populated databases that have not yet
+/// recorded it. Runtime inserts provide the current timestamp explicitly on this compatibility
+/// schema; the constant fallback exists only to preserve the column's NOT NULL invariant.
+async fn apply_populated_scan_progress_migration(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == SCAN_PROGRESS_MIGRATION)
+        .expect("embedded scan-progress migration is missing");
+
+    let migration_table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if !migration_table_exists {
+        return Ok(());
+    }
+
+    let already_applied: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = ?)")
+            .bind(SCAN_PROGRESS_MIGRATION)
+            .fetch_one(&mut *conn)
+            .await?;
+    if already_applied {
+        return Ok(());
+    }
+
+    let scan_table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_scan')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if !scan_table_exists {
+        return Ok(());
+    }
+
+    let scan_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ingestion_scan")
+        .fetch_one(&mut *conn)
+        .await?;
+    if scan_count == 0 {
+        return Ok(());
+    }
+
+    let mut tx = conn.begin().await?;
+    sqlx::query("ALTER TABLE ingestion_scan ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'")
+        .execute(&mut tx)
+        .await?;
+    sqlx::query("ALTER TABLE ingestion_scan ADD COLUMN last_progress_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'")
+        .execute(&mut tx)
+        .await?;
+    sqlx::query("UPDATE ingestion_scan SET last_progress_at = CURRENT_TIMESTAMP")
+        .execute(&mut tx)
+        .await?;
+    sqlx::query("ALTER TABLE ingestion_scan ADD COLUMN processed INTEGER NOT NULL DEFAULT 0")
+        .execute(&mut tx)
+        .await?;
+    sqlx::query("CREATE INDEX ingestion_scan_active_progress_idx ON ingestion_scan(status, last_progress_at) WHERE status IN ('queued', 'running')")
+        .execute(&mut tx)
+        .await?;
+    sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, ?, TRUE, ?, 0)")
+        .bind(migration.version)
+        .bind(&*migration.description)
+        .bind(&*migration.checksum)
+        .execute(&mut tx)
+        .await?;
+    tx.commit().await?;
+
+    Ok(())
 }
 
 /// Refuse to start on referential or cross-library inconsistencies. This assessment deliberately

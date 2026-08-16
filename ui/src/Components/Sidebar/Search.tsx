@@ -13,7 +13,11 @@ import SearchIcon from "../../assets/Icons/Search";
 
 import "./Search.scss";
 
-function Search() {
+interface Props {
+  variant?: "sidebar" | "header";
+}
+
+function Search({ variant = "sidebar" }: Props) {
   const navigate = useNavigate();
 
   const searchBox = useRef<HTMLDivElement>(null);
@@ -21,16 +25,21 @@ function Search() {
 
   const [query, setQuery] = useState<string | null>(null);
   const [showResults, setShowResults] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
-  const handleClick = useCallback((e: MouseEvent) => {
-    if (searchBox.current) {
-      if (e.target instanceof Node && searchBox.current.contains(e.target)) {
-        setShowResults(true);
-      } else {
-        setShowResults(false);
+  const handleClick = useCallback(
+    (e: MouseEvent) => {
+      if (searchBox.current) {
+        if (e.target instanceof Node && searchBox.current.contains(e.target)) {
+          setShowResults(true);
+        } else {
+          setShowResults(false);
+          if (!query) setExpanded(false);
+        }
       }
-    }
-  }, []);
+    },
+    [query]
+  );
 
   useEffect(() => {
     window.addEventListener("click", handleClick);
@@ -55,12 +64,19 @@ function Search() {
 
         setQuery("");
         setShowResults(false);
+        if (variant === "header") setExpanded(false);
       }
     },
-    [navigate, query]
+    [navigate, query, variant]
   );
 
   const fullSearch = useCallback(() => {
+    if (!query && variant === "header") {
+      setExpanded(true);
+      inputBox.current?.focus();
+      return;
+    }
+
     if (query && query.length >= 1) {
       navigate({
         pathname: "/search",
@@ -69,11 +85,12 @@ function Search() {
 
       setQuery("");
       setShowResults(false);
+      if (variant === "header") setExpanded(false);
     }
-  }, [navigate, query]);
+  }, [navigate, query, variant]);
 
   return (
-    <div className="search-box" ref={searchBox}>
+    <div className={`search-box${expanded ? " expanded" : ""}`} ref={searchBox}>
       <div className="search-box-wrapper">
         <input
           ref={inputBox}
@@ -87,7 +104,7 @@ function Search() {
           placeholder="Search"
           type="search"
         />
-        <button onClick={fullSearch}>
+        <button type="button" aria-label="Search" onClick={fullSearch}>
           <SearchIcon />
         </button>
       </div>

@@ -268,6 +268,10 @@ main {
   &.shrunk {
     margin-left: 150px;
   }
+
+  &.eclipse-content {
+    margin-left: 0;
+  }
 }
 
 /*
@@ -323,6 +327,10 @@ main {
 
     &.shrunk {
       margin-left: 300px;
+    }
+
+    &.eclipse-content {
+      margin-left: 0;
     }
   }
 }

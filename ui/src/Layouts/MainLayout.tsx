@@ -1,11 +1,11 @@
 import { Outlet } from "react-router";
 
-import Sidebar from "../Components/Sidebar/Index";
+import Header from "../Components/Header/Index";
 
 const MainLayout = () => (
   <>
-    <Sidebar />
-    <main className="shrunk">
+    <Header />
+    <main className="eclipse-content">
       <Outlet />
     </main>
   </>

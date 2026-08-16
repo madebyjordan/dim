@@ -92,7 +92,7 @@ impl ScanRun {
         kind: &str,
     ) -> Result<i64, DatabaseError> {
         Ok(sqlx::query(
-            "INSERT INTO ingestion_scan (library_id, kind, status) VALUES (?, ?, 'queued')",
+            "INSERT INTO ingestion_scan (library_id, kind, status, last_progress_at) VALUES (?, ?, 'queued', CURRENT_TIMESTAMP)",
         )
         .bind(library_id)
         .bind(kind)
@@ -123,7 +123,7 @@ impl ScanRun {
                 .bind(id).execute(&mut *tx).await?;
             return Ok(id);
         }
-        let id = sqlx::query("INSERT INTO ingestion_scan (library_id, kind, status, stage, started_at) VALUES (?, ?, 'running', 'starting', CURRENT_TIMESTAMP)")
+        let id = sqlx::query("INSERT INTO ingestion_scan (library_id, kind, status, stage, started_at, last_progress_at) VALUES (?, ?, 'running', 'starting', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
             .bind(library_id)
             .bind(kind)
             .execute(&mut *tx)

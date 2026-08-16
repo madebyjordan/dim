@@ -1,4 +1,8 @@
-use crate::{get_conn_file, validate_integrity, SQLITE_BUSY_TIMEOUT};
+use crate::{
+    get_conn_file, open_file_pool, run_migrations, validate_integrity, MIGRATOR,
+    SQLITE_BUSY_TIMEOUT,
+};
+use sqlx::migrate::Migrate;
 use sqlx::Row;
 
 #[tokio::test]
@@ -123,4 +127,50 @@ async fn migration_indexes_serve_representative_query_paths() {
             "{query}: expected {expected_index}, got {details}"
         );
     }
+}
+
+#[tokio::test]
+async fn scan_progress_migration_preserves_existing_scan_history() {
+    const SCAN_PROGRESS_VERSION: i64 = 20260816130000;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("populated-scan.db");
+    let pool = open_file_pool(path.to_str().unwrap()).await.unwrap();
+
+    let mut writer = pool.writer().lock_owned().await;
+    writer.ensure_migrations_table().await.unwrap();
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version < SCAN_PROGRESS_VERSION)
+    {
+        writer.apply(migration).await.unwrap();
+    }
+    sqlx::query("INSERT INTO library(id, name, media_type) VALUES (1, 'existing', 'movie')")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO ingestion_scan(id, library_id, kind, status) VALUES (7, 1, 'full', 'queued')",
+    )
+    .execute(&mut *writer)
+    .await
+    .unwrap();
+    drop(writer);
+
+    run_migrations(&pool).await.unwrap();
+    // A second run verifies that the compatibility path recorded the released checksum expected
+    // by the normal migrator rather than inventing a parallel migration history.
+    run_migrations(&pool).await.unwrap();
+
+    let mut writer = pool.writer().lock_owned().await;
+    let row = sqlx::query(
+        "SELECT id, stage, last_progress_at, processed FROM ingestion_scan WHERE id = 7",
+    )
+    .fetch_one(&mut *writer)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i64, _>("id"), 7);
+    assert_eq!(row.get::<String, _>("stage"), "queued");
+    assert!(!row.get::<String, _>("last_progress_at").is_empty());
+    assert_eq!(row.get::<i64, _>("processed"), 0);
 }
