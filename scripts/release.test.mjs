@@ -248,6 +248,9 @@ test("a version tag triggers exactly one publishing workflow", () => {
   assert.equal((release.match(/gh release create/g) || []).length, 1);
   assert.match(release, /concurrency:/);
   assert.match(release, /cancel-in-progress: false/);
+  assert.match(release, /workflow_dispatch:/);
+  assert.match(release, /RELEASE_TAG:.*inputs\.tag.*github\.ref_name/);
+  assert.doesNotMatch(release, /cache: yarn/);
 });
 
 test("every workspace application crate inherits the canonical version", () => {
