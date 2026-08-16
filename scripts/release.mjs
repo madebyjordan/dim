@@ -39,6 +39,19 @@ export function nextVersion(current, bump) {
   return `${major}.${minor}.${patch}`;
 }
 
+export function latestStableVersion(releases) {
+  const stable = releases
+    .filter((release) => !release.isDraft && !release.isPrerelease)
+    .map((release) => release.tagName?.match(/^v(.+)$/)?.[1])
+    .filter((version) => version && STABLE_SEMVER.test(version))
+    .sort((left, right) => {
+      const a = left.split(".").map(Number);
+      const b = right.split(".").map(Number);
+      return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    });
+  return stable.at(-1);
+}
+
 export function updateCanonicalVersion(manifest, version) {
   const current = parseCanonicalVersion(manifest);
   return manifest.replace(
@@ -97,14 +110,24 @@ function assertReleaseMissing(repository, tag) {
   }
 }
 
-function assertReleaseExists(repository, tag) {
-  execute(
-    "gh",
-    ["release", "view", tag, "--repo", repository, "--json", "tagName"],
-    {
-      capture: true,
-    }
+function findLatestStableRelease(repository) {
+  const releases = JSON.parse(
+    output("gh", [
+      "release",
+      "list",
+      "--repo",
+      repository,
+      "--limit",
+      "100",
+      "--json",
+      "tagName,isDraft,isPrerelease",
+    ])
   );
+  const version = latestStableVersion(releases);
+  if (!version) {
+    throw new Error("No stable fork release exists; run release:initial first");
+  }
+  return version;
 }
 
 function assertTagMissing(remote, tag) {
@@ -115,14 +138,13 @@ function assertTagMissing(remote, tag) {
   }
 }
 
-function assertCurrentReleaseExists(remote, repository, version) {
+function assertReleaseTagExists(remote, version) {
   const tag = `v${version}`;
   if (!output("git", ["ls-remote", "--tags", remote, `refs/tags/${tag}`])) {
     throw new Error(
       `Base release tag ${tag} does not exist; run release:initial first`
     );
   }
-  assertReleaseExists(repository, tag);
 }
 
 function parseArguments(argv) {
@@ -158,6 +180,36 @@ function validateRelease() {
   execute("pnpm", ["release:validate"]);
 }
 
+function pendingFiles() {
+  const files = [
+    ...output("git", ["diff", "--name-only", "--relative"]).split("\n"),
+    ...output("git", ["diff", "--cached", "--name-only", "--relative"]).split(
+      "\n"
+    ),
+    ...output("git", ["ls-files", "--others", "--exclude-standard"]).split(
+      "\n"
+    ),
+  ].filter(Boolean);
+  return [...new Set(files)].sort();
+}
+
+function sameFiles(left, right) {
+  return (
+    left.length === right.length &&
+    left.every((file, index) => file === right[index])
+  );
+}
+
+function remoteBranchHead(remote, branch) {
+  const line = output("git", [
+    "ls-remote",
+    "--heads",
+    remote,
+    `refs/heads/${branch}`,
+  ]);
+  return line.split(/\s+/)[0];
+}
+
 export function main(argv = process.argv.slice(2)) {
   try {
     const { mode, dryRun } = parseArguments(argv);
@@ -167,25 +219,12 @@ export function main(argv = process.argv.slice(2)) {
     const manifestPath = resolve(root, "Cargo.toml");
     const currentManifest = readFileSync(manifestPath, "utf8");
     const currentVersion = parseCanonicalVersion(currentManifest);
-    const targetVersion =
-      mode === "initial" ? INITIAL_VERSION : nextVersion(currentVersion, mode);
-    const tag = `v${targetVersion}`;
-
-    console.log(`${dryRun ? "Dry run" : "Release"}: ${mode} -> ${tag}`);
-    console.log(
-      `Canonical version: Cargo.toml workspace.package.version (${currentVersion})`
-    );
 
     assertCommand("git");
     assertCommand("gh");
     assertCommand("pnpm");
     if (output("git", ["rev-parse", "--show-toplevel"]) !== root) {
       throw new Error(`Run the release from the repository root: ${root}`);
-    }
-    if (output("git", ["status", "--porcelain", "--untracked-files=all"])) {
-      throw new Error(
-        "Working tree is not clean; commit or stash every change before releasing"
-      );
     }
     const currentBranch = output("git", ["branch", "--show-current"]);
     if (currentBranch !== branch) {
@@ -209,17 +248,18 @@ export function main(argv = process.argv.slice(2)) {
       capture: true,
     });
     execute("git", ["fetch", "--prune", "--tags", remote]);
-    const head = output("git", ["rev-parse", "HEAD"]);
-    const remoteHead = output("git", ["rev-parse", expectedUpstream]);
     const divergence = output("git", [
       "rev-list",
       "--left-right",
       "--count",
       `HEAD...${expectedUpstream}`,
     ]);
-    if (head !== remoteHead || divergence !== "0\t0") {
+    const [localAhead, remoteAhead] = divergence.split(/\s+/).map(Number);
+    if (remoteAhead > 0) {
       throw new Error(
-        `HEAD must exactly match ${expectedUpstream}; divergence is ${divergence}`
+        localAhead > 0
+          ? `${branch} has diverged from ${expectedUpstream} (${localAhead} local-only, ${remoteAhead} remote-only commits); reconcile manually before releasing`
+          : `${branch} is behind ${expectedUpstream} by ${remoteAhead} commit(s); update it manually before releasing`
       );
     }
 
@@ -229,30 +269,48 @@ export function main(argv = process.argv.slice(2)) {
     if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) {
       throw new Error(`Invalid GitHub repository identifier: ${repository}`);
     }
+    const baseVersion =
+      mode === "initial" ? undefined : findLatestStableRelease(repository);
+    if (baseVersion) assertReleaseTagExists(remote, baseVersion);
+    const targetVersion =
+      mode === "initial" ? INITIAL_VERSION : nextVersion(baseVersion, mode);
+    const tag = `v${targetVersion}`;
+
+    console.log(`${dryRun ? "Dry run" : "Release"}: ${mode} -> ${tag}`);
+    console.log(
+      `Canonical version: Cargo.toml workspace.package.version (${currentVersion})`
+    );
+    if (baseVersion) console.log(`Latest stable fork release: v${baseVersion}`);
+    console.log(
+      `Remote ancestry: ${localAhead} local commit(s) ahead, 0 remote-only commits`
+    );
     assertTagMissing(remote, tag);
     assertReleaseMissing(repository, tag);
-    if (mode !== "initial")
-      assertCurrentReleaseExists(remote, repository, currentVersion);
     if (mode === "initial" && currentVersion !== INITIAL_VERSION) {
       console.log(`Version change: ${currentVersion} -> ${INITIAL_VERSION}`);
     }
 
+    const changedVersion = currentVersion !== targetVersion;
+    const versionFiles = changedVersion ? ["Cargo.lock", "Cargo.toml"] : [];
+    const filesToCommit = [
+      ...new Set([...pendingFiles(), ...versionFiles]),
+    ].sort();
+    if (!filesToCommit.length) {
+      throw new Error(
+        `Nothing to release: no pending project changes and canonical version is already ${targetVersion}`
+      );
+    }
+    console.log("Files to include in the release commit:");
+    for (const file of filesToCommit) console.log(`  ${file}`);
+
     console.log("Running release validation before any repository mutation...");
     validateRelease();
 
-    const changedVersion = currentVersion !== targetVersion;
-    const versionFiles = changedVersion ? ["Cargo.toml", "Cargo.lock"] : [];
+    console.log(`Release commit: chore: release ${tag}`);
+    console.log(`Push: HEAD -> ${expectedUpstream} (no force)`);
     console.log(
-      `Version files: ${
-        versionFiles.length
-          ? versionFiles.join(", ")
-          : "none (already synchronized)"
-      }`
+      `Tag after successful commit push: annotated ${tag} at the pushed release commit`
     );
-    console.log(
-      `Release commit: ${changedVersion ? `chore: release ${tag}` : "none"}`
-    );
-    console.log(`Tag: annotated ${tag} at ${head}`);
     console.log(`Workflow: ${RELEASE_WORKFLOW}`);
     console.log(
       `Artifacts: dim-${tag}-linux-x86_64.tar.gz and dim-${tag}-linux-x86_64.tar.gz.sha256`
@@ -268,41 +326,52 @@ export function main(argv = process.argv.slice(2)) {
     }
 
     if (changedVersion) {
+      const manifestBeforeMutation = readFileSync(manifestPath, "utf8");
+      if (manifestBeforeMutation !== currentManifest) {
+        throw new Error(
+          "Cargo.toml changed during validation; inspect it and retry"
+        );
+      }
       writeFileSync(
         manifestPath,
         updateCanonicalVersion(currentManifest, targetVersion)
       );
       execute("cargo", ["check", "--workspace", "--offline"]);
       verifyWorkspaceVersions(targetVersion);
-      const changed = output("git", ["diff", "--name-only"])
-        .split("\n")
-        .filter(Boolean);
-      const unexpected = changed.filter(
-        (file) => !["Cargo.toml", "Cargo.lock"].includes(file)
-      );
-      if (unexpected.length) {
-        throw new Error(
-          `Version synchronization changed unexpected files: ${unexpected.join(
-            ", "
-          )}`
-        );
-      }
-      execute("git", ["add", "Cargo.toml", "Cargo.lock"]);
-      execute("git", ["commit", "-m", `chore: release ${tag}`]);
     } else {
       verifyWorkspaceVersions(targetVersion);
     }
 
-    execute("git", ["tag", "-a", tag, "-m", `Dim ${tag}`]);
-    execute("git", [
-      "push",
-      "--atomic",
-      remote,
-      `HEAD:refs/heads/${branch}`,
-      `refs/tags/${tag}`,
-    ]);
+    const actualFiles = pendingFiles();
+    if (!sameFiles(actualFiles, filesToCommit)) {
+      throw new Error(
+        `Release file set changed during validation/version synchronization; expected [${filesToCommit.join(
+          ", "
+        )}], found [${actualFiles.join(", ")}]`
+      );
+    }
+    execute("git", ["add", "--all", "--", "."]);
+    execute("git", ["commit", "-m", `chore: release ${tag}`]);
+    const releaseCommit = output("git", ["rev-parse", "HEAD"]);
+    execute("git", ["push", remote, `HEAD:refs/heads/${branch}`]);
+    const pushedCommit = remoteBranchHead(remote, branch);
+    if (pushedCommit !== releaseCommit) {
+      throw new Error(
+        `${expectedUpstream} is ${
+          pushedCommit || "unreadable"
+        }, not release commit ${releaseCommit}; tag was not created`
+      );
+    }
+    execute("git", ["tag", "-a", tag, releaseCommit, "-m", `Dim ${tag}`]);
+    const taggedCommit = output("git", ["rev-list", "-n", "1", tag]);
+    if (taggedCommit !== releaseCommit) {
+      throw new Error(
+        `Tag ${tag} does not point at release commit ${releaseCommit}`
+      );
+    }
+    execute("git", ["push", remote, `refs/tags/${tag}`]);
     console.log(
-      `Pushed ${tag}; GitHub Actions will publish https://github.com/${repository}/releases/tag/${tag}`
+      `Pushed release commit ${releaseCommit} and ${tag}; GitHub Actions will publish https://github.com/${repository}/releases/tag/${tag}`
     );
   } catch (error) {
     console.error(`Release aborted: ${error.message}`);

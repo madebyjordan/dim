@@ -98,18 +98,23 @@ pnpm release:major -- --dry-run
 pnpm release:major
 ```
 
-The command requires a clean `master` checked out at exactly `origin/master`, authenticated `gh`
-and Git access to `origin`, Node/Corepack, pnpm, Rust, FFmpeg/FFprobe, and the native build
-dependencies listed above. Set `DIM_RELEASE_BRANCH` or `DIM_RELEASE_REMOTE` only when the fork's
-intended release branch or remote is intentionally different.
+The command must run on `master` tracking `origin/master`, with authenticated `gh` and Git access to
+`origin`, Node/Corepack, pnpm, Rust, FFmpeg/FFprobe, and the native build dependencies listed above.
+Pending tracked changes, non-ignored untracked files, and local commits ahead of `origin/master` are
+valid release inputs. Remote-only commits or a diverged branch abort; the command never pulls,
+merges, rebases, force-pushes, or overwrites remote history. Set `DIM_RELEASE_BRANCH` or
+`DIM_RELEASE_REMOTE` only when the fork's intended release branch or remote is intentionally
+different.
 
-Before mutation it fetches tags, verifies branch/upstream synchronization and tag/Release
-availability, then runs the same frontend and Rust validation used by the release workflow. A real
-release updates `Cargo.toml` and `Cargo.lock` if needed, creates `chore: release vX.Y.Z`, creates an
-annotated tag, and atomically pushes the commit and tag. The one tag-triggered workflow builds the
-Linux x86_64 archive and checksum, publishes versioned Linux x86_64 GHCR tags, and creates the
-GitHub Release. Dry runs execute the same guards and validation but never modify repository or
-GitHub state.
+Before mutation it fetches tags, verifies remote ancestry and tag/Release availability, reports
+every file that will enter the release commit, and runs the same frontend and Rust validation used
+by the release workflow. A real release updates `Cargo.toml` and `Cargo.lock`, stages the current
+non-ignored project changes, and creates one `chore: release vX.Y.Z` commit. It pushes `master`
+without force and verifies the remote commit before creating an annotated tag on that exact commit
+and pushing the tag separately. The one tag-triggered workflow builds the Linux x86_64 archive and
+checksum, publishes versioned Linux x86_64 GHCR tags, and creates the GitHub Release. Dry runs
+execute the complete inspection and validation path but never modify files or the index, create a
+commit or tag, push, or publish anything.
 
 The release gate excludes two legacy scanner tests that can wait indefinitely on metadata/probe
 work: `test_construct_mediafile` and

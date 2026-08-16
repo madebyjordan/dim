@@ -2,4 +2,5 @@
 . "$(dirname "$0")/_/husky.sh"
 
 cd ui
-yarn run lint-staged & yarn run fmt
+corepack yarn run lint-staged
+corepack yarn run fmt
