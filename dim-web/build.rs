@@ -44,16 +44,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         git_value(&["rev-parse", "HEAD"], "unknown")
     );
 
-    if Path::new("../ui/build").exists() {
+    if Path::new("../eclipse/build").exists() {
         println!("cargo:rustc-cfg=feature=\"embed_ui\"");
     } else {
-        println!("cargo:warning=`ui/build` does not exist.");
-        println!(
-            "cargo:warning=If you wish to embed the webui, run `corepack yarn build` in `ui`."
-        );
+        println!("cargo:warning=`eclipse/build` does not exist.");
+        println!("cargo:warning=To embed Eclipse, run `corepack pnpm --dir eclipse build`.");
     }
 
-    println!("cargo:rerun-if-changed=../ui/build");
+    println!("cargo:rerun-if-changed=../eclipse/build");
     println!("cargo:rerun-if-changed=build.rs");
 
     Ok(())

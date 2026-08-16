@@ -28,12 +28,13 @@ Before submitting a change, run:
 ```sh
 pnpm test
 cargo fmt --all --check
-cd ui && corepack yarn prettier --check src && corepack yarn eslint --ext .js,.jsx,.ts,.tsx src
+corepack pnpm --dir eclipse exec prettier --check src
+corepack pnpm --dir eclipse check
 ```
 
-The commands after `pnpm test` are UI-internal formatting and lint checks, so they intentionally use
-the Yarn 4 version pinned in `ui/package.json` through Corepack. Normal branch CI additionally runs
-the two legacy scanner tests excluded from the deterministic root test command and release gate.
+The commands after `pnpm test` format and type-check the SvelteKit frontend. Normal branch CI
+additionally runs the two legacy scanner tests excluded from the deterministic root test command
+and release gate.
 
 ## Contributors
 Valerian G. (Lead Developer and maintainer) \

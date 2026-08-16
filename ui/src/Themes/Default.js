@@ -10,7 +10,7 @@ const Default = {
   primaryTextColor: "#fff",
   secondaryTextColor: "#ccc",
   tertiaryTextColor: "#aaa",
-  primaryColor: "#1a1a1a",
+  primaryColor: "#0d0d0d",
   secondaryColor: "#2a2a2a",
   tertiaryColor: "#3a3a3a",
   quaternaryColor: "#4a4a4a",

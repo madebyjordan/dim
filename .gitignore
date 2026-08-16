@@ -26,6 +26,8 @@ ui/.yarn/unplugged/
 ui/.yarn/build-state.yml
 ui/coverage
 ui/build
+eclipse/.svelte-kit
+eclipse/coverage
 
 npm-debug.log*
 yarn-debug.log*

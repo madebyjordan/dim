@@ -1,0 +1,6 @@
+packages:
+  - eclipse
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

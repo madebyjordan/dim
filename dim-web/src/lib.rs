@@ -286,10 +286,20 @@ fn settings_routes(AppState { .. }: AppState) -> Router<AppState> {
 async fn ws_handler(
     ws: axum::extract::WebSocketUpgrade,
     ConnectInfo(remote_address): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     State(AppState {
         conn, socket_tx, ..
     }): State<AppState>,
 ) -> Response {
+    let session_token = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                let (name, value) = cookie.trim().split_once('=')?;
+                (name == "dim_session" && !value.is_empty()).then(|| value.to_owned())
+            })
+        });
     ws.on_upgrade(move |websocket| async move {
         let (ws_tx, ws_rx) = websocket.split();
 
@@ -299,6 +309,7 @@ async fn ws_handler(
             Some(remote_address),
             conn,
             socket_tx,
+            session_token,
         )
         .await;
     })
@@ -371,8 +382,8 @@ pub fn build_router(app: AppState) -> Router {
         .merge(auth_routes(app.clone()))
         .merge(remote_stream_routes(app.clone()))
         .route("/images/*path", get(routes::statik::get_image))
-        .route("/", get(routes::statik::react_routes))
-        .route("/*path", get(routes::statik::react_routes))
+        .route("/", get(routes::statik::frontend_route))
+        .route("/*path", get(routes::statik::frontend_route))
         .route("/static/*path", get(routes::statik::dist_static))
         .route("/ws", get(ws_handler))
         .merge(protected)

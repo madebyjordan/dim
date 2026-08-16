@@ -5,7 +5,6 @@ use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::http::Uri;
-use axum::response::Html;
 use axum::response::IntoResponse;
 use axum::response::Response;
 
@@ -24,7 +23,7 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "embed_ui")] {
 
         #[derive(RustEmbed)]
-        #[folder = "../ui/build/"]
+        #[folder = "../eclipse/build/"]
         #[prefix = "/"]
         pub(self) struct Asset;
     } else {
@@ -45,12 +44,20 @@ cfg_if::cfg_if! {
     }
 }
 
-pub async fn react_routes() -> Result<impl IntoResponse, DimErrorWrapper> {
-    if let Some(x) = Asset::get("/index.html") {
-        Ok(Html(x.into_owned()).into_response())
-    } else {
-        Err(dim_core::errors::DimError::NotFoundError.into())
+pub async fn frontend_route(uri: Uri) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let path = uri.path();
+    if let Some(asset) = Asset::get(path) {
+        return embedded_asset(path, asset.into_owned());
     }
+    if let Some(index) = Asset::get("/index.html") {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .header("Cache-Control", "no-cache")
+            .body(body::boxed(Full::from(index.into_owned())))
+            .unwrap());
+    }
+    Err(dim_core::errors::DimError::NotFoundError.into())
 }
 
 #[derive(Deserialize)]
@@ -134,27 +141,80 @@ pub async fn get_image(
 }
 
 pub async fn dist_static(uri: Uri) -> Result<impl IntoResponse, DimErrorWrapper> {
-    let path = PathBuf::from(uri.path());
-    if let Some(y) = Asset::get(path.to_str().unwrap()) {
-        let mime = match path.extension().and_then(|x| x.to_str()) {
-            Some("js") => "application/javascript",
-            Some("map") => "application/json",
-            Some("css") => "text/css",
-            Some("woff2") => "font/woff2",
-            Some("png") => "image/png",
-            Some("ttf") => "font/ttf",
-            Some("json") => "application/json",
-            Some("wasm") => "application/wasm",
-            Some("data") => "application/octet-stream",
-            _ => return Err(dim_core::errors::DimError::NotFoundError.into()),
-        };
+    let path = uri.path();
+    match Asset::get(path) {
+        Some(asset) => embedded_asset(path, asset.into_owned()),
+        None => Err(dim_core::errors::DimError::NotFoundError.into()),
+    }
+}
 
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", mime)
-            .body(body::boxed(Full::from(y.into_owned())))
-            .unwrap())
-    } else {
-        Err(dim_core::errors::DimError::NotFoundError.into())
+fn embedded_asset(path: &str, data: Vec<u8>) -> Result<Response, DimErrorWrapper> {
+    let path = PathBuf::from(path);
+    let mime = match path.extension().and_then(|x| x.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "application/javascript",
+        Some("map") | Some("json") => "application/json",
+        Some("css") => "text/css",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("ttf") => "font/ttf",
+        Some("wasm") => "application/wasm",
+        Some("data") => "application/octet-stream",
+        _ => return Err(dim_core::errors::DimError::NotFoundError.into()),
+    };
+    let immutable = path
+        .components()
+        .any(|component| component.as_os_str() == "immutable");
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", mime)
+        .header(
+            "Cache-Control",
+            if immutable {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            },
+        )
+        .body(body::boxed(Full::from(data)))
+        .unwrap())
+}
+
+#[cfg(all(test, feature = "embed_ui"))]
+mod frontend_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_route_falls_back_to_the_eclipse_entrypoint() {
+        let response = frontend_route("/play/42".parse().unwrap())
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Content-Type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(response.headers().get("Cache-Control").unwrap(), "no-cache");
+    }
+
+    #[tokio::test]
+    async fn immutable_svelte_assets_receive_long_lived_caching() {
+        let asset = Asset::iter()
+            .find(|name| name.contains("/_app/immutable/") && name.ends_with(".js"))
+            .expect("the Eclipse build contains an immutable JavaScript asset");
+        let response = frontend_route(asset.parse().unwrap())
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Cache-Control").unwrap(),
+            "public, max-age=31536000, immutable"
+        );
     }
 }

@@ -88,12 +88,9 @@ link_media_tool ffmpeg "utils/ffmpeg"
 link_media_tool ffprobe "utils/ffprobe"
 
 if [[ "$DIM_SKIP_UI" == false ]]; then
-    echo "Installing locked frontend dependencies..."
-    (
-        cd ui
-        corepack yarn install --immutable --mode=skip-build
-        corepack yarn build
-    )
+    echo "Installing locked Eclipse dependencies..."
+    corepack pnpm --dir eclipse install --frozen-lockfile
+    corepack pnpm --dir eclipse build
 fi
 
 if [[ "$DIM_SKIP_RUST" == false ]]; then

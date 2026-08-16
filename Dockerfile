@@ -1,9 +1,12 @@
 FROM node:24.19.0-bookworm AS web
-WORKDIR /ui
-COPY ui/package.json ui/yarn.lock ui/.yarnrc.yml ./
-RUN corepack enable && yarn install --immutable --mode=skip-build
-COPY ui ./
-RUN yarn run build
+WORKDIR /dim
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY eclipse/package.json eclipse/package.json
+RUN corepack enable && pnpm --dir eclipse install --frozen-lockfile
+COPY api-contract api-contract
+COPY scripts/generate-api-contract.mjs scripts/generate-api-contract.mjs
+COPY eclipse eclipse
+RUN pnpm --dir eclipse build
 
 FROM debian:bookworm-slim AS ffmpeg
 ARG DEBIAN_FRONTEND=noninteractive
@@ -45,7 +48,7 @@ RUN apt-get update && apt-get install -y \
     sqlite3
 WORKDIR /dim
 COPY . ./
-COPY --from=web /ui/build ui/build
+COPY --from=web /dim/eclipse/build eclipse/build
 ARG DATABASE_URL="sqlite://dim_dev.db"
 
 # Sometimes we may need to quickly build a test image

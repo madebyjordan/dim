@@ -18,18 +18,14 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
-          cache: "yarn"
-          cache-dependency-path: ui/yarn.lock
       - run: corepack enable
-      - run: yarn install --immutable --mode=skip-build
-        working-directory: ui
-      - run: yarn build
-        working-directory: ui
+      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm --dir eclipse build
       - name: upload ui artifacts
         uses: actions/upload-artifact@v3
         with:
           name: ui
-          path: ui/build
+          path: eclipse/build
 
   build-armhf:
     needs: [create-ui]
@@ -52,7 +48,7 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: ui
-          path: ui/build
+          path: eclipse/build
       - uses: actions/cache@v3
         with:
           path: |
@@ -99,7 +95,7 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: ui
-          path: ui/build
+          path: eclipse/build
       - uses: actions/cache@v3
         with:
           path: |
@@ -141,7 +137,7 @@ jobs:
         uses: actions/download-artifact@v3
         with:
           name: ui
-          path: ui/build
+          path: eclipse/build
       - uses: actions/cache@v3
         with:
           path: |

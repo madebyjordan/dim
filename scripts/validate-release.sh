@@ -6,16 +6,12 @@ DIM_RELEASE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$DIM_RELEASE_ROOT"
 
 echo "Validating frontend lockfile, formatting, contract, types, lint, tests, and build..."
-(
-    cd ui
-    corepack yarn install --immutable --mode=skip-build
-    corepack yarn prettier --check --ignore-unknown src
-    corepack yarn contract:check
-    corepack yarn typecheck
-    corepack yarn lint
-    corepack yarn test
-    corepack yarn build
-)
+corepack pnpm install --frozen-lockfile
+corepack pnpm --dir eclipse exec prettier --check src
+corepack pnpm --dir eclipse contract:check
+corepack pnpm --dir eclipse check
+corepack pnpm --dir eclipse test
+corepack pnpm --dir eclipse build
 
 echo "Validating Rust formatting, locked tests, and optimized source build..."
 cargo fmt --all -- --check

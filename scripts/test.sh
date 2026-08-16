@@ -9,11 +9,9 @@ cd "$DIM_ROOT_DIR"
 echo "Running release command tests..."
 node --test ./scripts/release.test.mjs
 
-echo "Running frontend tests with the UI's pinned Yarn version..."
-(
-    cd ui
-    corepack yarn test
-)
+echo "Running Eclipse frontend tests..."
+corepack pnpm --dir eclipse test
+corepack pnpm --dir eclipse check
 
 echo "Running locked Rust workspace tests..."
 # These legacy scanner tests can wait indefinitely on external metadata/probe work. Normal branch

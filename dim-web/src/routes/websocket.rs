@@ -122,6 +122,7 @@ pub async fn handle_websocket_session(
     remote_address: Option<SocketAddr>,
     conn: dim_database::DbConnection,
     socket_tx: EventSocketTx,
+    initial_token: Option<String>,
 ) {
     let addr = match remote_address {
         Some(addr) => addr,
@@ -131,45 +132,64 @@ pub async fn handle_websocket_session(
     tokio::pin!(stream);
     let mut sink: Pin<Box<dyn Sink<WsMessage, Error = WsMessageError> + Send>> = Box::pin(sink);
 
+    let mut cookie_token = initial_token;
     let authenticated_token = loop {
-        let Some(message) = stream.next().await else {
-            return;
-        };
-        if let WsMessage::Text(st) = message {
-            if let Ok(ClientActions::Authenticate { token }) = serde_json::from_str(&st) {
-                if let Ok(mut sql_tx) = conn.read().begin().await {
-                    if let Ok(session) =
-                        dim_database::user::Session::verify(&mut sql_tx, &token).await
-                    {
-                        if let Ok(u) =
-                            dim_database::user::User::get_by_id(&mut sql_tx, session.user_id).await
-                        {
-                            let _ = socket_tx
-                                .send(CtrlEvent::Track {
-                                    addr,
-                                    sink,
-                                    auth: Box::new(u),
-                                })
-                                .await;
-
-                            let _ = socket_tx
-                                .send(CtrlEvent::SendTo {
-                                    addr,
-                                    message: dim_events::Message {
-                                        id: -1,
-                                        event_type: dim_events::PushEventType::EventAuthOk,
-                                    }
-                                    .to_string(),
-                                })
-                                .await;
-
-                            break token;
-                        }
-                    }
+        let from_cookie = cookie_token.is_some();
+        let token = if let Some(token) = cookie_token.take() {
+            token
+        } else {
+            let Some(message) = stream.next().await else {
+                return;
+            };
+            let WsMessage::Text(st) = message else {
+                continue;
+            };
+            let Ok(ClientActions::Authenticate { token }) = serde_json::from_str(&st) else {
+                let message = dim_events::Message {
+                    id: -1,
+                    event_type: dim_events::PushEventType::EventAuthErr,
                 }
+                .to_string();
+                let _ = sink.send(WsMessage::Text(message)).await;
+                let _ = sink.close().await;
+                return;
+            };
+            token
+        };
+        let user = if let Ok(mut sql_tx) = conn.read().begin().await {
+            match dim_database::user::Session::verify(&mut sql_tx, &token).await {
+                Ok(session) => dim_database::user::User::get_by_id(&mut sql_tx, session.user_id)
+                    .await
+                    .ok(),
+                Err(_) => None,
             }
+        } else {
+            None
+        };
+        if let Some(user) = user {
+            let _ = socket_tx
+                .send(CtrlEvent::Track {
+                    addr,
+                    sink,
+                    auth: Box::new(user),
+                })
+                .await;
+            let _ = socket_tx
+                .send(CtrlEvent::SendTo {
+                    addr,
+                    message: dim_events::Message {
+                        id: -1,
+                        event_type: dim_events::PushEventType::EventAuthOk,
+                    }
+                    .to_string(),
+                })
+                .await;
+            break token;
         }
-
+        // A stale cookie should not prevent an explicit token from authenticating.
+        if from_cookie {
+            continue;
+        }
         let message = dim_events::Message {
             id: -1,
             event_type: dim_events::PushEventType::EventAuthErr,
@@ -317,6 +337,7 @@ mod tests {
             Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)),
             conn,
             socket_tx,
+            None,
         )
         .await;
 
@@ -375,11 +396,63 @@ mod tests {
             Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)),
             conn,
             socket_tx,
+            None,
         )
         .await;
         let WsMessage::Text(body) = outgoing_rx.next().await.unwrap() else {
             panic!("expected an authentication error message");
         };
         assert!(body.contains("EventAuthErr"));
+    }
+
+    #[tokio::test]
+    async fn upgrade_cookie_token_authenticates_without_a_client_frame() {
+        let conn = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        let invite = dim_database::user::Login::new_invite(&mut tx)
+            .await
+            .unwrap();
+        let user = dim_database::user::InsertableUser {
+            username: "cookie-user".into(),
+            password: "valid-password".into(),
+            roles: dim_database::user::Roles(vec!["user".into()]),
+            prefs: Default::default(),
+            claimed_invite: invite,
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let (_, token) = dim_database::user::Session::create(&mut tx, user.id, 3600)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        drop(lock);
+
+        let (outgoing, mut outgoing_rx) = futures::channel::mpsc::unbounded();
+        let sink = outgoing.sink_map_err(|_| WsMessageError);
+        let stream = futures::stream::pending();
+        let (socket_tx, socket_rx) = mpsc::channel(4);
+        let processor = tokio::spawn(ctrl_event_processor(socket_rx));
+        let session = tokio::spawn(handle_websocket_session(
+            sink,
+            stream,
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000)),
+            conn,
+            socket_tx,
+            Some(token),
+        ));
+
+        let WsMessage::Text(body) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), outgoing_rx.next())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected an authentication response");
+        };
+        assert!(body.contains("EventAuthOk"));
+        session.abort();
+        processor.abort();
     }
 }

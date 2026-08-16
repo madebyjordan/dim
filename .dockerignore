@@ -3,4 +3,7 @@ target/*
 node_modules/*
 build/*
 ui/node_modules
+eclipse/node_modules
+eclipse/.svelte-kit
+eclipse/build
 metadata

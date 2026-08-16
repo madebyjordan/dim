@@ -1,0 +1,36 @@
+{
+  "name": "eclipse-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "scripts": {
+    "dev": "vite dev",
+    "build": "pnpm contract:check && vite build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "contract:generate": "node ../scripts/generate-api-contract.mjs --eclipse",
+    "contract:check": "node ../scripts/generate-api-contract.mjs --eclipse --check"
+  },
+  "dependencies": {
+    "dashjs": "^5.0.3",
+    "jassub": "^1.8.6"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.48.5",
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@types/node": "^24.10.1",
+    "jsdom": "^30.0.1",
+    "prettier": "^3.7.4",
+    "prettier-plugin-svelte": "^3.4.1",
+    "svelte": "^5.45.6",
+    "svelte-check": "^4.3.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7",
+    "vitest": "^4.0.15"
+  }
+}
