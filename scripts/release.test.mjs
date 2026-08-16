@@ -251,6 +251,11 @@ test("a version tag triggers exactly one publishing workflow", () => {
   assert.match(release, /workflow_dispatch:/);
   assert.match(release, /RELEASE_TAG:.*inputs\.tag.*github\.ref_name/);
   assert.doesNotMatch(release, /cache: yarn/);
+  assert.ok(
+    release.indexOf("Download verified static media tools") <
+      release.indexOf("Run the release validation suite")
+  );
+  assert.match(release, /-o utils\/ffprobe/);
 });
 
 test("every workspace application crate inherits the canonical version", () => {

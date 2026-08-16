@@ -76,17 +76,18 @@ jobs:
           node-version-file: ".nvmrc"
       - name: Enable Corepack
         run: corepack enable
-      - name: Run the release validation suite
-        run: pnpm release:validate
       - name: Download verified static media tools
         run: |
           set -euo pipefail
-          mkdir -p package/release/utils
-          curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffmpeg -o package/release/utils/ffmpeg
-          curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffprobe -o package/release/utils/ffprobe
-          echo "65d6b12fe32918e041a4513059c340e47b1a2e80c0d92c481c3889a31a470e9a  package/release/utils/ffmpeg" | sha256sum -c -
-          echo "76e253d0cad674300280e556d8e61d86e6b301dd526cfd68191449221a004690  package/release/utils/ffprobe" | sha256sum -c -
-          chmod +x package/release/utils/ffmpeg package/release/utils/ffprobe
+          mkdir -p utils package/release/utils
+          curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffmpeg -o utils/ffmpeg
+          curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffprobe -o utils/ffprobe
+          echo "65d6b12fe32918e041a4513059c340e47b1a2e80c0d92c481c3889a31a470e9a  utils/ffmpeg" | sha256sum -c -
+          echo "76e253d0cad674300280e556d8e61d86e6b301dd526cfd68191449221a004690  utils/ffprobe" | sha256sum -c -
+          chmod +x utils/ffmpeg utils/ffprobe
+          cp utils/ffmpeg utils/ffprobe package/release/utils/
+      - name: Run the release validation suite
+        run: pnpm release:validate
       - name: Package release archive and checksum
         env:
           TAG: ${{ needs.validate-tag.outputs.tag }}
