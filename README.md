@@ -1,13 +1,9 @@
-<h1 align="center">Dim</h1>
+<h1 align="center">Eclipse</h1>
 
 ![Dashboard](docs/design/dashboard.jpg)
 [![Discord](https://img.shields.io/discord/834495310332035123)](https://discord.gg/gBPyQ7NVah)
 
-## 2026
-
-Dim is a project with a lot of potential, I said this back in 2021-2022 when I was broughr onto the project as the sole designer at the time and now I am taking the opportunity to continue work on Dim, focusing on improving its foundation and overall user experience, making it more broadly accessible to a wider audience.
-
-Dim is a self-hosted media manager. With minimal setup, Dim will organize and beautify your media collections for playback on localhost or a trusted home network.
+Eclipse is a self-media manager based on Dim. Eclipse builds on Dim's foundation and media engine nightfall, expanding on the overall user experience, making it more broadly accessible to a wider audience.
 
 ## Running from source
 

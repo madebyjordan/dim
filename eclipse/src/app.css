@@ -1,9 +1,9 @@
 :root {
   color-scheme: dark;
-  --surface-canvas: #0b0d10;
+  --surface-canvas: #0d0d0d;
   --surface-raised: #13171b;
   --surface-soft: #191e23;
-  --text: #f1f5f4;
+  --text: #ffffff;
   --text-muted: #8c9895;
   --accent: #73e0b1;
   --danger: #ff8b8b;
