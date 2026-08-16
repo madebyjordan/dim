@@ -20,6 +20,7 @@ use xtra::spawn::Tokio;
 
 struct TestApp {
     router: axum::Router,
+    conn: dim_database::DbConnection,
     event_rx: Receiver<String>,
     root: PathBuf,
     workers: LibraryWorkers,
@@ -73,7 +74,7 @@ async fn test_app() -> TestApp {
     let workers = LibraryWorkers::default();
     let settings = dim_core::settings::SettingsStore::load(&config_path).unwrap();
     let app = AppState::new(
-        conn,
+        conn.clone(),
         socket_tx,
         event_tx,
         state,
@@ -84,6 +85,7 @@ async fn test_app() -> TestApp {
 
     TestApp {
         router: build_router(app),
+        conn,
         event_rx,
         root,
         workers,
@@ -231,6 +233,7 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
     assert!(scan_started);
 
     let mut status = String::new();
+    let mut durable_status = Value::Null;
     for _ in 0..20 {
         let response = test
             .router
@@ -244,16 +247,56 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        status = json_body(response).await["status"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        durable_status = json_body(response).await;
+        status = durable_status["status"].as_str().unwrap().to_owned();
         if status == "complete" {
             break;
         }
         tokio::task::yield_now().await;
     }
     assert_eq!(status, "complete");
+    assert_eq!(durable_status["stage"], "complete");
+    assert_eq!(durable_status["discovered"], 1);
+    assert_eq!(durable_status["processed"], 1);
+    assert_eq!(durable_status["skipped"], 1);
+    assert!(durable_status["elapsed_seconds"].is_i64());
+    assert!(durable_status["last_progress_at"].is_string());
+    assert!(durable_status["error_summary"].is_null());
+
+    {
+        let mut lock = test.conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        let failed = dim_database::ingestion::ScanRun::begin(&mut tx, id, "full")
+            .await
+            .unwrap();
+        dim_database::ingestion::ScanRun::finish(
+            &mut tx,
+            failed,
+            "failed",
+            Some("network share became unreadable; reconnect it and retry"),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/v1/library/{id}/scan"),
+            Some(&owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    let failed_status = json_body(response).await;
+    assert_eq!(failed_status["status"], "failed");
+    assert_eq!(failed_status["stage"], "failed");
+    assert_eq!(
+        failed_status["error_summary"],
+        "network share became unreadable; reconnect it and retry"
+    );
 
     let response = test
         .router

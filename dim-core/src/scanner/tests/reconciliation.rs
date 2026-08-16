@@ -76,21 +76,24 @@ async fn library_with_location(conn: &dim_database::DbConnection, location: &str
 async fn insert_catalogued_movie(conn: &dim_database::DbConnection, library_id: i64, path: &str) {
     let mut lock = conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
-    let media_id = sqlx::query(
-        "INSERT INTO _tblmedia (library_id, name, media_type) VALUES (?, 'Friday', 'movie')",
+    let media_id =
+        sqlx::query("INSERT INTO _tblmedia (library_id, name, media_type) VALUES (?, ?, 'movie')")
+            .bind(library_id)
+            .bind(path)
+            .execute(&mut tx)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO mediafile (media_id, library_id, target_file, raw_name) VALUES (?, ?, ?, ?)",
     )
+    .bind(media_id)
     .bind(library_id)
+    .bind(path)
+    .bind(path)
     .execute(&mut tx)
     .await
-    .unwrap()
-    .last_insert_rowid();
-    sqlx::query("INSERT INTO mediafile (media_id, library_id, target_file, raw_name) VALUES (?, ?, ?, 'Friday')")
-        .bind(media_id)
-        .bind(library_id)
-        .bind(path)
-        .execute(&mut tx)
-        .await
-        .unwrap();
+    .unwrap();
     tx.commit().await.unwrap();
 }
 
@@ -114,6 +117,30 @@ async fn latest_status(conn: &dim_database::DbConnection, library_id: i64) -> St
     )
     .bind(library_id)
     .fetch_one(conn.read_ref())
+    .await
+    .unwrap()
+}
+
+async fn path_count(conn: &dim_database::DbConnection, library_id: i64, path: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM mediafile WHERE library_id = ? AND target_file = ?")
+        .bind(library_id)
+        .bind(path)
+        .fetch_one(conn.read_ref())
+        .await
+        .unwrap()
+}
+
+async fn latest_root_statuses(
+    conn: &dim_database::DbConnection,
+    library_id: i64,
+) -> Vec<(String, String, Option<String>)> {
+    sqlx::query_as(
+        "SELECT root, status, error FROM ingestion_scan_root
+         WHERE scan_id = (SELECT id FROM ingestion_scan WHERE library_id = ? ORDER BY id DESC LIMIT 1)
+         ORDER BY ordinal",
+    )
+    .bind(library_id)
+    .fetch_all(conn.read_ref())
     .await
     .unwrap()
 }
@@ -161,6 +188,198 @@ async fn full_scan_of_empty_library_root_removes_stale_catalogue() {
 
     assert_eq!(counts(&conn, library_id).await, (0, 0));
     assert_eq!(latest_status(&conn, library_id).await, "complete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_successful_roots_reconcile_independently() {
+    let first = tempfile::Builder::new()
+        .prefix("dim-first-root")
+        .tempdir()
+        .unwrap();
+    let second = tempfile::Builder::new()
+        .prefix("dim-second-root")
+        .tempdir()
+        .unwrap();
+    let first_stale = first.path().join("First (2024).mkv");
+    let second_stale = second.path().join("Second (2025).mkv");
+    std::fs::write(first.path().join("first.txt"), b"sidecar").unwrap();
+    std::fs::write(second.path().join("second.txt"), b"sidecar").unwrap();
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, first.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, first_stale.to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, second_stale.to_str().unwrap()).await;
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    super::super::start_custom(
+        &mut conn,
+        library_id,
+        vec![first.path().to_path_buf(), second.path().to_path_buf()],
+        events,
+        MediaType::Movie,
+        Arc::new(UnusedProvider),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(counts(&conn, library_id).await, (0, 0));
+    assert_eq!(latest_status(&conn, library_id).await, "complete");
+    assert!(latest_root_statuses(&conn, library_id)
+        .await
+        .iter()
+        .all(|(_, status, error)| status == "authoritative" && error.is_none()));
+    let attributed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ingestion_item WHERE scan_id = (SELECT id FROM ingestion_scan WHERE library_id = ? ORDER BY id DESC LIMIT 1) AND root_id IS NOT NULL",
+    )
+    .bind(library_id)
+    .fetch_one(conn.read_ref())
+    .await
+    .unwrap();
+    assert_eq!(attributed, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incremental_scan_never_performs_authoritative_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let stale = root.path().join("Watcher Preserves (2025).mkv");
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, root.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, stale.to_str().unwrap()).await;
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    super::super::start_incremental_custom(
+        &mut conn,
+        library_id,
+        vec![root.path().to_path_buf()],
+        events,
+        MediaType::Movie,
+        Arc::new(UnusedProvider),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        path_count(&conn, library_id, stale.to_str().unwrap()).await,
+        1
+    );
+    let kind: String = sqlx::query_scalar(
+        "SELECT kind FROM ingestion_scan WHERE library_id = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(library_id)
+    .fetch_one(conn.read_ref())
+    .await
+    .unwrap();
+    assert_eq!(kind, "watcher");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_root_and_healthy_root_both_reconcile() {
+    let missing = tempfile::tempdir().unwrap();
+    let missing_path = missing.path().to_path_buf();
+    let healthy = tempfile::tempdir().unwrap();
+    let missing_stale = missing_path.join("Missing (2024).mkv");
+    let healthy_stale = healthy.path().join("Healthy (2025).mkv");
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, healthy.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, missing_stale.to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, healthy_stale.to_str().unwrap()).await;
+    drop(missing);
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    super::super::start_custom(
+        &mut conn,
+        library_id,
+        vec![missing_path, healthy.path().to_path_buf()],
+        events,
+        MediaType::Movie,
+        Arc::new(UnusedProvider),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(counts(&conn, library_id).await, (0, 0));
+    let statuses = latest_root_statuses(&conn, library_id).await;
+    assert_eq!(statuses[0].1, "missing");
+    assert_eq!(statuses[1].1, "authoritative");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_roots_and_legacy_paths_are_never_deleted() {
+    let root = tempfile::Builder::new()
+        .prefix("dim-partial-scan")
+        .tempdir()
+        .unwrap();
+    let nested = root.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let ambiguous = nested.join("Ambiguous (2025).mkv");
+    let legacy = tempfile::tempdir()
+        .unwrap()
+        .path()
+        .join("Legacy (2020).mkv");
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, root.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, ambiguous.to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, legacy.to_str().unwrap()).await;
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    super::super::start_custom(
+        &mut conn,
+        library_id,
+        vec![root.path().to_path_buf(), nested],
+        events,
+        MediaType::Movie,
+        Arc::new(UnusedProvider),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        path_count(&conn, library_id, ambiguous.to_str().unwrap()).await,
+        1
+    );
+    assert_eq!(
+        path_count(&conn, library_id, legacy.to_str().unwrap()).await,
+        1
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn normalized_and_symlink_boundary_ownership_is_ambiguous() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let link = root.path().join("external");
+    symlink(external.path(), &link).unwrap();
+    let through_symlink = link.join("Symlinked (2025).mkv");
+    let normalized_edge = root.path().join("Normalized (2024).mkv");
+    let lexical_root = root.path().join("marker").join("..");
+    std::fs::create_dir(root.path().join("marker")).unwrap();
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, root.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, through_symlink.to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, normalized_edge.to_str().unwrap()).await;
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    super::super::start_custom(
+        &mut conn,
+        library_id,
+        vec![lexical_root],
+        events,
+        MediaType::Movie,
+        Arc::new(UnusedProvider),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        path_count(&conn, library_id, through_symlink.to_str().unwrap()).await,
+        1
+    );
+    assert_eq!(
+        path_count(&conn, library_id, normalized_edge.to_str().unwrap()).await,
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -254,7 +473,7 @@ async fn failed_full_traversal_preserves_existing_catalogue_and_reports_failure(
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn filesystem_loop_failure_never_reconciles() {
+async fn failed_root_preserves_itself_but_healthy_root_still_reconciles() {
     use std::os::unix::fs::symlink;
 
     let good_root = tempfile::Builder::new()
@@ -275,9 +494,11 @@ async fn filesystem_loop_failure_never_reconciles() {
     symlink(&loop_dir, loop_dir.join("back")).unwrap();
 
     let stale_path = good_root.path().join("Existing Movie (2025).mp4");
+    let failed_stale = bad_root.path().join("Preserved Movie (2024).mp4");
     let mut conn = dim_database::get_conn_memory().await.unwrap();
     let library_id = library_with_location(&conn, good_root.path().to_str().unwrap()).await;
     insert_catalogued_movie(&conn, library_id, stale_path.to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, failed_stale.to_str().unwrap()).await;
     let (events, _receiver) = tokio::sync::mpsc::channel(8);
 
     let error = super::super::start_custom(
@@ -298,7 +519,19 @@ async fn filesystem_loop_failure_never_reconciles() {
         error,
         super::super::Error::FilesystemTraversal { .. }
     ));
-    assert_eq!(counts(&conn, library_id).await, (1, 1));
+    assert_eq!(
+        counts(&conn, library_id).await,
+        (1, 1),
+        "the authoritative healthy root must reconcile despite another root failing"
+    );
+    assert_eq!(
+        path_count(&conn, library_id, stale_path.to_str().unwrap()).await,
+        0
+    );
+    assert_eq!(
+        path_count(&conn, library_id, failed_stale.to_str().unwrap()).await,
+        1
+    );
     assert_eq!(latest_status(&conn, library_id).await, "failed");
     let discovered: i64 = sqlx::query_scalar(
         "SELECT discovered FROM ingestion_scan WHERE library_id = ? ORDER BY id DESC LIMIT 1",
@@ -311,6 +544,10 @@ async fn filesystem_loop_failure_never_reconciles() {
         discovered > 0,
         "failure did not occur after streaming began"
     );
+    let roots = latest_root_statuses(&conn, library_id).await;
+    assert_eq!(roots[0].1, "authoritative");
+    assert_eq!(roots[1].1, "failed");
+    assert!(roots[1].2.as_deref().unwrap().contains("loop"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -347,6 +584,72 @@ async fn successful_full_scan_preserves_present_media() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cancellation_during_partial_traversal_preserves_catalogue_and_cancels_root() {
+    const FILES: usize = 1024;
+    let root = tempfile::Builder::new()
+        .prefix("dim-partial-scan")
+        .tempdir()
+        .unwrap();
+    for index in 0..FILES {
+        std::fs::write(
+            root.path().join(format!("sidecar-{index}.txt")),
+            b"metadata",
+        )
+        .unwrap();
+    }
+    let stale_path = root.path().join("Existing Movie (2025).mp4");
+    let conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, root.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, stale_path.to_str().unwrap()).await;
+    let (events, mut receiver) = tokio::sync::mpsc::channel(8);
+    let mut scan_conn = conn.clone();
+
+    let scan = tokio::spawn(async move {
+        super::super::start(&mut scan_conn, library_id, events, Arc::new(UnusedProvider)).await
+    });
+    assert!(receiver
+        .recv()
+        .await
+        .unwrap()
+        .contains("EventStartedScanning"));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = sqlx::query_as::<_, (String, i64)>(
+                "SELECT status, discovered FROM ingestion_scan_root ORDER BY id DESC LIMIT 1",
+            )
+            .fetch_optional(conn.read_ref())
+            .await
+            .unwrap();
+            if matches!(state, Some((ref status, discovered)) if status == "running" && discovered > 0 && discovered < FILES as i64)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scan did not expose a partially traversed running root");
+    scan.abort();
+    let _ = scan.await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while latest_status(&conn, library_id).await != "cancelled" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled scan did not become terminal");
+    assert_eq!(
+        path_count(&conn, library_id, stale_path.to_str().unwrap()).await,
+        1
+    );
+    assert_eq!(
+        latest_root_statuses(&conn, library_id).await[0].1,
+        "cancelled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelled_scan_becomes_terminal_without_destructive_reconciliation() {
     let (root, _files) =
         super::temp_dir_symlink(["New Movie (2026).mp4"].into_iter(), super::TEST_MP4_PATH);
@@ -372,6 +675,31 @@ async fn cancelled_scan_becomes_terminal_without_destructive_reconciliation() {
     tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
         .await
         .expect("scan never reached its deliberately blocked matching stage");
+    {
+        let mut lock = conn.writer().lock_owned().await;
+        sqlx::query("UPDATE ingestion_scan SET last_progress_at = '2000-01-01 00:00:00' WHERE library_id = ? AND status = 'running'")
+            .bind(library_id)
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let progress: (String, String) = sqlx::query_as(
+                "SELECT stage, last_progress_at FROM ingestion_scan WHERE library_id = ? AND status = 'running'",
+            )
+            .bind(library_id)
+            .fetch_one(conn.read_ref())
+            .await
+            .unwrap();
+            if progress.0 == "matching" && progress.1 != "2000-01-01 00:00:00" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("healthy metadata wait did not advance its durable heartbeat");
     scan.abort();
     let _ = scan.await;
 

@@ -269,6 +269,55 @@ impl MediaMatcher for MovieMatcher {
         Ok(())
     }
 
+    async fn batch_match_durable(
+        &self,
+        conn: &dim_database::DbConnection,
+        provider: Arc<dyn ExternalQueryIntoShow>,
+        work: Vec<WorkUnit>,
+    ) -> Result<(), super::Error> {
+        let metadata_futs = work
+            .into_iter()
+            .map(|WorkUnit(file, metadata)| async {
+                let mut provider_failed = false;
+                for meta in metadata {
+                    match provider
+                        .search(meta.name.as_ref(), meta.year.map(|x| x as _))
+                        .await
+                    {
+                        Ok(provided) => return Ok(Some((file, provided))),
+                        Err(e) => {
+                            provider_failed |=
+                                !matches!(e, dim_extern_api::Error::NoResults { .. });
+                            error!(?meta, error = ?e, "Failed to find a movie match.");
+                        }
+                    }
+                }
+                if provider_failed {
+                    Err(super::Error::MetadataProviderFailure)
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Vec<_>>();
+        let metadata = futures::future::join_all(metadata_futs)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, super::Error>>()?;
+
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await?;
+        for meta in metadata.into_iter().flatten() {
+            let (file, provided) = meta;
+            if let Some(provided) = provided.first() {
+                self.match_to_result(&mut tx, file, provided.clone())
+                    .await
+                    .inspect_err(|error| error!(?error, "failed to match to result"))?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn match_to_id(
         &self,
         tx: &mut Transaction<'_>,

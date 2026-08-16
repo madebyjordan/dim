@@ -41,6 +41,38 @@ enum LibraryScanStatus {
     Cancelled,
 }
 
+#[derive(Debug, Serialize)]
+struct LibraryScanProgress {
+    status: LibraryScanStatus,
+    stage: String,
+    discovered: i64,
+    processed: i64,
+    committed: i64,
+    skipped: i64,
+    failed: i64,
+    requested_at: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    last_progress_at: Option<String>,
+    elapsed_seconds: i64,
+    seconds_since_progress: Option<i64>,
+    error_summary: Option<String>,
+}
+
+fn safe_scan_error(error: Option<&str>) -> Option<String> {
+    let error = error?.trim();
+    if error.is_empty() {
+        return None;
+    }
+    Some(
+        error
+            .chars()
+            .filter(|character| !character.is_control() || character.is_whitespace())
+            .take(500)
+            .collect(),
+    )
+}
+
 fn metadata_provider(media_type: MediaType) -> Arc<dyn dim_extern_api::ExternalQueryIntoShow> {
     const TMDB_KEY: &str = "38c372f5bc572c8aadde7a802638534e";
     let provider = TMDBMetadataProvider::new(TMDB_KEY);
@@ -361,13 +393,8 @@ pub async fn library_scan_status(State(state): State<AppState>, Path(id): Path<i
         return (StatusCode::NOT_FOUND, "Library not found.").into_response();
     }
 
-    let status = match dim_database::ingestion::ScanRun::latest(&mut tx, id).await {
-        Ok(Some(run)) if matches!(run.status.as_str(), "queued" | "running") => {
-            LibraryScanStatus::Scanning
-        }
-        Ok(Some(run)) if run.status == "failed" => LibraryScanStatus::Failed,
-        Ok(Some(run)) if run.status == "cancelled" => LibraryScanStatus::Cancelled,
-        Ok(_) => LibraryScanStatus::Complete,
+    let run = match dim_database::ingestion::ScanRun::latest(&mut tx, id).await {
+        Ok(run) => run,
         Err(error) => {
             tracing::error!(
                 ?error,
@@ -377,7 +404,55 @@ pub async fn library_scan_status(State(state): State<AppState>, Path(id): Path<i
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    Json(serde_json::json!({ "status": status })).into_response()
+    let Some(run) = run else {
+        return Json(LibraryScanProgress {
+            status: LibraryScanStatus::Complete,
+            stage: "complete".into(),
+            discovered: 0,
+            processed: 0,
+            committed: 0,
+            skipped: 0,
+            failed: 0,
+            requested_at: None,
+            started_at: None,
+            finished_at: None,
+            last_progress_at: None,
+            elapsed_seconds: 0,
+            seconds_since_progress: None,
+            error_summary: None,
+        })
+        .into_response();
+    };
+    let timing = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT MAX(0, unixepoch(COALESCE(finished_at, CURRENT_TIMESTAMP)) - unixepoch(COALESCE(started_at, requested_at))), MAX(0, unixepoch(CURRENT_TIMESTAMP) - unixepoch(last_progress_at)) FROM ingestion_scan WHERE id = ?",
+    )
+    .bind(run.id)
+    .fetch_one(&mut tx)
+    .await
+    .unwrap_or((0, 0));
+    let status = match run.status.as_str() {
+        "queued" | "running" => LibraryScanStatus::Scanning,
+        "failed" => LibraryScanStatus::Failed,
+        "cancelled" => LibraryScanStatus::Cancelled,
+        _ => LibraryScanStatus::Complete,
+    };
+    Json(LibraryScanProgress {
+        status,
+        stage: run.stage,
+        discovered: run.discovered,
+        processed: run.processed,
+        committed: run.committed,
+        skipped: run.skipped,
+        failed: run.failed,
+        requested_at: Some(run.requested_at),
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        last_progress_at: Some(run.last_progress_at),
+        elapsed_seconds: timing.0,
+        seconds_since_progress: Some(timing.1),
+        error_summary: safe_scan_error(run.error.as_deref()),
+    })
+    .into_response()
 }
 
 pub async fn library_scan_retry(

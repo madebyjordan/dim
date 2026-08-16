@@ -39,6 +39,20 @@ impl ApplicationContext {
                     paths.database.display()
                 ))
             })?;
+        {
+            let mut lock = database.writer().lock_owned().await;
+            let mut tx = dim_database::write_tx(&mut lock).await?;
+            let (running, queued) =
+                dim_database::ingestion::ScanRun::recover_abandoned(&mut tx).await?;
+            tx.commit().await?;
+            if running + queued > 0 {
+                tracing::warn!(
+                    running,
+                    queued,
+                    "Recovered scanner work abandoned by a previous process"
+                );
+            }
+        }
         let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         let (shutdown_tx, _) = watch::channel(false);
         Ok(Self {

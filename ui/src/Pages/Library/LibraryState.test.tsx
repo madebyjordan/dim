@@ -15,12 +15,29 @@ describe("library scan states", () => {
   afterEach(() => vi.clearAllMocks());
 
   it("shows persistent progress while scanning", () => {
-    render(<LibraryState {...defaultProps} scanState="scanning" />);
+    render(
+      <LibraryState
+        {...defaultProps}
+        scanState="scanning"
+        scanProgress={{
+          stage: "matching",
+          discovered: 20,
+          processed: 12,
+          committed: 8,
+          skipped: 3,
+          failed: 1,
+          elapsed_seconds: 65,
+          seconds_since_progress: 4,
+        }}
+      />
+    );
 
     expect(screen.getByText("Scanning your library")).toBeInTheDocument();
+    expect(screen.getByText("Matching metadata")).toBeInTheDocument();
     expect(
-      screen.getByText(/scanning the selected folder/i)
+      screen.getByText(/20 discovered · 12 processed/)
     ).toBeInTheDocument();
+    expect(screen.getByText(/Elapsed 1m 5s/)).toBeInTheDocument();
   });
 
   it("shows a clear empty result when a scan completes without media", () => {
@@ -55,10 +72,21 @@ describe("library scan states", () => {
   });
 
   it("stops progress and offers retry when scanning fails", () => {
-    render(<LibraryState {...defaultProps} scanState="failed" />);
+    render(
+      <LibraryState
+        {...defaultProps}
+        scanState="failed"
+        scanProgress={{
+          error_summary: "Network share is unavailable; retry the scan",
+        }}
+      />
+    );
 
     expect(screen.getByRole("alert")).toHaveTextContent("Library scan failed");
     expect(screen.queryByText("Scanning your library")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Network share is unavailable/)
+    ).toBeInTheDocument();
 
     userEvent.click(screen.getByRole("button", { name: "Retry scan" }));
     expect(defaultProps.onRescan).toHaveBeenCalledTimes(1);

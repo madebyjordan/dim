@@ -238,6 +238,7 @@ export const wsScanStart = (id) => async (dispatch) => {
     type: SCAN_START,
     id,
   });
+  dispatch(fetchLibraryScanStatus(id));
 };
 
 export const wsScanStop = (id) => async (dispatch) => {
@@ -245,6 +246,7 @@ export const wsScanStop = (id) => async (dispatch) => {
     type: SCAN_STOP,
     id,
   });
+  dispatch(fetchLibraryScanStatus(id));
 };
 
 export const wsScanFailed = (id) => async (dispatch) => {
@@ -257,6 +259,7 @@ export const wsScanFailed = (id) => async (dispatch) => {
       msg: "The library scan failed. Check that its folders are still readable.",
     })
   );
+  dispatch(fetchLibraryScanStatus(id));
 };
 
 export const wsScanCancelled = (id) => async (dispatch) => {
@@ -264,6 +267,7 @@ export const wsScanCancelled = (id) => async (dispatch) => {
     type: SCAN_CANCELLED,
     id,
   });
+  dispatch(fetchLibraryScanStatus(id));
 };
 
 export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
@@ -276,7 +280,8 @@ export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
 
     if (!res.ok) return;
 
-    const { status } = await res.json();
+    const payload = await res.json();
+    const { status } = payload;
     const type = {
       scanning: SCAN_START,
       complete: SCAN_STOP,
@@ -284,7 +289,7 @@ export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
       cancelled: SCAN_CANCELLED,
     }[status];
 
-    if (type) dispatch({ type, id });
+    if (type) dispatch({ type, id, payload });
   } catch (_) {}
 };
 

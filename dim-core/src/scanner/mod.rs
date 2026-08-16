@@ -31,8 +31,9 @@ use futures::StreamExt;
 use ignore::WalkBuilder;
 use itertools::Itertools;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +67,89 @@ static LIBRARY_SCAN_LOCKS: Lazy<ParkingMutex<HashMap<i64, Arc<AsyncMutex<()>>>>>
 // scan close the channel promptly instead of leaving a complete tree queued in memory.
 const DISCOVERY_QUEUE_CAPACITY: usize = 64;
 const ASSESSMENT_CONCURRENCY: usize = 4;
+#[cfg(not(test))]
+const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
+#[cfg(test)]
+const HEARTBEAT_INTERVAL_SECONDS: u64 = 1;
+
+/// A single task owns periodic heartbeat persistence for a scan. Stage transitions are persisted
+/// synchronously, while unchanged stages write at most once every 15 seconds. Aggregate counter
+/// updates advance the same timestamp in their existing transactions, so active high-volume
+/// discovery does not add writes.
+struct ScanHeartbeat {
+    conn: dim_database::DbConnection,
+    scan_id: i64,
+    stage: Arc<ParkingMutex<&'static str>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ScanHeartbeat {
+    fn start(conn: dim_database::DbConnection, scan_id: i64) -> Self {
+        let stage = Arc::new(ParkingMutex::new("starting"));
+        let task_stage = Arc::clone(&stage);
+        let task_conn = conn.clone();
+        let handle = tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let current_stage = *task_stage.lock();
+                let mut lock = task_conn.writer().lock_owned().await;
+                let result = async {
+                    let mut tx = dim_database::write_tx(&mut lock).await?;
+                    dim_database::ingestion::ScanRun::touch(
+                        &mut tx,
+                        scan_id,
+                        current_stage,
+                        HEARTBEAT_INTERVAL_SECONDS as i64,
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    Ok::<_, dim_database::DatabaseError>(())
+                }
+                .await;
+                if let Err(error) = result {
+                    warn!(?error, scan_id, "Could not persist scan heartbeat");
+                }
+            }
+        });
+        Self {
+            conn,
+            scan_id,
+            stage,
+            handle,
+        }
+    }
+
+    async fn stage(&self, stage: &'static str) -> Result<(), Error> {
+        let changed = {
+            let mut current = self.stage.lock();
+            if *current == stage {
+                false
+            } else {
+                *current = stage;
+                true
+            }
+        };
+        if !changed {
+            return Ok(());
+        }
+
+        let mut lock = self.conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await?;
+        dim_database::ingestion::ScanRun::touch(&mut tx, self.scan_id, stage, 0).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+impl Drop for ScanHeartbeat {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
 
 fn library_scan_lock(library_id: i64) -> Arc<AsyncMutex<()>> {
     LIBRARY_SCAN_LOCKS
@@ -85,6 +169,90 @@ pub struct DiscoveredFile {
 enum ScanScope {
     Full,
     Incremental,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootAuthority {
+    Authoritative,
+    Missing,
+}
+
+#[derive(Debug)]
+struct RootOutcome {
+    root: PathBuf,
+    normalized: Option<PathBuf>,
+    authority: Option<RootAuthority>,
+}
+
+fn normalize_absolute(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Some(normalized)
+}
+
+fn crosses_uncertain_symlink_boundary(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let Some(parent) = relative.parent() else {
+        return true;
+    };
+    let mut cursor = root.to_path_buf();
+    for component in parent.components() {
+        cursor.push(component.as_os_str());
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => return true,
+        }
+    }
+    false
+}
+
+fn authoritative_owner<'a>(path: &Path, roots: &'a [RootOutcome]) -> Option<&'a RootOutcome> {
+    let normalized = normalize_absolute(path)?;
+    if normalized != path {
+        return None;
+    }
+    let mut owners = roots.iter().filter(|root| {
+        root.normalized
+            .as_deref()
+            .is_some_and(|candidate| normalized != candidate && normalized.starts_with(candidate))
+    });
+    let owner = owners.next()?;
+    if owners.next().is_some() || owner.normalized.as_deref() != Some(owner.root.as_path()) {
+        return None;
+    }
+    match owner.authority? {
+        RootAuthority::Missing => Some(owner),
+        RootAuthority::Authoritative => {
+            let root = owner.normalized.as_deref()?;
+            if std::fs::symlink_metadata(root)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(true)
+                || crosses_uncertain_symlink_boundary(root, &normalized)
+            {
+                None
+            } else {
+                Some(owner)
+            }
+        }
+    }
 }
 
 fn walk_files_checked(
@@ -298,6 +466,15 @@ pub trait MediaMatcher: Send + Sync {
         work: Vec<WorkUnit>,
     ) -> Result<(), Error>;
 
+    /// Scanner-specific matching keeps remote provider waits outside the single SQLite writer
+    /// ownership window, allowing durable heartbeats to continue while metadata is slow.
+    async fn batch_match_durable(
+        &self,
+        conn: &dim_database::DbConnection,
+        provider: Arc<dyn ExternalQueryIntoShow>,
+        work: Vec<WorkUnit>,
+    ) -> Result<(), Error>;
+
     /// Match a WorkUnit to a specific external id.
     async fn match_to_id(
         &self,
@@ -313,13 +490,14 @@ pub async fn insert_mediafiles(
     library_id: i64,
     dirs: Vec<impl AsRef<Path> + Send + 'static>,
 ) -> Result<Vec<WorkUnit>, Error> {
-    insert_mediafiles_for_scan(conn, library_id, dirs, None, ScanScope::Incremental).await
+    insert_mediafiles_for_scan(conn, library_id, dirs, None, None, ScanScope::Incremental).await
 }
 
 async fn update_item(
     conn: &dim_database::DbConnection,
     scan_id: i64,
     library_id: i64,
+    root_id: Option<i64>,
     path: &Path,
     fingerprint: Option<&str>,
     stage: &str,
@@ -336,6 +514,7 @@ async fn update_item(
         &mut tx,
         scan_id,
         library_id,
+        root_id,
         path,
         fingerprint,
         stage,
@@ -352,6 +531,7 @@ async fn handle_assessment(
     conn: &dim_database::DbConnection,
     library_id: i64,
     scan_id: Option<i64>,
+    root_id: Option<i64>,
     insertables: &mut Vec<(InsertableMediaFile, Vec<Metadata>)>,
     (path, result, metadata): (
         PathBuf,
@@ -377,6 +557,7 @@ async fn handle_assessment(
                     conn,
                     scan_id,
                     library_id,
+                    root_id,
                     &path,
                     None,
                     "commit",
@@ -385,6 +566,11 @@ async fn handle_assessment(
                     None,
                 )
                 .await?;
+                let mut lock = conn.writer().lock_owned().await;
+                let mut tx = dim_database::write_tx(&mut lock).await?;
+                dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "skipped").await?;
+                dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "processed").await?;
+                tx.commit().await?;
             }
         }
         Err(error) => {
@@ -403,6 +589,7 @@ async fn handle_assessment(
                     conn,
                     scan_id,
                     library_id,
+                    root_id,
                     &path,
                     None,
                     stage,
@@ -411,12 +598,13 @@ async fn handle_assessment(
                     Some(&error.to_string()),
                 )
                 .await?;
+                let mut lock = conn.writer().lock_owned().await;
+                let mut tx = dim_database::write_tx(&mut lock).await?;
+                dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "processed").await?;
                 if !retryable {
-                    let mut lock = conn.writer().lock_owned().await;
-                    let mut tx = dim_database::write_tx(&mut lock).await?;
                     dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "failed").await?;
-                    tx.commit().await?;
                 }
+                tx.commit().await?;
             }
             warn!(
                 ?error,
@@ -427,11 +615,67 @@ async fn handle_assessment(
     Ok(())
 }
 
+async fn record_discovery(
+    conn: dim_database::DbConnection,
+    scan_id: i64,
+    library_id: i64,
+    root_id: Option<i64>,
+    path: Option<String>,
+    supported: bool,
+) -> Result<(), Error> {
+    // This task is intentionally detached from cancellation of the scan future. It owns the
+    // writer transaction, so an abort cannot strand the SQLite connection before the terminal
+    // scan guard records cancellation.
+    tokio::spawn(async move {
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await?;
+        let (status, class) = if supported {
+            ("complete", None)
+        } else {
+            ("skipped", Some("unsupported_format"))
+        };
+        if let Some(path) = path {
+            dim_database::ingestion::upsert_item(
+                &mut tx,
+                scan_id,
+                library_id,
+                root_id,
+                &path,
+                None,
+                "discovery",
+                status,
+                class,
+                None,
+            )
+            .await?;
+        }
+        dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "discovered").await?;
+        if let Some(root_id) = root_id {
+            sqlx::query("UPDATE ingestion_scan_root SET discovered = discovered + 1 WHERE id = ?")
+                .bind(root_id)
+                .execute(&mut tx)
+                .await?;
+        }
+        if !supported {
+            dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "skipped").await?;
+            dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "processed").await?;
+        }
+        tx.commit().await?;
+        Ok::<_, Error>(())
+    })
+    .await
+    .map_err(|error| Error::FilesystemTraversal {
+        path: "discovery state worker".into(),
+        message: error.to_string(),
+    })?
+}
+
 async fn insert_mediafiles_for_scan(
     conn: &mut dim_database::DbConnection,
     library_id: i64,
     dirs: Vec<impl AsRef<Path> + Send + 'static>,
     scan_id: Option<i64>,
+    root_id: Option<i64>,
     scope: ScanScope,
 ) -> Result<Vec<WorkUnit>, Error> {
     let (mut discovered, mut discovery_worker) = spawn_checked_discovery(dirs, scope);
@@ -464,32 +708,15 @@ async fn insert_mediafiles_for_scan(
         };
 
         if let Some(scan_id) = scan_id {
-            let mut lock = conn.writer().lock_owned().await;
-            let mut tx = dim_database::write_tx(&mut lock).await?;
-            let (status, class) = if file.supported {
-                ("complete", None)
-            } else {
-                ("skipped", Some("unsupported_format"))
-            };
-            if let Some(path) = file.path.to_str() {
-                dim_database::ingestion::upsert_item(
-                    &mut tx,
-                    scan_id,
-                    library_id,
-                    path,
-                    None,
-                    "discovery",
-                    status,
-                    class,
-                    None,
-                )
-                .await?;
-            }
-            dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "discovered").await?;
-            if !file.supported {
-                dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "skipped").await?;
-            }
-            tx.commit().await?;
+            record_discovery(
+                conn.clone(),
+                scan_id,
+                library_id,
+                root_id,
+                file.path.to_str().map(str::to_owned),
+                file.supported,
+            )
+            .await?;
         }
 
         if !file.supported {
@@ -502,6 +729,7 @@ async fn insert_mediafiles_for_scan(
                     conn,
                     scan_id,
                     library_id,
+                    root_id,
                     &file.path,
                     None,
                     "matching",
@@ -510,6 +738,11 @@ async fn insert_mediafiles_for_scan(
                     None,
                 )
                 .await?;
+                let mut lock = conn.writer().lock_owned().await;
+                let mut tx = dim_database::write_tx(&mut lock).await?;
+                dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "failed").await?;
+                dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "processed").await?;
+                tx.commit().await?;
             }
             continue;
         };
@@ -552,7 +785,15 @@ async fn insert_mediafiles_for_scan(
                     }
                 }
             };
-            handle_assessment(conn, library_id, scan_id, &mut insertables, outcome).await?;
+            handle_assessment(
+                conn,
+                library_id,
+                scan_id,
+                root_id,
+                &mut insertables,
+                outcome,
+            )
+            .await?;
         }
     }
 
@@ -565,7 +806,15 @@ async fn insert_mediafiles_for_scan(
     };
 
     while let Some(outcome) = assessments.next().await {
-        handle_assessment(conn, library_id, scan_id, &mut insertables, outcome).await?;
+        handle_assessment(
+            conn,
+            library_id,
+            scan_id,
+            root_id,
+            &mut insertables,
+            outcome,
+        )
+        .await?;
     }
     drop(assessments);
 
@@ -615,6 +864,7 @@ async fn insert_mediafiles_for_scan(
                 &mut tx,
                 scan_id,
                 library_id,
+                root_id,
                 &unit.0.target_file,
                 fingerprint.as_deref(),
                 "commit",
@@ -633,26 +883,37 @@ async fn reconcile_library(
     conn: &dim_database::DbConnection,
     library_id: i64,
     scan_id: i64,
+    roots: &[RootOutcome],
 ) -> Result<(), Error> {
     let mut lock = conn.writer().lock_owned().await;
     let mut tx = dim_database::write_tx(&mut lock).await?;
 
-    let removed_files = sqlx::query(
-        "DELETE FROM mediafile
-         WHERE library_id = ?
-           AND NOT EXISTS (
-               SELECT 1 FROM ingestion_item
-               WHERE scan_id = ?
-                 AND ingestion_item.library_id = mediafile.library_id
-                 AND ingestion_item.path = mediafile.target_file
-                 AND COALESCE(ingestion_item.error_class, '') != 'unsupported_format'
-           )",
+    let discovered = sqlx::query_scalar::<_, String>(
+        "SELECT path FROM ingestion_item WHERE scan_id = ? AND library_id = ? AND COALESCE(error_class, '') != 'unsupported_format'",
+    )
+    .bind(scan_id)
+    .bind(library_id)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let catalogue = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, target_file FROM mediafile WHERE library_id = ?",
     )
     .bind(library_id)
-    .bind(scan_id)
-    .execute(&mut tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut removed_files = 0;
+    for (id, path) in catalogue {
+        if discovered.contains(&path) || authoritative_owner(Path::new(&path), roots).is_none() {
+            continue;
+        }
+        removed_files += sqlx::query("DELETE FROM mediafile WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
 
     // Remove catalogue parents only after their filesystem children have been reconciled. The
     // ordering preserves valid TV hierarchies while cleaning childless episodes, seasons, shows,
@@ -722,6 +983,9 @@ impl ScanRunGuard {
     async fn finish(&mut self, status: &str, error: Option<&str>) -> Result<(), Error> {
         let mut lock = self.conn.writer().lock_owned().await;
         let mut tx = dim_database::write_tx(&mut lock).await?;
+        if status != "complete" {
+            dim_database::ingestion::cancel_active_roots(&mut tx, self.scan_id).await?;
+        }
         dim_database::ingestion::ScanRun::finish(&mut tx, self.scan_id, status, error).await?;
         tx.commit().await?;
         self.terminal = true;
@@ -774,6 +1038,15 @@ impl Drop for ScanRunGuard {
                             error!(
                                 ?error,
                                 library_id, scan_id, "Failed to mark cancelled scan terminal"
+                            );
+                            return;
+                        }
+                        if let Err(error) =
+                            dim_database::ingestion::cancel_active_roots(&mut tx, scan_id).await
+                        {
+                            error!(
+                                ?error,
+                                library_id, scan_id, "Failed to mark cancelled scan roots terminal"
                             );
                             return;
                         }
@@ -855,7 +1128,11 @@ async fn start_scoped_custom(
     // Watcher reconciliation and user-requested scans share the same per-library ownership gate.
     // Cancellation drops this guard; the next owner then records the abandoned durable run.
     let _scan_owner = library_scan_lock(library_id).lock_owned().await;
-    let scan_id = {
+    let dirs = dirs
+        .into_iter()
+        .map(|path| path.as_ref().to_path_buf())
+        .collect::<Vec<_>>();
+    let (scan_id, root_ids) = {
         let mut lock = conn.writer().lock_owned().await;
         let mut db_tx = dim_database::write_tx(&mut lock).await?;
         let kind = if matches!(scope, ScanScope::Full) {
@@ -864,15 +1141,31 @@ async fn start_scoped_custom(
             "watcher"
         };
         let id = dim_database::ingestion::ScanRun::begin(&mut db_tx, library_id, kind).await?;
+        let mut root_ids = Vec::with_capacity(dirs.len());
+        for (ordinal, root) in dirs.iter().enumerate() {
+            let normalized = normalize_absolute(root);
+            root_ids.push(
+                dim_database::ingestion::begin_root(
+                    &mut db_tx,
+                    id,
+                    ordinal as i64,
+                    &root.to_string_lossy(),
+                    normalized.as_ref().and_then(|path| path.to_str()),
+                )
+                .await?,
+            );
+        }
         db_tx.commit().await?;
-        id
+        (id, root_ids)
     };
     let mut guard = ScanRunGuard::new(conn.clone(), tx.clone(), library_id, scan_id);
+    let heartbeat = ScanHeartbeat::start(conn.clone(), scan_id);
 
     let result = run_scan_custom(
-        conn, library_id, dirs, tx, media_type, provider, scan_id, scope,
+        conn, library_id, dirs, root_ids, tx, media_type, provider, scan_id, scope, &heartbeat,
     )
     .await;
+    drop(heartbeat);
 
     let error_message = result.as_ref().err().map(ToString::to_string);
     guard
@@ -887,12 +1180,14 @@ async fn start_scoped_custom(
 async fn run_scan_custom(
     conn: &mut dim_database::DbConnection,
     library_id: i64,
-    dirs: Vec<impl AsRef<Path> + Send + 'static>,
+    dirs: Vec<PathBuf>,
+    root_ids: Vec<i64>,
     tx: EventTx,
     media_type: MediaType,
     provider: Arc<dyn ExternalQueryIntoShow>,
     scan_id: i64,
     scope: ScanScope,
+    heartbeat: &ScanHeartbeat,
 ) -> Result<(), Error> {
     info!(library_id, "Scanning library");
 
@@ -913,8 +1208,70 @@ async fn run_scan_custom(
     };
 
     let now = Instant::now();
-    let workunits =
-        insert_mediafiles_for_scan(conn, library_id, dirs, Some(scan_id), scope).await?;
+    let mut workunits = Vec::new();
+    let mut roots = Vec::with_capacity(dirs.len());
+    let mut failures = Vec::new();
+    heartbeat.stage("traversal").await?;
+    for (root, root_id) in dirs.into_iter().zip(root_ids) {
+        let normalized = normalize_absolute(&root);
+        let was_missing = matches!(
+            std::fs::metadata(&root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+        match insert_mediafiles_for_scan(
+            conn,
+            library_id,
+            vec![root.clone()],
+            Some(scan_id),
+            Some(root_id),
+            scope,
+        )
+        .await
+        {
+            Ok(mut root_work) => {
+                let authority = if was_missing {
+                    RootAuthority::Missing
+                } else {
+                    RootAuthority::Authoritative
+                };
+                let status = if was_missing {
+                    "missing"
+                } else {
+                    "authoritative"
+                };
+                let mut lock = conn.writer().lock_owned().await;
+                let mut root_tx = dim_database::write_tx(&mut lock).await?;
+                dim_database::ingestion::finish_root(&mut root_tx, root_id, status, None).await?;
+                root_tx.commit().await?;
+                roots.push(RootOutcome {
+                    root,
+                    normalized,
+                    authority: Some(authority),
+                });
+                workunits.append(&mut root_work);
+            }
+            Err(Error::FilesystemTraversal { path, message }) => {
+                let diagnostic = format!("{path}: {message}");
+                let mut lock = conn.writer().lock_owned().await;
+                let mut root_tx = dim_database::write_tx(&mut lock).await?;
+                dim_database::ingestion::finish_root(
+                    &mut root_tx,
+                    root_id,
+                    "failed",
+                    Some(&diagnostic),
+                )
+                .await?;
+                root_tx.commit().await?;
+                failures.push(diagnostic);
+                roots.push(RootOutcome {
+                    root,
+                    normalized,
+                    authority: None,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
     let workunits_size = workunits.len();
 
     info!(
@@ -936,6 +1293,7 @@ async fn run_scan_custom(
 
     // TODO: We can receive work over a channel so that we can in parallel create new mediafiles
     // and match objects.
+    heartbeat.stage("matching").await?;
     for unit in chunk_iter.into_iter() {
         let identities = unit
             .iter()
@@ -949,6 +1307,7 @@ async fn run_scan_custom(
                     &mut state_tx,
                     scan_id,
                     library_id,
+                    None,
                     path,
                     None,
                     "matching",
@@ -960,12 +1319,10 @@ async fn run_scan_custom(
             }
             state_tx.commit().await?;
         }
-        let mut lock = conn.writer().lock_owned().await;
-        let mut tx = dim_database::write_tx(&mut lock)
+        let match_failure = match matcher
+            .batch_match_durable(conn, provider.clone(), unit)
             .await
-            .map_err(|e| Error::DatabaseError(e.into()))?;
-
-        let match_failure = match matcher.batch_match(&mut tx, provider.clone(), unit).await {
+        {
             Ok(()) => None,
             Err(e) => {
                 let class = if matches!(e, Error::MetadataProviderFailure) {
@@ -977,10 +1334,6 @@ async fn run_scan_custom(
                 Some(class)
             }
         };
-
-        tx.commit()
-            .await
-            .map_err(|e| Error::DatabaseError(e.into()))?;
 
         let matched = {
             let mut read_tx = conn.read().begin().await?;
@@ -1008,6 +1361,7 @@ async fn run_scan_custom(
                 &mut count_tx,
                 scan_id,
                 library_id,
+                None,
                 &path,
                 None,
                 "matching",
@@ -1022,12 +1376,21 @@ async fn run_scan_custom(
                 if did_match { "committed" } else { "failed" },
             )
             .await?;
+            dim_database::ingestion::ScanRun::count(&mut count_tx, scan_id, "processed").await?;
         }
         count_tx.commit().await?;
     }
 
     if matches!(scope, ScanScope::Full) {
-        reconcile_library(conn, library_id, scan_id).await?;
+        heartbeat.stage("reconciliation").await?;
+        reconcile_library(conn, library_id, scan_id, &roots).await?;
+    }
+
+    if !failures.is_empty() {
+        return Err(Error::FilesystemTraversal {
+            path: "one or more library roots".into(),
+            message: failures.join("; "),
+        });
     }
 
     info!(

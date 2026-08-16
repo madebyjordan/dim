@@ -468,6 +468,39 @@ impl MediaMatcher for TvMatcher {
         Ok(())
     }
 
+    async fn batch_match_durable(
+        &self,
+        conn: &dim_database::DbConnection,
+        provider: Arc<dyn ExternalQueryIntoShow>,
+        work: Vec<WorkUnit>,
+    ) -> Result<(), super::Error> {
+        let provider_show: Arc<dyn ExternalQueryShow> = provider
+            .into_query_show()
+            .expect("Scanner needs a show provider");
+        let metadata_futs = work
+            .into_iter()
+            .map(|WorkUnit(file, metadata)| {
+                let provider_show = Arc::clone(&provider_show);
+                Self::lookup_metadata(provider_show, file, metadata)
+            })
+            .collect::<Vec<_>>();
+        let metadata = futures::future::join_all(metadata_futs)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, super::Error>>()?;
+
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await?;
+        for meta in metadata.into_iter().flatten() {
+            let (file, provided) = meta;
+            self.match_to_result(&mut tx, file, provided)
+                .await
+                .inspect_err(|error| error!(?error, "failed to match to result"))?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn match_to_id(
         &self,
         tx: &mut Transaction<'_>,

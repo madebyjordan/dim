@@ -87,6 +87,19 @@ export type UnmatchedFiles = {
 
 export type ScanStatus = {
   status: "scanning" | "complete" | "failed" | "cancelled";
+  stage?: string;
+  discovered?: number;
+  processed?: number;
+  committed?: number;
+  skipped?: number;
+  failed?: number;
+  requested_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  last_progress_at?: string | null;
+  elapsed_seconds?: number;
+  seconds_since_progress?: number | null;
+  error_summary?: string | null;
 };
 
 export type RematchMedia = { external_id: string; media_type: "movie" | "tv" };

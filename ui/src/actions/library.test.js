@@ -99,9 +99,20 @@ describe("new library creation", () => {
     ["failed", SCAN_FAILED],
     ["cancelled", SCAN_CANCELLED],
   ])("hydrates the %s scan state", async (status, type) => {
+    const payload = {
+      status,
+      stage: status === "scanning" ? "matching" : status,
+      discovered: 12,
+      processed: 10,
+      committed: 7,
+      skipped: 2,
+      failed: 1,
+      elapsed_seconds: 30,
+      seconds_since_progress: 1,
+    };
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
-      json: async () => ({ status }),
+      json: async () => payload,
     });
     const dispatch = vi.fn();
 
@@ -109,7 +120,37 @@ describe("new library creation", () => {
       auth: { token: "owner-token" },
     }));
 
-    expect(dispatch).toHaveBeenCalledWith({ type, id: 42 });
+    expect(dispatch).toHaveBeenCalledWith({ type, id: 42, payload });
+  });
+
+  it("converges on terminal durable truth after a missed WebSocket event", async () => {
+    const payload = {
+      status: "failed",
+      stage: "failed",
+      discovered: 4,
+      processed: 4,
+      committed: 0,
+      skipped: 3,
+      failed: 1,
+      elapsed_seconds: 90,
+      seconds_since_progress: 2,
+      error_summary: "Dim restarted before this scan finished; retry the scan",
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    });
+    const dispatch = vi.fn();
+
+    await fetchLibraryScanStatus(42)(dispatch, () => ({
+      auth: { token: "owner-token" },
+    }));
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: SCAN_FAILED,
+      id: 42,
+      payload,
+    });
   });
 
   it("starts a manual library rescan", async () => {

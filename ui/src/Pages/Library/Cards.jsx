@@ -23,6 +23,7 @@ function Cards() {
   );
   const libraries = useSelector((store) => store.library.fetch_libraries.items);
   const scanState = useSelector((store) => store.library.scan_status[id]);
+  const scanProgress = useSelector((store) => store.library.scan_progress[id]);
   const library = libraries.find((item) => String(item.id) === String(id));
 
   const [scanStarting, setScanStarting] = useState(false);
@@ -121,6 +122,7 @@ function Cards() {
         onRescan={handleRescan}
         scanStarting={scanStarting}
         scanState={scanState}
+        scanProgress={scanProgress}
       />
 
       {cards.length > 0 && (

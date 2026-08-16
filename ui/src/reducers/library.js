@@ -49,6 +49,7 @@ const del_library = {
 
 const scanning = [];
 const scan_status = {};
+const scan_progress = {};
 
 const initialState = {
   fetch_libraries,
@@ -57,6 +58,7 @@ const initialState = {
   del_library,
   scanning,
   scan_status,
+  scan_progress,
 };
 
 export default function libraryReducer(state = initialState, action) {
@@ -181,11 +183,14 @@ export default function libraryReducer(state = initialState, action) {
       };
     case RM_LIBRARY: {
       const remainingScanStatus = { ...state.scan_status };
+      const remainingScanProgress = { ...state.scan_progress };
       delete remainingScanStatus[action.id];
+      delete remainingScanProgress[action.id];
       return {
         ...state,
         scanning: state.scanning.filter((id) => id !== action.id),
         scan_status: remainingScanStatus,
+        scan_progress: remainingScanProgress,
         fetch_libraries: {
           ...state.fetch_libraries,
           items: state.fetch_libraries.items.filter(
@@ -216,6 +221,13 @@ export default function libraryReducer(state = initialState, action) {
           ...state.scan_status,
           [action.id]: "scanning",
         },
+        scan_progress: {
+          ...state.scan_progress,
+          [action.id]: action.payload || {
+            ...state.scan_progress[action.id],
+            status: "scanning",
+          },
+        },
       };
     case SCAN_STOP:
       return {
@@ -224,6 +236,13 @@ export default function libraryReducer(state = initialState, action) {
         scan_status: {
           ...state.scan_status,
           [action.id]: "complete",
+        },
+        scan_progress: {
+          ...state.scan_progress,
+          [action.id]: action.payload || {
+            ...state.scan_progress[action.id],
+            status: "complete",
+          },
         },
       };
     case SCAN_FAILED:
@@ -234,6 +253,13 @@ export default function libraryReducer(state = initialState, action) {
           ...state.scan_status,
           [action.id]: "failed",
         },
+        scan_progress: {
+          ...state.scan_progress,
+          [action.id]: action.payload || {
+            ...state.scan_progress[action.id],
+            status: "failed",
+          },
+        },
       };
     case SCAN_CANCELLED:
       return {
@@ -242,6 +268,13 @@ export default function libraryReducer(state = initialState, action) {
         scan_status: {
           ...state.scan_status,
           [action.id]: "cancelled",
+        },
+        scan_progress: {
+          ...state.scan_progress,
+          [action.id]: action.payload || {
+            ...state.scan_progress[action.id],
+            status: "cancelled",
+          },
         },
       };
     default:

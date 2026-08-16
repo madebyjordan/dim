@@ -189,6 +189,7 @@ async fn durable_rescan_of_existing_file_releases_writer_for_item_update() {
             library,
             vec![tempdir.path().to_path_buf()],
             Some(scan_id),
+            None,
             super::super::ScanScope::Full,
         ),
     )
@@ -238,6 +239,7 @@ async fn durable_scan_counts_probe_failures() {
         library,
         vec![directory.path().to_path_buf()],
         Some(scan_id),
+        None,
         super::super::ScanScope::Full,
     )
     .await
