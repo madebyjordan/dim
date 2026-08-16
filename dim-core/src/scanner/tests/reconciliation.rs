@@ -145,7 +145,10 @@ async fn full_scan_of_deleted_library_root_reconciles_catalogue_to_empty() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_scan_of_empty_library_root_removes_stale_catalogue() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("dim-scan")
+        .tempdir()
+        .unwrap();
     let stale_path = root.path().join("Friday (1995).mkv");
     let mut conn = dim_database::get_conn_memory().await.unwrap();
     let library_id = library_with_location(&conn, root.path().to_str().unwrap()).await;
@@ -158,6 +161,52 @@ async fn full_scan_of_empty_library_root_removes_stale_catalogue() {
 
     assert_eq!(counts(&conn, library_id).await, (0, 0));
     assert_eq!(latest_status(&conn, library_id).await, "complete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_successful_scan_streams_and_accounts_for_every_discovery() {
+    const FILES: usize = 512;
+    let root = tempfile::Builder::new()
+        .prefix("dim-large-scan")
+        .tempdir()
+        .unwrap();
+    for index in 0..FILES {
+        std::fs::write(
+            root.path().join(format!("sidecar-{index}.txt")),
+            b"metadata",
+        )
+        .unwrap();
+    }
+    let stale_path = root.path().join("Removed Movie (2024).mp4");
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, root.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, stale_path.to_str().unwrap()).await;
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    super::super::start(&mut conn, library_id, events, Arc::new(UnusedProvider))
+        .await
+        .unwrap();
+
+    assert_eq!(counts(&conn, library_id).await, (0, 0));
+    let scan = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
+        "SELECT kind, status, discovered, skipped,
+                (SELECT COUNT(*) FROM ingestion_item WHERE scan_id = ingestion_scan.id)
+         FROM ingestion_scan WHERE library_id = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(library_id)
+    .fetch_one(conn.read_ref())
+    .await
+    .unwrap();
+    assert_eq!(
+        scan,
+        (
+            "full".into(),
+            "complete".into(),
+            FILES as i64,
+            FILES as i64,
+            FILES as i64,
+        )
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -201,6 +250,67 @@ async fn failed_full_traversal_preserves_existing_catalogue_and_reports_failure(
         .unwrap()
         .contains("EventStartedScanning"));
     assert!(receiver.recv().await.unwrap().contains("EventScanFailed"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn filesystem_loop_failure_never_reconciles() {
+    use std::os::unix::fs::symlink;
+
+    let good_root = tempfile::Builder::new()
+        .prefix("dim-good-root")
+        .tempdir()
+        .unwrap();
+    std::fs::write(
+        good_root.path().join("Streamed Movie (2026).mkv"),
+        b"seen before traversal fails",
+    )
+    .unwrap();
+    let bad_root = tempfile::Builder::new()
+        .prefix("dim-bad-root")
+        .tempdir()
+        .unwrap();
+    let loop_dir = bad_root.path().join("loop");
+    std::fs::create_dir(&loop_dir).unwrap();
+    symlink(&loop_dir, loop_dir.join("back")).unwrap();
+
+    let stale_path = good_root.path().join("Existing Movie (2025).mp4");
+    let mut conn = dim_database::get_conn_memory().await.unwrap();
+    let library_id = library_with_location(&conn, good_root.path().to_str().unwrap()).await;
+    insert_catalogued_movie(&conn, library_id, stale_path.to_str().unwrap()).await;
+    let (events, _receiver) = tokio::sync::mpsc::channel(8);
+
+    let error = super::super::start_custom(
+        &mut conn,
+        library_id,
+        vec![
+            good_root.path().to_path_buf(),
+            bad_root.path().to_path_buf(),
+        ],
+        events,
+        MediaType::Movie,
+        Arc::new(UnusedProvider),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        super::super::Error::FilesystemTraversal { .. }
+    ));
+    assert_eq!(counts(&conn, library_id).await, (1, 1));
+    assert_eq!(latest_status(&conn, library_id).await, "failed");
+    let discovered: i64 = sqlx::query_scalar(
+        "SELECT discovered FROM ingestion_scan WHERE library_id = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(library_id)
+    .fetch_one(conn.read_ref())
+    .await
+    .unwrap();
+    assert!(
+        discovered > 0,
+        "failure did not occur after streaming began"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

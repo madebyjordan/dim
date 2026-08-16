@@ -26,16 +26,15 @@ use dim_extern_api::filename::Metadata;
 use dim_extern_api::filename::TorrentMetadata;
 use dim_extern_api::ExternalQueryIntoShow;
 
-use futures::FutureExt;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use ignore::WalkBuilder;
 use itertools::Itertools;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -46,6 +45,7 @@ use tracing::warn;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex as ParkingMutex;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
 pub use error::Error;
@@ -60,6 +60,12 @@ pub(super) static SUPPORTED_EXTS: &[&str] = &[
 
 static LIBRARY_SCAN_LOCKS: Lazy<ParkingMutex<HashMap<i64, Arc<AsyncMutex<()>>>>> =
     Lazy::new(|| ParkingMutex::new(HashMap::new()));
+
+// The blocking walker may never get more than this far ahead of async filename parsing and file
+// assessment. In particular, this bounds memory on slow/network filesystems and makes dropping a
+// scan close the channel promptly instead of leaving a complete tree queued in memory.
+const DISCOVERY_QUEUE_CAPACITY: usize = 64;
+const ASSESSMENT_CONCURRENCY: usize = 4;
 
 fn library_scan_lock(library_id: i64) -> Arc<AsyncMutex<()>> {
     LIBRARY_SCAN_LOCKS
@@ -81,11 +87,12 @@ enum ScanScope {
     Incremental,
 }
 
-fn discover_files_checked(
+fn walk_files_checked(
     paths: impl Iterator<Item = impl AsRef<Path>>,
     scope: ScanScope,
-) -> Result<Vec<DiscoveredFile>, Error> {
-    let mut files = Vec::with_capacity(2048);
+    emit: &mut dyn FnMut(DiscoveredFile) -> bool,
+) -> Result<usize, Error> {
+    let mut files = 0;
     for path in paths {
         let root = path.as_ref();
         let metadata = match std::fs::metadata(root) {
@@ -126,13 +133,67 @@ fn discover_files_checked(
             {
                 continue;
             }
-            files.push(DiscoveredFile {
+            let discovered = DiscoveredFile {
                 supported: supported_path(entry.path()),
                 path: entry.into_path(),
-            });
+            };
+            if !emit(discovered) {
+                return Ok(files);
+            }
+            files += 1;
         }
     }
     Ok(files)
+}
+
+#[derive(Debug)]
+struct DiscoveryStats {
+    files: usize,
+    elapsed: std::time::Duration,
+}
+
+fn spawn_discovery_worker<F>(
+    walk: F,
+) -> (
+    mpsc::Receiver<DiscoveredFile>,
+    tokio::task::JoinHandle<Result<DiscoveryStats, Error>>,
+)
+where
+    F: FnOnce(&mut dyn FnMut(DiscoveredFile) -> bool) -> Result<usize, Error> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel(DISCOVERY_QUEUE_CAPACITY);
+    let worker = tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
+        let mut emit = |file| sender.blocking_send(file).is_ok();
+        let files = walk(&mut emit)?;
+        Ok(DiscoveryStats {
+            files,
+            elapsed: started.elapsed(),
+        })
+    });
+    (receiver, worker)
+}
+
+fn spawn_checked_discovery<T>(
+    paths: Vec<T>,
+    scope: ScanScope,
+) -> (
+    mpsc::Receiver<DiscoveredFile>,
+    tokio::task::JoinHandle<Result<DiscoveryStats, Error>>,
+)
+where
+    T: AsRef<Path> + Send + 'static,
+{
+    spawn_discovery_worker(move |emit| walk_files_checked(paths.into_iter(), scope, emit))
+}
+
+fn finish_discovery_worker(
+    result: Result<Result<DiscoveryStats, Error>, tokio::task::JoinError>,
+) -> Result<DiscoveryStats, Error> {
+    result.map_err(|error| Error::FilesystemTraversal {
+        path: "scanner worker".into(),
+        message: error.to_string(),
+    })?
 }
 
 fn supported_path(path: &Path) -> bool {
@@ -172,6 +233,31 @@ pub fn discover_files(paths: impl Iterator<Item = impl AsRef<Path>>) -> Vec<Disc
     files
 }
 
+fn parse_filename(file: &Path) -> Option<Vec<Metadata>> {
+    let filename = match file.file_stem().and_then(OsStr::to_str) {
+        Some(filename) => filename,
+        None => {
+            warn!(file = ?file, "Received a filename that is not unicode");
+            return None;
+        }
+    };
+
+    let metadata = IntoIterator::into_iter([
+        TorrentMetadata::from_str(filename),
+        Anitomy::from_str(filename),
+        CombinedExtractor::from_str(filename),
+    ])
+    .filter_map(|metadata| metadata)
+    .collect::<Vec<_>>();
+
+    if metadata.is_empty() {
+        warn!(file = ?file, "Failed to parse the filename and extract metadata.");
+        None
+    } else {
+        Some(metadata)
+    }
+}
+
 /// Function recursively walks the paths passed and returns all files in those directories.
 /// FIXME: THIS IS NOT ASYNC-SAFE!!!
 /// NOTE: I've noticed that walking a directory mounted over ssh is very slow, 80 files in like 300
@@ -191,28 +277,9 @@ pub fn parse_filenames(
     let mut metadata = Vec::new();
 
     for file in files {
-        let filename = match file.as_ref().file_stem().and_then(OsStr::to_str) {
-            Some(x) => x,
-            None => {
-                warn!(file = ?file.as_ref(), "Received a filename that is not unicode");
-                continue;
-            }
-        };
-
-        let metas = IntoIterator::into_iter([
-            TorrentMetadata::from_str(&filename),
-            Anitomy::from_str(&filename),
-            CombinedExtractor::from_str(&filename),
-        ])
-        .filter_map(|x| x)
-        .collect::<Vec<_>>();
-
-        if metas.is_empty() {
-            warn!(file = ?file.as_ref(), "Failed to parse the filename and extract metadata.");
-            continue;
+        if let Some(parsed) = parse_filename(file.as_ref()) {
+            metadata.push((file.as_ref().into(), parsed));
         }
-
-        metadata.push((file.as_ref().into(), metas));
     }
 
     metadata
@@ -281,6 +348,85 @@ async fn update_item(
     Ok(())
 }
 
+async fn handle_assessment(
+    conn: &dim_database::DbConnection,
+    library_id: i64,
+    scan_id: Option<i64>,
+    insertables: &mut Vec<(InsertableMediaFile, Vec<Metadata>)>,
+    (path, result, metadata): (
+        PathBuf,
+        Result<InsertableMediaFile, CreatorError>,
+        Vec<Metadata>,
+    ),
+) -> Result<(), Error> {
+    match result {
+        Ok(insertable) => insertables.push((insertable, metadata)),
+        Err(CreatorError::FileExists) => {
+            {
+                let mut lock = conn.writer().lock_owned().await;
+                let mut tx = dim_database::write_tx(&mut lock).await?;
+                sqlx::query("UPDATE mediafile SET missing_since = NULL WHERE library_id = ? AND target_file = ?")
+                    .bind(library_id)
+                    .bind(path.to_string_lossy().into_owned())
+                    .execute(&mut tx)
+                    .await?;
+                tx.commit().await?;
+            }
+            if let Some(scan_id) = scan_id {
+                update_item(
+                    conn,
+                    scan_id,
+                    library_id,
+                    &path,
+                    None,
+                    "commit",
+                    "skipped",
+                    Some("already_catalogued"),
+                    None,
+                )
+                .await?;
+            }
+        }
+        Err(error) => {
+            if let Some(scan_id) = scan_id {
+                let retryable = error.retryable();
+                let status = if retryable { "retryable" } else { "failed" };
+                let stage = if matches!(
+                    &error,
+                    CreatorError::FileUnstable | CreatorError::FileMissing
+                ) {
+                    "stability"
+                } else {
+                    "probing"
+                };
+                update_item(
+                    conn,
+                    scan_id,
+                    library_id,
+                    &path,
+                    None,
+                    stage,
+                    status,
+                    Some(error.class()),
+                    Some(&error.to_string()),
+                )
+                .await?;
+                if !retryable {
+                    let mut lock = conn.writer().lock_owned().await;
+                    let mut tx = dim_database::write_tx(&mut lock).await?;
+                    dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "failed").await?;
+                    tx.commit().await?;
+                }
+            }
+            warn!(
+                ?error,
+                "Skipping media candidate after classified assessment failure"
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn insert_mediafiles_for_scan(
     conn: &mut dim_database::DbConnection,
     library_id: i64,
@@ -288,36 +434,38 @@ async fn insert_mediafiles_for_scan(
     scan_id: Option<i64>,
     scope: ScanScope,
 ) -> Result<Vec<WorkUnit>, Error> {
-    let now = Instant::now();
-    let discovered = tokio::task::spawn_blocking(move || {
-        if scan_id.is_some() {
-            discover_files_checked(dirs.into_iter(), scope)
+    let (mut discovered, mut discovery_worker) = spawn_checked_discovery(dirs, scope);
+    let mut discovery_stats = None;
+    let mut instance = MediafileCreator::new(conn.clone(), library_id).await;
+    let mut assessments = FuturesUnordered::new();
+    let mut insertables = Vec::new();
+    let mut max_in_flight = 0;
+
+    loop {
+        let file = if discovery_stats.is_some() {
+            discovered.recv().await
         } else {
-            Ok(discover_files(dirs.into_iter()))
-        }
-    })
-    .await
-    .map_err(|error| Error::FilesystemTraversal {
-        path: "scanner worker".into(),
-        message: error.to_string(),
-    })??;
-    let subfiles = discovered
-        .iter()
-        .filter(|file| file.supported)
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    let elapsed = now.elapsed();
+            tokio::select! {
+                biased;
+                result = &mut discovery_worker => {
+                    match finish_discovery_worker(result) {
+                        Ok(stats) => {
+                            discovery_stats = Some(stats);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                file = discovered.recv() => file,
+            }
+        };
+        let Some(file) = file else {
+            break;
+        };
 
-    info!(
-        elapsed_ms = elapsed.as_millis(),
-        files = discovered.len(),
-        "Walked all target directories."
-    );
-
-    if let Some(scan_id) = scan_id {
-        let mut lock = conn.writer().lock_owned().await;
-        let mut tx = dim_database::write_tx(&mut lock).await?;
-        for file in &discovered {
+        if let Some(scan_id) = scan_id {
+            let mut lock = conn.writer().lock_owned().await;
+            let mut tx = dim_database::write_tx(&mut lock).await?;
             let (status, class) = if file.supported {
                 ("complete", None)
             } else {
@@ -341,147 +489,94 @@ async fn insert_mediafiles_for_scan(
             if !file.supported {
                 dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "skipped").await?;
             }
+            tx.commit().await?;
         }
-        tx.commit().await?;
-    }
 
-    let parsed = parse_filenames(subfiles.iter());
-    if let Some(scan_id) = scan_id {
-        let parsed_paths = parsed
-            .iter()
-            .map(|(path, _)| path.as_path())
-            .collect::<std::collections::HashSet<_>>();
-        for path in subfiles
-            .iter()
-            .filter(|path| !parsed_paths.contains(path.as_path()))
-        {
-            update_item(
-                conn,
-                scan_id,
-                library_id,
-                path,
-                None,
-                "matching",
-                "failed",
-                Some("filename_unparseable"),
-                None,
-            )
-            .await?;
+        if !file.supported {
+            continue;
         }
-    }
 
-    let mut instance = MediafileCreator::new(conn.clone(), library_id).await;
-
-    let insertable_futures = parsed
-        .clone()
-        .into_iter()
-        .map(|(path, metadata)| {
-            let primary = metadata[0].clone();
-            let assessed_path = path.clone();
-            async {
-                (
-                    assessed_path,
-                    instance.construct_mediafile(path, primary).await,
-                    metadata,
+        let Some(metadata) = parse_filename(&file.path) else {
+            if let Some(scan_id) = scan_id {
+                update_item(
+                    conn,
+                    scan_id,
+                    library_id,
+                    &file.path,
+                    None,
+                    "matching",
+                    "failed",
+                    Some("filename_unparseable"),
+                    None,
                 )
+                .await?;
             }
-            .boxed()
-        })
-        .chunks(4)
-        .into_iter()
-        .map(|chunk| chunk.collect())
-        .collect::<Vec<
-            Vec<
-                Pin<
-                    Box<
-                        dyn Future<
-                                Output = (
-                                    PathBuf,
-                                    Result<InsertableMediaFile, CreatorError>,
-                                    Vec<Metadata>,
-                                ),
-                            > + Send,
-                    >,
-                >,
-            >,
-        >>();
+            continue;
+        };
 
-    let mut insertables = vec![];
+        let primary = metadata[0].clone();
+        let path = file.path;
+        let assessed_path = path.clone();
+        assessments.push(async {
+            (
+                assessed_path,
+                instance.construct_mediafile(path, primary).await,
+                metadata,
+            )
+        });
+        max_in_flight = max_in_flight.max(assessments.len());
 
-    for chunk in insertable_futures.into_iter() {
-        let results = futures::future::join_all(chunk).await;
-
-        for (path, result, metadata) in results {
-            match result {
-                Ok(insertable) => insertables.push((insertable, metadata)),
-                Err(CreatorError::FileExists) => {
-                    {
-                        let mut lock = conn.writer().lock_owned().await;
-                        let mut tx = dim_database::write_tx(&mut lock).await?;
-                        sqlx::query("UPDATE mediafile SET missing_since = NULL WHERE library_id = ? AND target_file = ?")
-                            .bind(library_id)
-                            .bind(path.to_string_lossy().into_owned())
-                            .execute(&mut tx)
-                            .await?;
-                        tx.commit().await?;
-                    }
-                    if let Some(scan_id) = scan_id {
-                        update_item(
-                            conn,
-                            scan_id,
-                            library_id,
-                            &path,
-                            None,
-                            "commit",
-                            "skipped",
-                            Some("already_catalogued"),
-                            None,
-                        )
-                        .await?;
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    if let Some(scan_id) = scan_id {
-                        let retryable = error.retryable();
-                        let status = if retryable { "retryable" } else { "failed" };
-                        let stage = if matches!(
-                            &error,
-                            CreatorError::FileUnstable | CreatorError::FileMissing
-                        ) {
-                            "stability"
-                        } else {
-                            "probing"
-                        };
-                        update_item(
-                            conn,
-                            scan_id,
-                            library_id,
-                            &path,
-                            None,
-                            stage,
-                            status,
-                            Some(error.class()),
-                            Some(&error.to_string()),
-                        )
-                        .await?;
-                        if !retryable {
-                            let mut lock = conn.writer().lock_owned().await;
-                            let mut tx = dim_database::write_tx(&mut lock).await?;
-                            dim_database::ingestion::ScanRun::count(&mut tx, scan_id, "failed")
-                                .await?;
-                            tx.commit().await?;
+        if assessments.len() >= ASSESSMENT_CONCURRENCY {
+            let outcome = if discovery_stats.is_some() {
+                assessments
+                    .next()
+                    .await
+                    .expect("a full assessment set cannot be empty")
+            } else {
+                tokio::select! {
+                    biased;
+                    result = &mut discovery_worker => {
+                        match finish_discovery_worker(result) {
+                            Ok(stats) => {
+                                discovery_stats = Some(stats);
+                                assessments
+                                    .next()
+                                    .await
+                                    .expect("a full assessment set cannot be empty")
+                            }
+                            Err(error) => return Err(error),
                         }
                     }
-                    warn!(
-                        ?error,
-                        "Skipping media candidate after classified assessment failure"
-                    );
-                    continue;
+                    outcome = assessments.next() => {
+                        outcome.expect("a full assessment set cannot be empty")
+                    }
                 }
-            }
+            };
+            handle_assessment(conn, library_id, scan_id, &mut insertables, outcome).await?;
         }
     }
+
+    // A closed channel only means that the walker stopped. Its result is the authority signal:
+    // never insert newly assessed rows (and therefore never reconcile) until it confirms that all
+    // roots completed without a traversal error.
+    let discovery = match discovery_stats {
+        Some(stats) => stats,
+        None => finish_discovery_worker(discovery_worker.await)?,
+    };
+
+    while let Some(outcome) = assessments.next().await {
+        handle_assessment(conn, library_id, scan_id, &mut insertables, outcome).await?;
+    }
+    drop(assessments);
+
+    info!(
+        elapsed_ms = discovery.elapsed.as_millis(),
+        files = discovery.files,
+        queue_capacity = DISCOVERY_QUEUE_CAPACITY,
+        max_in_flight,
+        assessment_concurrency = ASSESSMENT_CONCURRENCY,
+        "Streamed all target directories."
+    );
 
     let mut mediafiles = vec![];
 
