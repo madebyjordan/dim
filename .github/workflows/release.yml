@@ -63,7 +63,9 @@ jobs:
     needs: validate-tag
     runs-on: ubuntu-latest
     env:
-      TMPDIR: ${{ github.workspace }}/.tmp
+      # Keep executable test fixtures outside the checkout so scanner discovery
+      # does not exclude them as repository-internal paths.
+      TMPDIR: ${{ runner.workspace }}/release-tmp
     steps:
       - uses: actions/checkout@v4
         with:

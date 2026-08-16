@@ -257,7 +257,7 @@ test("a version tag triggers exactly one publishing workflow", () => {
   );
   assert.match(release, /-o utils\/ffprobe/);
   assert.match(release, /GITHUB_WORKSPACE\/utils.*GITHUB_PATH/);
-  assert.match(release, /TMPDIR:.*github\.workspace.*\.tmp/);
+  assert.match(release, /TMPDIR:.*runner\.workspace.*release-tmp/);
   assert.match(release, /lfs: true/);
 });
 
