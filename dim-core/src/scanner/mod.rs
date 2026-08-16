@@ -75,6 +75,66 @@ pub struct DiscoveredFile {
     pub supported: bool,
 }
 
+#[derive(Clone, Copy)]
+enum ScanScope {
+    Full,
+    Incremental,
+}
+
+fn discover_files_checked(
+    paths: impl Iterator<Item = impl AsRef<Path>>,
+    scope: ScanScope,
+) -> Result<Vec<DiscoveredFile>, Error> {
+    let mut files = Vec::with_capacity(2048);
+    for path in paths {
+        let root = path.as_ref();
+        let metadata = match std::fs::metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                info!(path = ?root, "Library scan root no longer exists; treating it as authoritatively empty");
+                continue;
+            }
+            Err(error) => {
+                return Err(Error::FilesystemTraversal {
+                    path: root.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                })
+            }
+        };
+        if matches!(scope, ScanScope::Full) && !metadata.is_dir() {
+            return Err(Error::FilesystemTraversal {
+                path: root.to_string_lossy().into_owned(),
+                message: "configured library root is not a directory".into(),
+            });
+        }
+
+        for entry in WalkBuilder::new(root)
+            .follow_links(true)
+            .add_custom_ignore_filename(".plexignore")
+            .build()
+        {
+            let entry = entry.map_err(|error| Error::FilesystemTraversal {
+                path: root.to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+            if !entry.file_type().map_or(false, |kind| kind.is_file())
+                || entry.path().iter().any(|part| {
+                    part.to_str()
+                        .map(|part| part.starts_with('.'))
+                        .unwrap_or(false)
+                })
+            {
+                continue;
+            }
+            files.push(DiscoveredFile {
+                supported: supported_path(entry.path()),
+                path: entry.into_path(),
+            });
+        }
+    }
+    Ok(files)
+}
+
 fn supported_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -186,7 +246,7 @@ pub async fn insert_mediafiles(
     library_id: i64,
     dirs: Vec<impl AsRef<Path> + Send + 'static>,
 ) -> Result<Vec<WorkUnit>, Error> {
-    insert_mediafiles_for_scan(conn, library_id, dirs, None).await
+    insert_mediafiles_for_scan(conn, library_id, dirs, None, ScanScope::Incremental).await
 }
 
 async fn update_item(
@@ -226,11 +286,21 @@ async fn insert_mediafiles_for_scan(
     library_id: i64,
     dirs: Vec<impl AsRef<Path> + Send + 'static>,
     scan_id: Option<i64>,
+    scope: ScanScope,
 ) -> Result<Vec<WorkUnit>, Error> {
     let now = Instant::now();
-    let discovered = tokio::task::spawn_blocking(|| discover_files(dirs.into_iter()))
-        .await
-        .unwrap();
+    let discovered = tokio::task::spawn_blocking(move || {
+        if scan_id.is_some() {
+            discover_files_checked(dirs.into_iter(), scope)
+        } else {
+            Ok(discover_files(dirs.into_iter()))
+        }
+    })
+    .await
+    .map_err(|error| Error::FilesystemTraversal {
+        path: "scanner worker".into(),
+        message: error.to_string(),
+    })??;
     let subfiles = discovered
         .iter()
         .filter(|file| file.supported)
@@ -464,6 +534,179 @@ async fn insert_mediafiles_for_scan(
     Ok(work)
 }
 
+async fn reconcile_library(
+    conn: &dim_database::DbConnection,
+    library_id: i64,
+    scan_id: i64,
+) -> Result<(), Error> {
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock).await?;
+
+    let removed_files = sqlx::query(
+        "DELETE FROM mediafile
+         WHERE library_id = ?
+           AND NOT EXISTS (
+               SELECT 1 FROM ingestion_item
+               WHERE scan_id = ?
+                 AND ingestion_item.library_id = mediafile.library_id
+                 AND ingestion_item.path = mediafile.target_file
+                 AND COALESCE(ingestion_item.error_class, '') != 'unsupported_format'
+           )",
+    )
+    .bind(library_id)
+    .bind(scan_id)
+    .execute(&mut tx)
+    .await?
+    .rows_affected();
+
+    // Remove catalogue parents only after their filesystem children have been reconciled. The
+    // ordering preserves valid TV hierarchies while cleaning childless episodes, seasons, shows,
+    // and movies in the same transaction as the stale mediafile deletion.
+    sqlx::query(
+        "DELETE FROM _tblmedia
+         WHERE library_id = ? AND media_type = 'episode'
+           AND NOT EXISTS (SELECT 1 FROM mediafile WHERE mediafile.media_id = _tblmedia.id)",
+    )
+    .bind(library_id)
+    .execute(&mut tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM _tblseason
+         WHERE NOT EXISTS (SELECT 1 FROM episode WHERE episode.seasonid = _tblseason.id)
+           AND tvshowid IN (SELECT id FROM _tblmedia WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .execute(&mut tx)
+    .await?;
+    let removed_media = sqlx::query(
+        "DELETE FROM _tblmedia
+         WHERE library_id = ? AND media_type != 'episode'
+           AND NOT EXISTS (SELECT 1 FROM mediafile WHERE mediafile.media_id = _tblmedia.id)
+           AND NOT EXISTS (SELECT 1 FROM _tblseason WHERE _tblseason.tvshowid = _tblmedia.id)",
+    )
+    .bind(library_id)
+    .execute(&mut tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    info!(
+        library_id,
+        scan_id,
+        removed_files,
+        removed_media,
+        "Reconciled library catalogue with authoritative filesystem scan"
+    );
+    Ok(())
+}
+
+struct ScanRunGuard {
+    conn: dim_database::DbConnection,
+    events: EventTx,
+    library_id: i64,
+    scan_id: i64,
+    terminal: bool,
+}
+
+impl ScanRunGuard {
+    fn new(
+        conn: dim_database::DbConnection,
+        events: EventTx,
+        library_id: i64,
+        scan_id: i64,
+    ) -> Self {
+        Self {
+            conn,
+            events,
+            library_id,
+            scan_id,
+            terminal: false,
+        }
+    }
+
+    async fn finish(&mut self, status: &str, error: Option<&str>) -> Result<(), Error> {
+        let mut lock = self.conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await?;
+        dim_database::ingestion::ScanRun::finish(&mut tx, self.scan_id, status, error).await?;
+        tx.commit().await?;
+        self.terminal = true;
+
+        let event_type = match status {
+            "complete" => dim_events::PushEventType::EventStoppedScanning,
+            "cancelled" => dim_events::PushEventType::EventScanCancelled,
+            _ => dim_events::PushEventType::EventScanFailed,
+        };
+        if let Err(event_error) = self.events.try_send(
+            dim_events::Message {
+                id: self.library_id,
+                event_type,
+            }
+            .to_string(),
+        ) {
+            warn!(
+                ?event_error,
+                library_id = self.library_id,
+                scan_id = self.scan_id,
+                "Could not publish terminal scan event"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ScanRunGuard {
+    fn drop(&mut self) {
+        if self.terminal {
+            return;
+        }
+        let conn = self.conn.clone();
+        let events = self.events.clone();
+        let library_id = self.library_id;
+        let scan_id = self.scan_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut lock = conn.writer().lock_owned().await;
+                match dim_database::write_tx(&mut lock).await {
+                    Ok(mut tx) => {
+                        if let Err(error) = dim_database::ingestion::ScanRun::finish(
+                            &mut tx,
+                            scan_id,
+                            "cancelled",
+                            Some("scan task was cancelled before reaching a terminal state"),
+                        )
+                        .await
+                        {
+                            error!(
+                                ?error,
+                                library_id, scan_id, "Failed to mark cancelled scan terminal"
+                            );
+                            return;
+                        }
+                        if let Err(error) = tx.commit().await {
+                            error!(
+                                ?error,
+                                library_id, scan_id, "Failed to commit cancelled scan state"
+                            );
+                            return;
+                        }
+                        let _ = events.try_send(
+                            dim_events::Message {
+                                id: library_id,
+                                event_type: dim_events::PushEventType::EventScanCancelled,
+                            }
+                            .to_string(),
+                        );
+                    }
+                    Err(error) => error!(
+                        ?error,
+                        library_id, scan_id, "Failed to open cancelled scan transaction"
+                    ),
+                };
+            });
+        }
+    }
+}
+
 #[instrument(skip(conn, dirs, tx))]
 pub async fn start_custom(
     conn: &mut dim_database::DbConnection,
@@ -473,30 +716,76 @@ pub async fn start_custom(
     media_type: MediaType,
     provider: Arc<dyn ExternalQueryIntoShow>,
 ) -> Result<(), Error> {
+    start_scoped_custom(
+        conn,
+        library_id,
+        dirs,
+        tx,
+        media_type,
+        provider,
+        ScanScope::Full,
+    )
+    .await
+}
+
+async fn start_incremental_custom(
+    conn: &mut dim_database::DbConnection,
+    library_id: i64,
+    dirs: Vec<impl AsRef<Path> + Send + 'static>,
+    tx: EventTx,
+    media_type: MediaType,
+    provider: Arc<dyn ExternalQueryIntoShow>,
+) -> Result<(), Error> {
+    start_scoped_custom(
+        conn,
+        library_id,
+        dirs,
+        tx,
+        media_type,
+        provider,
+        ScanScope::Incremental,
+    )
+    .await
+}
+
+async fn start_scoped_custom(
+    conn: &mut dim_database::DbConnection,
+    library_id: i64,
+    dirs: Vec<impl AsRef<Path> + Send + 'static>,
+    tx: EventTx,
+    media_type: MediaType,
+    provider: Arc<dyn ExternalQueryIntoShow>,
+    scope: ScanScope,
+) -> Result<(), Error> {
     // Watcher reconciliation and user-requested scans share the same per-library ownership gate.
     // Cancellation drops this guard; the next owner then records the abandoned durable run.
     let _scan_owner = library_scan_lock(library_id).lock_owned().await;
     let scan_id = {
         let mut lock = conn.writer().lock_owned().await;
         let mut db_tx = dim_database::write_tx(&mut lock).await?;
-        let id = dim_database::ingestion::ScanRun::begin(&mut db_tx, library_id, "full").await?;
+        let kind = if matches!(scope, ScanScope::Full) {
+            "full"
+        } else {
+            "watcher"
+        };
+        let id = dim_database::ingestion::ScanRun::begin(&mut db_tx, library_id, kind).await?;
         db_tx.commit().await?;
         id
     };
+    let mut guard = ScanRunGuard::new(conn.clone(), tx.clone(), library_id, scan_id);
 
-    let result = run_scan_custom(conn, library_id, dirs, tx, media_type, provider, scan_id).await;
+    let result = run_scan_custom(
+        conn, library_id, dirs, tx, media_type, provider, scan_id, scope,
+    )
+    .await;
 
     let error_message = result.as_ref().err().map(ToString::to_string);
-    let mut lock = conn.writer().lock_owned().await;
-    let mut db_tx = dim_database::write_tx(&mut lock).await?;
-    dim_database::ingestion::ScanRun::finish(
-        &mut db_tx,
-        scan_id,
-        if result.is_ok() { "complete" } else { "failed" },
-        error_message.as_deref(),
-    )
-    .await?;
-    db_tx.commit().await?;
+    guard
+        .finish(
+            if result.is_ok() { "complete" } else { "failed" },
+            error_message.as_deref(),
+        )
+        .await?;
     result
 }
 
@@ -508,19 +797,17 @@ async fn run_scan_custom(
     media_type: MediaType,
     provider: Arc<dyn ExternalQueryIntoShow>,
     scan_id: i64,
+    scope: ScanScope,
 ) -> Result<(), Error> {
     info!(library_id, "Scanning library");
 
-    if let Err(error) = tx
-        .send(
-            dim_events::Message {
-                id: library_id,
-                event_type: dim_events::PushEventType::EventStartedScanning,
-            }
-            .to_string(),
-        )
-        .await
-    {
+    if let Err(error) = tx.try_send(
+        dim_events::Message {
+            id: library_id,
+            event_type: dim_events::PushEventType::EventStartedScanning,
+        }
+        .to_string(),
+    ) {
         warn!(?error, library_id, "Could not publish scan start event");
     }
 
@@ -531,7 +818,8 @@ async fn run_scan_custom(
     };
 
     let now = Instant::now();
-    let workunits = insert_mediafiles_for_scan(conn, library_id, dirs, Some(scan_id)).await?;
+    let workunits =
+        insert_mediafiles_for_scan(conn, library_id, dirs, Some(scan_id), scope).await?;
     let workunits_size = workunits.len();
 
     info!(
@@ -643,28 +931,16 @@ async fn run_scan_custom(
         count_tx.commit().await?;
     }
 
+    if matches!(scope, ScanScope::Full) {
+        reconcile_library(conn, library_id, scan_id).await?;
+    }
+
     info!(
         library_id,
         units = workunits_size,
         elapsed_ms = now.elapsed().as_millis(),
         "Finished scanning library."
     );
-
-    if let Err(error) = tx
-        .send(
-            dim_events::Message {
-                id: library_id,
-                event_type: dim_events::PushEventType::EventStoppedScanning,
-            }
-            .to_string(),
-        )
-        .await
-    {
-        warn!(
-            ?error,
-            library_id, "Could not publish scan completion event"
-        );
-    }
 
     Ok(())
 }

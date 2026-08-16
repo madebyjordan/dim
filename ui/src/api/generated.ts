@@ -42,7 +42,7 @@ export type Library = {
   name: string;
   locations: Array<string>;
   media_type: string;
-  scan_status?: "scanning" | "complete" | "failed";
+  scan_status?: "scanning" | "complete" | "failed" | "cancelled";
 };
 
 export type Chapters = { credits: number };
@@ -85,7 +85,9 @@ export type UnmatchedFiles = {
   files: Array<UnmatchedMediaFile>;
 };
 
-export type ScanStatus = { status: "scanning" | "complete" | "failed" };
+export type ScanStatus = {
+  status: "scanning" | "complete" | "failed" | "cancelled";
+};
 
 export type RematchMedia = { external_id: string; media_type: "movie" | "tv" };
 
@@ -182,6 +184,7 @@ export type WebSocketEvent = {
     | "EventStartedScanning"
     | "EventStoppedScanning"
     | "EventScanFailed"
+    | "EventScanCancelled"
     | "EventAuthOk"
     | "EventAuthErr"
     | "MediafileMatched";

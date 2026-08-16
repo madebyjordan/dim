@@ -8,6 +8,8 @@ import {
   wsScanStart,
   wsScanStop,
   wsScanFailed,
+  wsScanCancelled,
+  fetchLibraryScanStatus,
 } from "../../actions/library.js";
 import useWebSocket from "../../hooks/ws";
 
@@ -18,6 +20,7 @@ function Libraries() {
 
   const user = useSelector((store) => store.user);
   const libraries = useSelector((store) => store.library.fetch_libraries);
+  const scanning = useSelector((store) => store.library.scanning);
   const ws = useWebSocket();
 
   const handleWS = useCallback(
@@ -34,6 +37,10 @@ function Libraries() {
 
       if (payload.type === "EventScanFailed") {
         dispatch(wsScanFailed(payload.id));
+      }
+
+      if (payload.type === "EventScanCancelled") {
+        dispatch(wsScanCancelled(payload.id));
       }
 
       if (payload.type === "EventNewLibrary") {
@@ -53,6 +60,23 @@ function Libraries() {
     ws.addEventListener("message", handleWS);
     return () => ws.removeEventListener("message", handleWS);
   }, [handleWS, ws]);
+
+  useEffect(() => {
+    if (!libraries.fetched) return;
+    libraries.items.forEach((library) => {
+      dispatch(fetchLibraryScanStatus(library.id));
+    });
+  }, [dispatch, libraries.fetched, libraries.items, ws]);
+
+  useEffect(() => {
+    if (scanning.length === 0) return undefined;
+    const statusTimer = setInterval(() => {
+      scanning.forEach((libraryId) => {
+        dispatch(fetchLibraryScanStatus(libraryId));
+      });
+    }, 2000);
+    return () => clearInterval(statusTimer);
+  }, [dispatch, scanning]);
 
   let libs = [];
 

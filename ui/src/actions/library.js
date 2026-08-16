@@ -15,6 +15,7 @@ import {
   SCAN_START,
   SCAN_STOP,
   SCAN_FAILED,
+  SCAN_CANCELLED,
   FETCH_LIBRARY_UNMATCHED_START,
   FETCH_LIBRARY_UNMATCHED_ERR,
   FETCH_LIBRARY_UNMATCHED_OK,
@@ -258,6 +259,13 @@ export const wsScanFailed = (id) => async (dispatch) => {
   );
 };
 
+export const wsScanCancelled = (id) => async (dispatch) => {
+  dispatch({
+    type: SCAN_CANCELLED,
+    id,
+  });
+};
+
 export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
   const token = getState().auth.token;
 
@@ -273,6 +281,7 @@ export const fetchLibraryScanStatus = (id) => async (dispatch, getState) => {
       scanning: SCAN_START,
       complete: SCAN_STOP,
       failed: SCAN_FAILED,
+      cancelled: SCAN_CANCELLED,
     }[status];
 
     if (type) dispatch({ type, id });

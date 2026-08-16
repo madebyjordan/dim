@@ -15,6 +15,7 @@ import {
   SCAN_START,
   SCAN_STOP,
   SCAN_FAILED,
+  SCAN_CANCELLED,
   FETCH_LIBRARY_UNMATCHED_START,
   FETCH_LIBRARY_UNMATCHED_OK,
   FETCH_LIBRARY_UNMATCHED_ERR,
@@ -232,6 +233,15 @@ export default function libraryReducer(state = initialState, action) {
         scan_status: {
           ...state.scan_status,
           [action.id]: "failed",
+        },
+      };
+    case SCAN_CANCELLED:
+      return {
+        ...state,
+        scanning: state.scanning.filter((id) => id !== action.id),
+        scan_status: {
+          ...state.scan_status,
+          [action.id]: "cancelled",
         },
       };
     default:

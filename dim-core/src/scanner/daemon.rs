@@ -211,7 +211,7 @@ impl FsWatcher {
         } else {
             return;
         };
-        if let Err(error) = super::start_custom(
+        if let Err(error) = super::start_incremental_custom(
             &mut self.conn,
             self.library_id,
             vec![candidate],
@@ -362,29 +362,12 @@ impl FsWatcher {
         .await
         {
             error!(?error, "Full reconciliation scan failed");
+            return;
         }
-        let files = {
-            let mut tx = match self.conn.read().begin().await {
-                Ok(tx) => tx,
-                Err(_) => return,
-            };
-            MediaFile::get_by_lib(&mut tx, self.library_id)
-                .await
-                .unwrap_or_default()
-        };
         let mut lock = self.conn.writer().lock_owned().await;
         let Ok(mut tx) = dim_database::write_tx(&mut lock).await else {
             return;
         };
-        for file in files {
-            let exists = Path::new(&file.target_file).is_file();
-            let query = if exists {
-                "UPDATE mediafile SET missing_since = NULL WHERE id = ?"
-            } else {
-                "UPDATE mediafile SET missing_since = COALESCE(missing_since, CURRENT_TIMESTAMP) WHERE id = ?"
-            };
-            let _ = sqlx::query(query).bind(file.id).execute(&mut tx).await;
-        }
         // Mark only unreferenced remote assets; do not delete ambiguous files or user assets.
         let _ = sqlx::query("UPDATE assets SET orphaned_at = NULL WHERE id IN (SELECT poster FROM _tblmedia WHERE poster IS NOT NULL UNION SELECT backdrop FROM _tblmedia WHERE backdrop IS NOT NULL UNION SELECT poster FROM _tblseason WHERE poster IS NOT NULL UNION SELECT asset_id FROM media_posters UNION SELECT asset_id FROM media_backdrops)").execute(&mut tx).await;
         let _ = sqlx::query("UPDATE assets SET orphaned_at = COALESCE(orphaned_at, CURRENT_TIMESTAMP) WHERE remote_url IS NOT NULL AND id NOT IN (SELECT poster FROM _tblmedia WHERE poster IS NOT NULL UNION SELECT backdrop FROM _tblmedia WHERE backdrop IS NOT NULL UNION SELECT poster FROM _tblseason WHERE poster IS NOT NULL UNION SELECT asset_id FROM media_posters UNION SELECT asset_id FROM media_backdrops)").execute(&mut tx).await;

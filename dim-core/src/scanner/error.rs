@@ -25,6 +25,8 @@ pub enum Error {
     ),
     /// Library supplied doesnt exist: {0:?}
     LibraryNotFound(#[serde(skip)] dim_database::DatabaseError),
+    /// Filesystem traversal failed at {path}: {message}
+    FilesystemTraversal { path: String, message: String },
 }
 
 impl From<sqlx::Error> for Error {

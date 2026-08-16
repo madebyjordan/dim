@@ -10,6 +10,7 @@ import {
   NEW_LIBRARY_OK,
   NEW_LIBRARY_START,
   SCAN_FAILED,
+  SCAN_CANCELLED,
   SCAN_START,
   SCAN_STOP,
 } from "./types";
@@ -96,6 +97,7 @@ describe("new library creation", () => {
     ["scanning", SCAN_START],
     ["complete", SCAN_STOP],
     ["failed", SCAN_FAILED],
+    ["cancelled", SCAN_CANCELLED],
   ])("hydrates the %s scan state", async (status, type) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,

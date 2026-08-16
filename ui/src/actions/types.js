@@ -42,6 +42,7 @@ export const ADD_LIBRARY = "ADD_LIBRARY";
 export const SCAN_START = "SCAN_START";
 export const SCAN_STOP = "SCAN_STOP";
 export const SCAN_FAILED = "SCAN_FAILED";
+export const SCAN_CANCELLED = "SCAN_CANCELLED";
 
 /*
  * == VIDEO PLAYER ACTIONS ==

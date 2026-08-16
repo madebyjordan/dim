@@ -38,6 +38,7 @@ enum LibraryScanStatus {
     Scanning,
     Complete,
     Failed,
+    Cancelled,
 }
 
 fn metadata_provider(media_type: MediaType) -> Arc<dyn dim_extern_api::ExternalQueryIntoShow> {
@@ -71,24 +72,32 @@ async fn spawn_library_scan(
     };
     let mut conn = state.conn.clone();
     let scan_tx = state.event_tx.clone();
-    let failure_tx = scan_tx.clone();
     let spawn_result = state
         .library_workers
         .spawn(id, LibraryWorkerKind::Scanner, async move {
-            match dim_core::scanner::start(&mut conn, id, scan_tx, provider).await {
-                Ok(()) => {}
-                Err(error) => {
-                    tracing::error!(?error, library_id = id, "Library scan failed");
-                    let _ = failure_tx
-                        .send(
+            let terminal_tx = scan_tx.clone();
+            if let Err(error) = dim_core::scanner::start(&mut conn, id, scan_tx, provider).await {
+                tracing::error!(?error, library_id = id, "Library scan failed");
+                let mut lock = conn.writer().lock_owned().await;
+                if let Ok(mut tx) = dim_database::write_tx(&mut lock).await {
+                    let newly_failed = dim_database::ingestion::ScanRun::finish_active(
+                        &mut tx,
+                        scan_id,
+                        "failed",
+                        Some(&error.to_string()),
+                    )
+                    .await
+                    .unwrap_or(false);
+                    if tx.commit().await.is_ok() && newly_failed {
+                        let _ = terminal_tx.try_send(
                             dim_events::Message {
                                 id,
                                 event_type: dim_events::PushEventType::EventScanFailed,
                             }
                             .to_string(),
-                        )
-                        .await;
-                }
+                        );
+                    }
+                };
             }
         })
         .await;
@@ -357,6 +366,7 @@ pub async fn library_scan_status(State(state): State<AppState>, Path(id): Path<i
             LibraryScanStatus::Scanning
         }
         Ok(Some(run)) if run.status == "failed" => LibraryScanStatus::Failed,
+        Ok(Some(run)) if run.status == "cancelled" => LibraryScanStatus::Cancelled,
         Ok(_) => LibraryScanStatus::Complete,
         Err(error) => {
             tracing::error!(

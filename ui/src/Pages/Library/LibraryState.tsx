@@ -1,7 +1,7 @@
 import BarLoad from "../../Components/Load/Bar";
 
 export type LibraryMediaState = "loading" | "empty" | "results" | "error";
-export type LibraryScanState = "scanning" | "complete" | "failed";
+export type LibraryScanState = "scanning" | "complete" | "failed" | "cancelled";
 
 interface LibraryStateProps {
   canRescan: boolean;
@@ -41,6 +41,20 @@ const LibraryState = ({
           Dim could not finish scanning this folder. Check that the folder is
           available and readable, then try again.
         </p>
+        {canRescan && (
+          <button type="button" onClick={onRescan} disabled={scanStarting}>
+            {scanStarting ? "Starting scan…" : "Retry scan"}
+          </button>
+        )}
+      </section>
+    );
+  }
+
+  if (scanState === "cancelled") {
+    return (
+      <section className="libraryState failed" role="alert">
+        <h3>Library scan cancelled</h3>
+        <p>The scan stopped before it could safely update this library.</p>
         {canRescan && (
           <button type="button" onClick={onRescan} disabled={scanStarting}>
             {scanStarting ? "Starting scan…" : "Retry scan"}

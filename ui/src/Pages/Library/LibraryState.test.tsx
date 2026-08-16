@@ -63,4 +63,15 @@ describe("library scan states", () => {
     userEvent.click(screen.getByRole("button", { name: "Retry scan" }));
     expect(defaultProps.onRescan).toHaveBeenCalledTimes(1);
   });
+
+  it("stops progress and offers retry when scanning is cancelled", () => {
+    render(<LibraryState {...defaultProps} scanState="cancelled" />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Library scan cancelled"
+    );
+    expect(screen.queryByText("Scanning your library")).not.toBeInTheDocument();
+    userEvent.click(screen.getByRole("button", { name: "Retry scan" }));
+    expect(defaultProps.onRescan).toHaveBeenCalledTimes(1);
+  });
 });

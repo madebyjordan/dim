@@ -87,6 +87,21 @@ impl ScanRun {
         Ok(())
     }
 
+    pub async fn finish_active(
+        tx: &mut Transaction<'_>,
+        id: i64,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        let result = sqlx::query("UPDATE ingestion_scan SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued', 'running')")
+            .bind(status)
+            .bind(error)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn count(
         tx: &mut Transaction<'_>,
         id: i64,
