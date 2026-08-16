@@ -19,17 +19,21 @@ without any additional terms or conditions.
 Follow the source prerequisites in [README.md](README.md), then bootstrap a development build with:
 
 ```sh
-yarn build
-yarn dev
+pnpm build
+pnpm dev
 ```
 
 Before submitting a change, run:
 
 ```sh
+pnpm test
 cargo fmt --all --check
-cargo test --workspace --tests --locked
 cd ui && corepack yarn prettier --check src && corepack yarn eslint --ext .js,.jsx,.ts,.tsx src
 ```
+
+The commands after `pnpm test` are UI-internal formatting and lint checks, so they intentionally use
+the Yarn 4 version pinned in `ui/package.json` through Corepack. Normal branch CI additionally runs
+the two legacy scanner tests excluded from the deterministic root test command and release gate.
 
 ## Contributors
 Valerian G. (Lead Developer and maintainer) \

@@ -122,5 +122,5 @@ if [[ "$DIM_SKIP_RUST" == false ]]; then
     fi
 
     echo "Dim is ready at $DIM_BINARY_PATH"
-    echo "Run it with yarn dev$DIM_RUN_SUFFIX"
+    echo "Run it with pnpm dev$DIM_RUN_SUFFIX"
 fi

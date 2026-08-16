@@ -125,7 +125,9 @@ function findLatestStableRelease(repository) {
   );
   const version = latestStableVersion(releases);
   if (!version) {
-    throw new Error("No stable fork release exists; run release:initial first");
+    throw new Error(
+      "No stable fork release exists; run pnpm release:initial first"
+    );
   }
   return version;
 }
@@ -142,7 +144,7 @@ function assertReleaseTagExists(remote, version) {
   const tag = `v${version}`;
   if (!output("git", ["ls-remote", "--tags", remote, `refs/tags/${tag}`])) {
     throw new Error(
-      `Base release tag ${tag} does not exist; run release:initial first`
+      `Base release tag ${tag} does not exist; run pnpm release:initial first`
     );
   }
 }
@@ -152,7 +154,7 @@ function parseArguments(argv) {
   const flags = rawFlags.filter((flag) => flag !== "--");
   if (!["initial", "patch", "minor", "major"].includes(mode)) {
     throw new Error(
-      "Usage: release.mjs <initial|patch|minor|major> [--dry-run]"
+      "Usage: pnpm release:<initial|patch|minor|major> [-- --dry-run]"
     );
   }
   const unknown = flags.filter((flag) => flag !== "--dry-run");

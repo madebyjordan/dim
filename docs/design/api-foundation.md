@@ -1,9 +1,10 @@
 # Milestone 5 API and frontend foundation
 
 `api-contract/openapi.json` is the machine-readable authority for the actively migrated HTTP and
-websocket surface. `yarn contract:generate` creates `ui/src/api/generated.ts`; generated code is
-checked in so Rust-only and release builds do not need a TypeScript generator. `yarn
-contract:check` fails when the artifact drifts.
+websocket surface. From `ui/`, `corepack yarn contract:generate` creates
+`ui/src/api/generated.ts`; generated code is checked in so Rust-only and release builds do not need
+a TypeScript generator. `corepack yarn contract:check` fails when the artifact drifts. These are
+UI-internal commands and use the Yarn 4 version pinned in `ui/package.json`.
 
 The target frontend architecture is the existing RTK Query `v1` service backed by
 `ui/src/api/transport.ts`. It owns the API base path, authentication header, same-origin cookie

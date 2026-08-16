@@ -11,13 +11,16 @@ Dim is a self-hosted media manager. With minimal setup, Dim will organize and be
 
 ## Running from source
 
-Dim's supported source-development path is macOS or Linux. The repository pins Rust in `rust-toolchain.toml`, Node.js in `.nvmrc`, and Yarn in `ui/package.json`.
+Dim's supported source-development path is macOS or Linux. The repository pins Rust in
+`rust-toolchain.toml`, Node.js in `.nvmrc`, pnpm in the root `package.json`, and Yarn 4 in
+`ui/package.json` for UI-internal tooling.
 
 ### Prerequisites
 
 - Git
 - Rust 1.93.1, installed automatically through [rustup](https://rustup.rs/)
 - Node.js 24.19.0 LTS, with Corepack available
+- pnpm 11.9.0, activated from the root `package.json` with Corepack
 - FFmpeg and FFprobe 6.0 or newer
 - SQLite development tools
 - A C/C++ build toolchain and `pkg-config`
@@ -37,7 +40,14 @@ sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libssl-dev sqlite3 ffmpeg
 ```
 
-The bootstrap script invokes Corepack directly, so it does not need to install Yarn globally or enable Corepack's global shims.
+Enable the repository-pinned pnpm command once after installing Node.js:
+
+```sh
+corepack enable pnpm
+```
+
+The bootstrap script invokes the UI's pinned Yarn 4 version through Corepack directly, so Yarn
+does not need to be installed globally and its global shim does not need to be enabled.
 
 ### Build and run
 
@@ -46,18 +56,34 @@ From a fresh clone:
 ```sh
 git clone https://github.com/Dusk-Labs/dim.git
 cd dim
-yarn build
-yarn dev
+pnpm build
+pnpm dev
 ```
 
 Open [http://localhost:8000](http://localhost:8000) after Dim starts. To build and run an optimized binary, pass `--release` to both commands:
 
 ```sh
-yarn build --release
-yarn dev --release
+pnpm build --release
+pnpm dev --release
 ```
 
 The bootstrap script installs the locked frontend dependencies, builds the embedded web UI, links the system FFmpeg tools under `utils/`, and builds the Rust workspace. It never overwrites existing FFmpeg binaries in `utils/`.
+
+### Test
+
+From the repository root, run the release-command, frontend, and reliable locked Rust workspace
+test suites with:
+
+```sh
+pnpm test
+```
+
+Use `pnpm test:release` when working only on the automated release command. The complete release
+gate, including formatting, contract, type, lint, test, and optimized-build validation, is:
+
+```sh
+pnpm release:validate
+```
 
 Dim creates local state relative to its runtime directory. `scripts/run.sh` uses the repository root for development builds and `target/release/` for release builds, matching the layout of packaged binaries:
 
@@ -74,11 +100,16 @@ Dim listens on `127.0.0.1` by default. Trusted LAN access is opt-in with an expl
 
 Direct internet exposure is unsupported. Dim has no built-in TLS termination; use an appropriately configured trusted reverse proxy when HTTPS access is intentional. See [the deployment and authentication boundary](docs/design/deployment-security.md) for proxy settings, session migration behavior, and security limits.
 
-## Releasing this fork
+## Automated releases
 
 `Cargo.toml`'s `workspace.package.version` is the single application-version source. Every Dim
 workspace crate inherits it, and Cargo synchronizes `Cargo.lock` when the release command changes
 the version.
+
+The root release commands validate, version, commit, push, and tag the synchronized release branch.
+The pushed tag automatically starts `.github/workflows/release.yml`, which builds and publishes the
+Linux archive, checksum, container tags, and GitHub Release. There is no separate manual version,
+tag, or GitHub Release step.
 
 The first fork release is deliberately bootstrapped as `v0.3.0`:
 

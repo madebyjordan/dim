@@ -4,6 +4,7 @@
   "scripts": {
     "build": "./scripts/bootstrap.sh",
     "dev": "DIM_BIND_ADDRESS=0.0.0.0 ./scripts/run.sh",
+    "test": "./scripts/test.sh",
     "release:initial": "node ./scripts/release.mjs initial",
     "release:patch": "node ./scripts/release.mjs patch",
     "release:minor": "node ./scripts/release.mjs minor",

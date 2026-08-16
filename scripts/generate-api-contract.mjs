@@ -40,7 +40,9 @@ const output = execFileSync(resolve(root, "ui/node_modules/.bin/prettier"), ["--
 if (process.argv.includes("--check")) {
   const current = await readFile(target, "utf8").catch(() => "");
   if (current !== output) {
-    console.error("Generated API types are stale. Run yarn contract:generate.");
+    console.error(
+      "Generated API types are stale. From ui/, run corepack yarn contract:generate."
+    );
     process.exit(1);
   }
 } else {
