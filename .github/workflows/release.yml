@@ -62,10 +62,6 @@ jobs:
     name: Build Linux x86_64 release
     needs: validate-tag
     runs-on: ubuntu-latest
-    env:
-      # Keep executable test fixtures outside the checkout so scanner discovery
-      # does not exclude them as repository-internal paths.
-      TMPDIR: ${{ runner.workspace }}/release-tmp
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,7 +80,11 @@ jobs:
       - name: Download verified static media tools
         run: |
           set -euo pipefail
-          mkdir -p "$TMPDIR" utils package/release/utils
+          # Keep executable test fixtures outside the checkout so scanner
+          # discovery does not exclude them as repository-internal paths.
+          test_tmp="$(dirname "$GITHUB_WORKSPACE")/release-tmp"
+          mkdir -p "$test_tmp" utils package/release/utils
+          echo "TMPDIR=$test_tmp" >> "$GITHUB_ENV"
           curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffmpeg -o utils/ffmpeg
           curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffprobe -o utils/ffprobe
           echo "65d6b12fe32918e041a4513059c340e47b1a2e80c0d92c481c3889a31a470e9a  utils/ffmpeg" | sha256sum -c -
