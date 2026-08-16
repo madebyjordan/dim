@@ -6,7 +6,11 @@ import { getAuthTokenCookie } from "./SessionControllers";
 function NotAuthedOnlyRoute() {
   const token = useAppSelector((state) => state.auth.token);
 
-  return token || getAuthTokenCookie() ? <Navigate to="/" replace /> : <Outlet />;
+  return token || getAuthTokenCookie() ? (
+    <Navigate to="/" replace />
+  ) : (
+    <Outlet />
+  );
 }
 
 export default NotAuthedOnlyRoute;

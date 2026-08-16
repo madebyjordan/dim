@@ -1,7 +1,14 @@
 {
   "private": true,
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "build": "./scripts/bootstrap.sh",
-    "dev": "DIM_BIND_ADDRESS=0.0.0.0 ./scripts/run.sh"
+    "dev": "DIM_BIND_ADDRESS=0.0.0.0 ./scripts/run.sh",
+    "release:initial": "node ./scripts/release.mjs initial",
+    "release:patch": "node ./scripts/release.mjs patch",
+    "release:minor": "node ./scripts/release.mjs minor",
+    "release:major": "node ./scripts/release.mjs major",
+    "release:validate": "./scripts/validate-release.sh",
+    "test:release": "node --test ./scripts/release.test.mjs"
   }
 }

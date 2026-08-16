@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Match tag to canonical version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=${GITHUB_REF_NAME}
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tags must be stable semantic versions (vX.Y.Z): $tag" >&2
+            exit 1
+          fi
+          version=$(awk '/^\[workspace.package\]/{found=1; next} found && /^version = /{gsub(/[" ]/, "", $3); print $3; exit}' Cargo.toml)
+          if [[ "v$version" != "$tag" ]]; then
+            echo "Tag $tag does not match Cargo.toml workspace.package.version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Build Linux x86_64 release
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libva-dev libva-drm2 libva2 sqlite3 ffmpeg curl
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ".nvmrc"
+          cache: yarn
+          cache-dependency-path: ui/yarn.lock
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Run the release validation suite
+        run: pnpm release:validate
+      - name: Download verified static media tools
+        run: |
+          set -euo pipefail
+          mkdir -p package/release/utils
+          curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffmpeg -o package/release/utils/ffmpeg
+          curl -fsSL https://github.com/Dusk-Labs/ffmpeg-static/releases/download/ffmpeg-all-0.0.1/ffprobe -o package/release/utils/ffprobe
+          echo "65d6b12fe32918e041a4513059c340e47b1a2e80c0d92c481c3889a31a470e9a  package/release/utils/ffmpeg" | sha256sum -c -
+          echo "76e253d0cad674300280e556d8e61d86e6b301dd526cfd68191449221a004690  package/release/utils/ffprobe" | sha256sum -c -
+          chmod +x package/release/utils/ffmpeg package/release/utils/ffprobe
+      - name: Package release archive and checksum
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cp target/release/dim package/release/dim
+          chmod +x package/release/dim
+          archive="dim-${TAG}-linux-x86_64.tar.gz"
+          tar -C package -czf "$archive" release
+          sha256sum "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-release
+          path: |
+            dim-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dim-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-container:
+    name: Publish Linux x86_64 container
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [validate-tag, build-linux, publish-container]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64-release
+          path: artifacts
+      - name: Create GitHub Release once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Dim $TAG" \
+            --generate-notes

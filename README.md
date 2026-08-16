@@ -4,6 +4,7 @@
 [![Discord](https://img.shields.io/discord/834495310332035123)](https://discord.gg/gBPyQ7NVah)
 
 ## 2026
+
 Dim is a project with a lot of potential, I said this back in 2021-2022 when I was broughr onto the project as the sole designer at the time and now I am taking the opportunity to continue work on Dim, focusing on improving its foundation and overall user experience, making it more broadly accessible to a wider audience.
 
 Dim is a self-hosted media manager. With minimal setup, Dim will organize and beautify your media collections for playback on localhost or a trusted home network.
@@ -60,12 +61,12 @@ The bootstrap script installs the locked frontend dependencies, builds the embed
 
 Dim creates local state relative to its runtime directory. `scripts/run.sh` uses the repository root for development builds and `target/release/` for release builds, matching the layout of packaged binaries:
 
-| Path | Purpose |
-| --- | --- |
+| Path                 | Purpose                                               |
+| -------------------- | ----------------------------------------------------- |
 | `config/config.toml` | Host configuration and generated local session secret |
-| `config/dim.db` | SQLite database |
-| `metadata/` | Downloaded artwork and metadata |
-| `streaming_cache/` | Temporary playback and transcoding data |
+| `config/dim.db`      | SQLite database                                       |
+| `metadata/`          | Downloaded artwork and metadata                       |
+| `streaming_cache/`   | Temporary playback and transcoding data               |
 
 Existing configuration files are preserved. If upgrading from a version that exposed `secret_key`, remove that setting once and restart Dim to generate a new secret and invalidate existing sessions.
 
@@ -73,25 +74,69 @@ Dim listens on `127.0.0.1` by default. Trusted LAN access is opt-in with an expl
 
 Direct internet exposure is unsupported. Dim has no built-in TLS termination; use an appropriately configured trusted reverse proxy when HTTPS access is intentional. See [the deployment and authentication boundary](docs/design/deployment-security.md) for proxy settings, session migration behavior, and security limits.
 
+## Releasing this fork
+
+`Cargo.toml`'s `workspace.package.version` is the single application-version source. Every Dim
+workspace crate inherits it, and Cargo synchronizes `Cargo.lock` when the release command changes
+the version.
+
+The first fork release is deliberately bootstrapped as `v0.3.0`:
+
+```sh
+pnpm release:initial -- --dry-run
+pnpm release:initial
+```
+
+After `v0.3.0` exists, choose the semantic-version bump explicitly:
+
+```sh
+pnpm release:patch -- --dry-run
+pnpm release:patch
+pnpm release:minor -- --dry-run
+pnpm release:minor
+pnpm release:major -- --dry-run
+pnpm release:major
+```
+
+The command requires a clean `master` checked out at exactly `origin/master`, authenticated `gh`
+and Git access to `origin`, Node/Corepack, pnpm, Rust, FFmpeg/FFprobe, and the native build
+dependencies listed above. Set `DIM_RELEASE_BRANCH` or `DIM_RELEASE_REMOTE` only when the fork's
+intended release branch or remote is intentionally different.
+
+Before mutation it fetches tags, verifies branch/upstream synchronization and tag/Release
+availability, then runs the same frontend and Rust validation used by the release workflow. A real
+release updates `Cargo.toml` and `Cargo.lock` if needed, creates `chore: release vX.Y.Z`, creates an
+annotated tag, and atomically pushes the commit and tag. The one tag-triggered workflow builds the
+Linux x86_64 archive and checksum, publishes versioned Linux x86_64 GHCR tags, and creates the
+GitHub Release. Dry runs execute the same guards and validation but never modify repository or
+GitHub state.
+
+The release gate excludes two legacy scanner tests that can wait indefinitely on metadata/probe
+work: `test_construct_mediafile` and
+`rescan_keeps_metadata_aligned_after_existing_files_are_filtered`. They remain enabled in normal
+branch CI; every other locked workspace test runs before a release can be committed or tagged.
+
 ## Running from binaries
 
 ### Dependencies
 
-* libva2
-* libva-drm2
-* libharfbuzz
-* libfontconfig
-* libfribidi
-* libtheora
-* libvorbis
-* libvorbisenc
-* libtheora0
+- libva2
+- libva-drm2
+- libharfbuzz
+- libfontconfig
+- libfribidi
+- libtheora
+- libvorbis
+- libvorbisenc
+- libtheora0
 
-You can then obtain binaries from the release tab in github:
+Download `dim-vX.Y.Z-linux-x86_64.tar.gz` and its `.sha256` file from the fork's GitHub Release,
+then verify and unpack it:
 
-1. Unpack with `unzip ./release-linux.zip && tar -xvzf ./release.tar.gz`
-2. Run `cd release && ./dim`
-3. Access the Dim web UI at `http://localhost:8000`.
+1. Verify with `sha256sum -c dim-vX.Y.Z-linux-x86_64.tar.gz.sha256`.
+2. Unpack with `tar -xvzf dim-vX.Y.Z-linux-x86_64.tar.gz`.
+3. Run `cd release && ./dim`.
+4. Access the Dim web UI at `http://localhost:8000`.
 
 ## Running with docker
 
@@ -104,6 +149,7 @@ This name "media" is arbitrary and you can choose whatever you like.
 ```
 docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro ghcr.io/dusk-labs/dim:dev
 ```
+
 The multi-architecture image resides at `ghcr.io/dusk-labs/dim:master`.
 
 To use hardware acceleration, mount the relevant device:

@@ -42,11 +42,7 @@ function MediaSeasons(props) {
 
   if (seasons) {
     return (
-      <SeasonSelection
-        key={id}
-        seasons={seasons}
-        setActiveId={setActiveId}
-      />
+      <SeasonSelection key={id} seasons={seasons} setActiveId={setActiveId} />
     );
   }
 

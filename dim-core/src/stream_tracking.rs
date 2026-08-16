@@ -1466,8 +1466,14 @@ mod tests {
             .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
             .await
             .unwrap();
-        tracking.inner.write().await.sessions.get_mut(&gid).unwrap().handoff_started_at =
-            Some(Instant::now() - StreamTracking::HANDOFF_STALL_AFTER);
+        tracking
+            .inner
+            .write()
+            .await
+            .sessions
+            .get_mut(&gid)
+            .unwrap()
+            .handoff_started_at = Some(Instant::now() - StreamTracking::HANDOFF_STALL_AFTER);
         let status = tracking.remote_playback_status(&gid, 7).await.unwrap();
         assert_eq!(status.state, RemotePlaybackState::HandoffStalled);
         assert_eq!(status.successful_remote_segments, 0);
@@ -1486,8 +1492,14 @@ mod tests {
             .set_remote_playback_state(&gid, 7, RemotePlaybackState::HandoffRequested)
             .await
             .unwrap();
-        tracking.inner.write().await.sessions.get_mut(&gid).unwrap().handoff_started_at =
-            Some(Instant::now() - StreamTracking::HANDOFF_CLEANUP_AFTER);
+        tracking
+            .inner
+            .write()
+            .await
+            .sessions
+            .get_mut(&gid)
+            .unwrap()
+            .handoff_started_at = Some(Instant::now() - StreamTracking::HANDOFF_CLEANUP_AFTER);
         let temp = tempfile::tempdir().unwrap();
         let state = StateManager::new(
             &mut Tokio::Global,

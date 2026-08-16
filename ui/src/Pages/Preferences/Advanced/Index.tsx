@@ -11,7 +11,9 @@ const PreferencesAdvanced = () => {
   return (
     <div className="preferencesAdvanced">
       {restartRequired && (
-        <p role="status">Host settings are saved but will take effect after Dim restarts.</p>
+        <p role="status">
+          Host settings are saved but will take effect after Dim restarts.
+        </p>
       )}
       <General />
       <DirectoryPaths />

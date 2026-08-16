@@ -380,8 +380,10 @@ function VideoPlayer() {
   const playbackController = {
     play: () => (remoteMedia ? remoteMedia.play() : player?.play()),
     pause: () => (remoteMedia ? remoteMedia.pause() : player?.pause()),
-    isPaused: () => (remoteMedia ? remoteMedia.paused : (player?.isPaused() ?? true)),
-    duration: () => (remoteMedia ? remoteMedia.duration : (player?.duration() ?? 0)),
+    isPaused: () =>
+      remoteMedia ? remoteMedia.paused : player?.isPaused() ?? true,
+    duration: () =>
+      remoteMedia ? remoteMedia.duration : player?.duration() ?? 0,
   };
 
   const changeVideoQuality = useCallback(

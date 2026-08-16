@@ -10,9 +10,7 @@ import { useParams } from "react-router";
 
 import AirPlayIcon from "../../../../assets/Icons/AirPlay";
 import { updateVideo } from "../../../../actions/video";
-import {
-  useCreatePlaybackSessionMutation,
-} from "../../../../api/v1/foundation";
+import { useCreatePlaybackSessionMutation } from "../../../../api/v1/foundation";
 import { apiRequest } from "../../../../api/transport";
 import { VideoPlayerContext } from "../../Context";
 import { useAppDispatch, useAppSelector } from "../../../../hooks/store";
@@ -154,7 +152,8 @@ export default function AirPlay() {
       playbackPhaseRef.current = terminalState;
       setPlaybackPhase(terminalState);
       setRemoteMedia(null);
-      if (resumeFromRemote && Number.isFinite(position)) player?.seek(position!);
+      if (resumeFromRemote && Number.isFinite(position))
+        player?.seek(position!);
       if (resumeFromRemote) player?.play();
       if (sessionGidRef.current === gid) sessionGidRef.current = null;
       terminateRemoteSession(gid, reason);
@@ -275,7 +274,10 @@ export default function AirPlay() {
     const timeChanged = () => {
       if (playbackPhaseRef.current !== "media_delivery_confirmed") return;
       const buffered = remote.buffered.length
-        ? Math.max(0, remote.buffered.end(remote.buffered.length - 1) - remote.currentTime)
+        ? Math.max(
+            0,
+            remote.buffered.end(remote.buffered.length - 1) - remote.currentTime
+          )
         : 0;
       dispatch(
         updateVideo({
@@ -399,7 +401,9 @@ export default function AirPlay() {
           const local = videoRef.current;
           local?.pause();
           if (remoteRef.current) setRemoteMedia(remoteRef.current);
-          dispatch(updateVideo({ paused: false, waiting: false, canPlay: true }));
+          dispatch(
+            updateVideo({ paused: false, waiting: false, canPlay: true })
+          );
           return;
         }
         if (
@@ -498,7 +502,9 @@ export default function AirPlay() {
   return (
     <>
       <button
-        className={`airplay trackActive-${playbackPhase === "media_delivery_confirmed"}`}
+        className={`airplay trackActive-${
+          playbackPhase === "media_delivery_confirmed"
+        }`}
         onPointerDown={prepareTargetPicker}
         onKeyDown={prepareTargetPickerFromKeyboard}
         onClick={chooseTarget}
@@ -507,14 +513,19 @@ export default function AirPlay() {
           !receiverReachable
             ? "Open Grin using this Mac's LAN address to use AirPlay"
             : available
-              ? "Choose AirPlay target"
-              : "No AirPlay target available"
+            ? "Choose AirPlay target"
+            : "No AirPlay target available"
         }
         aria-label="Choose AirPlay target"
       >
         <AirPlayIcon />
       </button>
-      <video className="airplayMedia" ref={remoteRef} preload="none" playsInline />
+      <video
+        className="airplayMedia"
+        ref={remoteRef}
+        preload="none"
+        playsInline
+      />
     </>
   );
 }

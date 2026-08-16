@@ -1,7 +1,9 @@
 [package]
 name = "dim-web"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [features]
 default = []
@@ -51,7 +53,7 @@ tracing-subscriber = { version = "^0.3.10", features = [
 uuid = { version = "1.2.2", features = ["v4"] }
 hyper = "0.14.25"
 tower = { version = "0.4.13", features = ["tokio", "util"] }
-dim-extern-api = { version = "0.4.0-dev", path = "../dim-extern-api" }
+dim-extern-api = { path = "../dim-extern-api" }
 tokio-stream = { version = "0.1.14", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.4.4", features = ["full"] }
