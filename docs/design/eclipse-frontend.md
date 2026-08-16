@@ -20,9 +20,11 @@ SvelteKit runs with SSR disabled and `adapter-static` emits `eclipse/build/index
 fallback. Rust embeds that directory, serves exact assets before the fallback, marks hashed
 `_app/immutable` assets immutable, and keeps HTML non-cacheable.
 
-The authenticated root route is intentionally an empty application shell. Product navigation and
-dashboard UI will be added only from supplied Eclipse designs; the technical playback proof remains
-available directly at `/play/[fileId]` for integration work.
+The authenticated root route is the Eclipse browsing experience: real libraries and scanner status
+feed a persistent header, while the selected library is rendered as one continuous, lazy-loading
+media carousel. Selecting an item resolves its full metadata and playback files without leaving the
+browsing context. Search uses the existing catalogue endpoint, and owners can create libraries
+through the existing server-side directory browser.
 
 ## Backend adaptations
 
@@ -48,3 +50,8 @@ session resources are disposed on route unmount.
 Safari's `webkitShowPlaybackTargetPicker` is capability-detected. On supported browsers the proof
 creates a separate `target=airplay` session and uses the backend's authenticated remote HLS resource;
 unsupported browsers expose no active control.
+
+The product currently omits Watchlist, cast, and content-rating presentation because Dim has no
+persisted domain contract for those values. They must not be synthesized from design fixtures. The
+metadata provider can fetch cast upstream, but scanner ingestion does not currently store or expose
+it. The existing `rating` field is a provider score, not a content certification.

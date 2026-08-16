@@ -16,7 +16,17 @@
     webkitCurrentPlaybackTargetIsWireless?: boolean;
   }
 
-  let { fileId }: { fileId: string } = $props();
+  let {
+    fileId,
+    initialVideo = '',
+    initialAudio = '',
+    initialSubtitle = ''
+  }: {
+    fileId: string;
+    initialVideo?: string;
+    initialAudio?: string;
+    initialSubtitle?: string;
+  } = $props();
   let video: HTMLVideoElement;
   let timeOutput: HTMLOutputElement;
   let dashPlayer: { destroy(): void; attachSource(url: string): void } | null =
@@ -250,9 +260,21 @@
         }
         playbackSession = created;
         sessionStorage.setItem(playbackKey, created.gid);
-        selectedVideo = preferred('video')?.id ?? '';
-        selectedAudio = preferred('audio')?.id ?? '';
+        selectedVideo =
+          tracks('video').find((track) => track.id === initialVideo)?.id ??
+          preferred('video')?.id ??
+          '';
+        selectedAudio =
+          tracks('audio').find((track) => track.id === initialAudio)?.id ??
+          preferred('audio')?.id ??
+          '';
         await activate();
+        if (
+          initialSubtitle &&
+          tracks('subtitle').some((track) => track.id === initialSubtitle)
+        ) {
+          await switchSubtitle(initialSubtitle);
+        }
         phase = 'ready';
       } catch (cause) {
         error =
@@ -270,13 +292,9 @@
   });
 </script>
 
-<section class="proof" aria-labelledby="proof-title">
+<section class="proof" aria-label="Playback">
   <header>
-    <div>
-      <p class="eyebrow">Integration proof</p>
-      <h1 id="proof-title">Playback pipeline</h1>
-    </div>
-    <a href="/">Close</a>
+    <a href="/" aria-label="Return to library">←</a>
   </header>
 
   <div class="stage">
@@ -288,8 +306,8 @@
   </div>
 
   <div class="controls">
-    <label
-      >Video
+    <label aria-label="Video quality">
+      <span class="visually-hidden">Video quality</span>
       <select
         value={selectedVideo}
         onchange={(event) => switchTrack('video', event.currentTarget.value)}
@@ -300,8 +318,8 @@
           >{/each}
       </select>
     </label>
-    <label
-      >Audio
+    <label aria-label="Audio track">
+      <span class="visually-hidden">Audio track</span>
       <select
         value={selectedAudio}
         onchange={(event) => switchTrack('audio', event.currentTarget.value)}
@@ -312,22 +330,24 @@
           >{/each}
       </select>
     </label>
-    <label
-      >Subtitles
+    <label aria-label="Subtitle track">
+      <span class="visually-hidden">Subtitle track</span>
       <select
         value={selectedSubtitle}
         onchange={(event) => switchSubtitle(event.currentTarget.value)}
         disabled={phase !== 'ready'}
       >
-        <option value="">Off</option>
+        <option value="">No Subtitles</option>
         {#each tracks('subtitle') as track}<option value={track.id}
             >{track.label || track.lang || track.id}</option
           >{/each}
       </select>
     </label>
-    <div class="metric">
-      <span>Local time</span><output bind:this={timeOutput}>0s</output>
-    </div>
+    <output
+      class="visually-hidden"
+      bind:this={timeOutput}
+      aria-label="Elapsed time">0s</output
+    >
     <button
       onclick={prepareAirPlay}
       disabled={airPlayState === 'unavailable' || airPlayState === 'preparing'}
@@ -344,41 +364,32 @@
     </button>
   </div>
   {#if error && phase !== 'error'}<p class="notice">{error}</p>{/if}
-  {#if playbackSession}<p class="session">
-      Session {playbackSession.gid} · native video + dash.js
-    </p>{/if}
 </section>
 
 <style>
   .proof {
     min-height: 100vh;
-    padding: clamp(1rem, 3vw, 2.5rem);
+    padding: clamp(1rem, 2.2vw, 2rem);
     background: var(--surface-canvas);
   }
   header {
     display: flex;
-    align-items: end;
-    justify-content: space-between;
+    align-items: center;
     max-width: 1100px;
     margin: 0 auto 1.5rem;
   }
-  h1,
   p {
     margin: 0;
   }
-  h1 {
-    font-size: clamp(1.7rem, 4vw, 3rem);
-    letter-spacing: -0.04em;
-  }
-  .eyebrow {
-    color: var(--accent);
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-  }
   header a {
-    color: var(--text-muted);
+    width: 42px;
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--text);
+    background: var(--surface-raised);
+    font-size: 1.25rem;
   }
   .stage {
     position: relative;
@@ -410,18 +421,14 @@
   }
   .controls {
     display: grid;
-    grid-template-columns: repeat(3, minmax(130px, 1fr)) auto auto;
+    grid-template-columns: repeat(3, minmax(130px, 1fr)) auto;
     gap: 0.8rem;
     align-items: end;
     max-width: 1100px;
     margin: 1rem auto;
   }
-  label,
-  .metric {
+  label {
     display: grid;
-    gap: 0.35rem;
-    color: var(--text-muted);
-    font-size: 0.75rem;
   }
   select,
   button {
@@ -439,19 +446,24 @@
     cursor: not-allowed;
     opacity: 0.5;
   }
-  output {
-    color: var(--text);
-    font: 600 1rem/42px var(--font-mono);
-  }
-  .session,
   .notice {
     max-width: 1100px;
     margin: 0.5rem auto;
     color: var(--text-muted);
-    font: 0.75rem var(--font-mono);
+    font-size: 0.75rem;
   }
   .notice {
     color: var(--danger);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
   @media (max-width: 800px) {
     .controls {

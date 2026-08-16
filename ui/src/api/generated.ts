@@ -37,6 +37,8 @@ export type CreateLibrary = {
   media_type: "movie" | "tv";
 };
 
+export type CreateLibraryResponse = { id: number; scan_status: "scanning" };
+
 export type Library = {
   id: number;
   name: string;
@@ -47,6 +49,19 @@ export type Library = {
 
 export type Chapters = { credits: number };
 
+export type MediaSummary = {
+  id: number;
+  name: string;
+  poster_path?: string | null;
+};
+
+export type SearchResult = {
+  id: number;
+  library_id: number;
+  name: string;
+  poster_path?: string | null;
+};
+
 export type Media = {
   id: number;
   name: string;
@@ -54,7 +69,7 @@ export type Media = {
   media_type: string;
   genres: Array<string>;
   duration: number;
-  progress: number;
+  progress?: number;
   description?: string | null;
   added?: string | null;
   backdrop_path?: string | null;
@@ -68,6 +83,36 @@ export type Media = {
   season?: number;
   year?: number;
   tags?: Record<string, unknown>;
+};
+
+export type MediaFile = {
+  id: number;
+  media_id?: number | null;
+  library_id: number;
+  target_file: string;
+  raw_name: string;
+  raw_year?: number | null;
+  quality?: string | null;
+  codec?: string | null;
+  container?: string | null;
+  audio?: string | null;
+  original_resolution?: string | null;
+  duration?: number | null;
+  episode?: number | null;
+  season?: number | null;
+  corrupt?: boolean | null;
+  channels?: number | null;
+  profile?: string | null;
+  audio_language?: string | null;
+  manual_override: boolean;
+};
+
+export type DirectoryEntry = { name: string; path: string };
+
+export type DirectoryListing = {
+  current: string;
+  parent: string | null;
+  directories: Array<DirectoryEntry>;
 };
 
 export type UnmatchedMediaFile = {
@@ -234,8 +279,11 @@ export interface ApiOperations {
   getLibraryScan: "/library/{id}/scan";
   retryLibraryScan: "/library/{id}/scan";
   getMedia: "/media/{id}";
+  getMediaFiles: "/media/{id}/files";
   rematchMedia: "/media/{id}/rematch";
   saveProgress: "/media/{id}/progress";
+  searchMedia: "/search";
+  listDirectories: "/filebrowser";
   searchExternalMedia: "/media/tmdb_search";
   inspectPlaybackCapabilities: "/stream/{id}/capabilities";
   createPlaybackSession: "/stream/{id}/manifest";
