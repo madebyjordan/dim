@@ -86,6 +86,7 @@ jobs:
           echo "76e253d0cad674300280e556d8e61d86e6b301dd526cfd68191449221a004690  utils/ffprobe" | sha256sum -c -
           chmod +x utils/ffmpeg utils/ffprobe
           cp utils/ffmpeg utils/ffprobe package/release/utils/
+          echo "$GITHUB_WORKSPACE/utils" >> "$GITHUB_PATH"
       - name: Run the release validation suite
         run: pnpm release:validate
       - name: Package release archive and checksum

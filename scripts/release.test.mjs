@@ -256,6 +256,7 @@ test("a version tag triggers exactly one publishing workflow", () => {
       release.indexOf("Run the release validation suite")
   );
   assert.match(release, /-o utils\/ffprobe/);
+  assert.match(release, /GITHUB_WORKSPACE\/utils.*GITHUB_PATH/);
 });
 
 test("every workspace application crate inherits the canonical version", () => {
