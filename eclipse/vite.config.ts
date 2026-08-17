@@ -14,6 +14,9 @@ const backendProxy = (): ProxyOptions => ({
 
 export default defineConfig({
   plugins: [sveltekit()],
+  resolve: {
+    conditions: ['browser']
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,

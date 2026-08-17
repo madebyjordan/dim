@@ -94,7 +94,7 @@
   }
   button {
     border-color: var(--color-accent);
-    color: #08100d;
+    color: var(--color-on-accent);
     background: var(--color-accent);
     font-weight: 750;
     cursor: pointer;

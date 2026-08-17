@@ -3,6 +3,7 @@
   import type { Library, User } from '$lib/api/generated';
   import { imageUrl } from '$lib/catalog/catalog';
   import IconButton from '$lib/primitives/IconButton.svelte';
+  import UserIcon from '$lib/icons/UserIcon.svelte';
   import EclipseMark from './EclipseMark.svelte';
 
   let {
@@ -122,7 +123,7 @@
     <div class="profile" bind:this={profile}>
       <IconButton
         label="Open profile menu"
-        appearance="surface"
+        tone="surface"
         expanded={profileOpen}
         onclick={() => (profileOpen = !profileOpen)}
       >
@@ -133,10 +134,7 @@
             alt=""
           />
         {:else}
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="8" r="3.1" />
-            <path d="M5.5 20v-1.2a6.5 6.5 0 0 1 13 0V20" />
-          </svg>
+          <UserIcon size="100%" />
         {/if}
       </IconButton>
       {#if profileOpen}
@@ -194,8 +192,7 @@
     background: transparent;
     cursor: pointer;
   }
-  .search svg,
-  .profile svg {
+  .search svg {
     width: 100%;
     height: 100%;
     fill: none;

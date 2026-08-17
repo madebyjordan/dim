@@ -8,14 +8,14 @@
   > & {
     label: string;
     children: Snippet;
-    appearance?: 'plain' | 'surface';
+    tone?: 'quiet' | 'surface';
     expanded?: boolean;
   };
 
   let {
     label,
     children,
-    appearance = 'plain',
+    tone = 'quiet',
     expanded,
     type = 'button',
     ...attributes
@@ -25,7 +25,7 @@
 <button
   {...attributes}
   {type}
-  class:surface={appearance === 'surface'}
+  class:surface={tone === 'surface'}
   aria-label={label}
   aria-expanded={expanded}
 >
@@ -35,7 +35,7 @@
 <style>
   button {
     position: relative;
-    width: 44px;
+    width: var(--control-height-large);
     aspect-ratio: 1;
     display: grid;
     flex: none;
@@ -51,7 +51,11 @@
     width: 52px;
     padding: 24%;
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.18);
+    background: var(--color-control-subtle);
+  }
+  button:disabled {
+    opacity: var(--opacity-disabled);
+    cursor: default;
   }
   @media (min-width: 1800px) {
     button {

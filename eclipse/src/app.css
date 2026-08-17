@@ -2,13 +2,15 @@
   color-scheme: dark;
   --color-canvas: #000000;
   --color-surface: #121212;
-  --color-control: rgba(255, 255, 255, 0.33);
+  --color-control: rgba(255, 255, 255, 0.42);
+  --color-control-subtle: rgba(255, 255, 255, 0.18);
   --color-fg: #ffffff;
   --color-fg-muted: rgba(255, 255, 255, 0.65);
   --color-fg-subtle: rgba(255, 255, 255, 0.45);
   --color-stroke: rgba(255, 255, 255, 0.14);
   --color-stroke-strong: rgba(255, 255, 255, 0.2);
   --color-accent: #73e0b1;
+  --color-on-accent: #08100d;
   --color-danger: #ff9a9a;
   --font-sans:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -37,6 +39,7 @@
   --opacity-disabled: 0.35;
   --motion-fast: 160ms;
   --motion-normal: 220ms;
+  --blur-control: 14px;
   --shadow-float: 0 22px 80px rgba(0, 0, 0, 0.2);
   font-family: var(--font-sans);
   color: var(--color-fg);

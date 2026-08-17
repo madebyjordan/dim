@@ -28,10 +28,10 @@
   button {
     min-height: var(--control-height);
     padding: 0 var(--space-4);
+    border: 1px solid transparent;
     border-radius: var(--radius-md);
     color: var(--color-fg-muted);
     background: transparent;
-    backdrop-filter: blur(16px);
     cursor: pointer;
   }
   button:hover:not(:disabled) {
@@ -46,6 +46,7 @@
   }
   button.surface {
     color: var(--color-fg);
+    border-color: var(--color-stroke);
     background: var(--color-surface);
   }
   button:disabled {

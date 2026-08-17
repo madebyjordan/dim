@@ -76,7 +76,7 @@
     display: grid;
     place-items: center;
     border-radius: 14px;
-    color: #08100d;
+    color: var(--color-on-accent);
     background: var(--color-accent);
     font-weight: 900;
   }

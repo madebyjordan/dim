@@ -204,7 +204,7 @@
   }
   .directories span {
     padding: 10px;
-    color: rgba(255, 255, 255, 0.42);
+    color: var(--color-fg-subtle);
   }
   footer {
     justify-content: end;

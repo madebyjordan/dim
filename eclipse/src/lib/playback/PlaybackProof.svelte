@@ -58,6 +58,7 @@
   let paused = $state(true);
   let muted = $state(false);
   let controlsTimer: number | null = null;
+  let keyboardInteraction = false;
   const controlsIdleMs = 1_250;
 
   const playbackKey = 'eclipse.playback-session';
@@ -84,7 +85,10 @@
     controlsTimer = null;
     if (!keepOpen) {
       controlsTimer = window.setTimeout(() => {
-        if (!controlsPanel?.contains(document.activeElement))
+        if (
+          !keyboardInteraction ||
+          !controlsPanel?.contains(document.activeElement)
+        )
           controlsVisible = false;
       }, controlsIdleMs);
     }
@@ -109,6 +113,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
+    keyboardInteraction = true;
     showControls();
     if (
       event.target instanceof HTMLSelectElement ||
@@ -133,6 +138,11 @@
       );
     } else if (event.key.toLowerCase() === 'm') toggleMute();
     else if (event.key.toLowerCase() === 'f') toggleFullscreen();
+  }
+
+  function handlePointerDown() {
+    keyboardInteraction = false;
+    showControls();
   }
 
   function manifestUrl(replaceVideo = false) {
@@ -399,7 +409,7 @@
 
 <svelte:window
   onpointermove={() => showControls()}
-  onpointerdown={() => showControls()}
+  onpointerdown={handlePointerDown}
   onkeydown={handleKeydown}
 />
 
@@ -424,7 +434,7 @@
     class="controls"
     bind:this={controlsPanel}
     aria-hidden={!controlsVisible}
-    onfocusin={() => showControls(true)}
+    onfocusin={() => showControls(keyboardInteraction)}
     onfocusout={() => showControls()}
   >
     <div class="topbar">
@@ -557,8 +567,8 @@
     position: fixed;
     inset: 0;
     overflow: hidden;
-    color: #fff;
-    background: #000;
+    color: var(--color-fg);
+    background: var(--color-canvas);
     cursor: none;
   }
   .player.controls-visible {
@@ -572,7 +582,7 @@
     height: 100%;
     display: block;
     object-fit: contain;
-    background: #000;
+    background: var(--color-canvas);
   }
   .status {
     position: absolute;
@@ -648,10 +658,10 @@
   .round,
   .text-control {
     height: 42px;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    color: #fff;
+    border: 1px solid var(--color-control-subtle);
+    color: var(--color-fg);
     background: rgba(12, 12, 12, 0.58);
-    backdrop-filter: blur(14px);
+    backdrop-filter: blur(var(--blur-control));
     cursor: pointer;
   }
   .round {
@@ -661,7 +671,7 @@
     border-radius: 50%;
   }
   .round.primary {
-    color: #07110d;
+    color: var(--color-on-accent);
     background: var(--color-accent);
   }
   .text-control {

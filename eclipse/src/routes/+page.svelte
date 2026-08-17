@@ -577,7 +577,7 @@
     z-index: 100;
     inset: 0;
     overflow: hidden;
-    background: #000;
+    background: var(--color-canvas);
     opacity: 0;
     pointer-events: none;
     transition: opacity 240ms ease;
@@ -592,7 +592,7 @@
     width: 24px;
     aspect-ratio: 1;
     border: 2px solid rgba(255, 255, 255, 0.25);
-    border-top-color: #fff;
+    border-top-color: var(--color-fg);
     border-radius: 50%;
     animation: spin 800ms linear infinite;
   }
