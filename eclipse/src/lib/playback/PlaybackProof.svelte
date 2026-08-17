@@ -311,34 +311,36 @@
     <Select
       label="Video quality"
       value={selectedVideo}
-      onchange={(event) => switchTrack('video', event.currentTarget.value)}
+      options={tracks('video').map((track) => ({
+        value: track.id,
+        label: track.label || String(track.height || track.id)
+      }))}
+      onvaluechange={(value) => switchTrack('video', value)}
       disabled={phase !== 'ready'}
-    >
-      {#each tracks('video') as track}<option value={track.id}
-          >{track.label || track.height || track.id}</option
-        >{/each}
-    </Select>
+    />
     <Select
       label="Audio track"
       value={selectedAudio}
-      onchange={(event) => switchTrack('audio', event.currentTarget.value)}
+      options={tracks('audio').map((track) => ({
+        value: track.id,
+        label: track.label || track.lang || track.id
+      }))}
+      onvaluechange={(value) => switchTrack('audio', value)}
       disabled={phase !== 'ready'}
-    >
-      {#each tracks('audio') as track}<option value={track.id}
-          >{track.label || track.lang || track.id}</option
-        >{/each}
-    </Select>
+    />
     <Select
       label="Subtitle track"
       value={selectedSubtitle}
-      onchange={(event) => switchSubtitle(event.currentTarget.value)}
+      options={[
+        { value: '', label: 'No Subtitles' },
+        ...tracks('subtitle').map((track) => ({
+          value: track.id,
+          label: track.label || track.lang || track.id
+        }))
+      ]}
+      onvaluechange={switchSubtitle}
       disabled={phase !== 'ready'}
-    >
-      <option value="">No Subtitles</option>
-      {#each tracks('subtitle') as track}<option value={track.id}
-          >{track.label || track.lang || track.id}</option
-        >{/each}
-    </Select>
+    />
     <output
       class="visually-hidden"
       bind:this={timeOutput}

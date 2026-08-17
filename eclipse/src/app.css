@@ -2,7 +2,7 @@
   color-scheme: dark;
   --color-canvas: #000000;
   --color-surface: #121212;
-  --color-control: rgba(255, 255, 255, 0.15);
+  --color-control: rgba(255, 255, 255, 0.33);
   --color-fg: #ffffff;
   --color-fg-muted: rgba(255, 255, 255, 0.65);
   --color-fg-subtle: rgba(255, 255, 255, 0.45);

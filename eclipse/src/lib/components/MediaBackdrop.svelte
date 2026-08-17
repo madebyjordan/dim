@@ -18,7 +18,7 @@
   .backdrop {
     position: absolute;
     inset: 0;
-    z-index: 0;
+    z-index: -1;
     background-position: center 50%;
     background-size: cover;
     animation: backdrop-in 300ms ease-out both;

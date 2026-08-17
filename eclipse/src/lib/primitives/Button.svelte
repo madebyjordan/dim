@@ -31,6 +31,7 @@
     border-radius: var(--radius-md);
     color: var(--color-fg-muted);
     background: transparent;
+    backdrop-filter: blur(16px);
     cursor: pointer;
   }
   button:hover:not(:disabled) {

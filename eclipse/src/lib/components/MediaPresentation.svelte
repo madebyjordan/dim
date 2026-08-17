@@ -6,6 +6,8 @@
   } from '$lib/api/generated';
   import { runtimeLabel } from '$lib/catalog/catalog';
   import Select from '$lib/primitives/Select.svelte';
+  import { prefersReducedMotion } from 'svelte/motion';
+  import { fly } from 'svelte/transition';
 
   let {
     media,
@@ -39,32 +41,40 @@
 
 <section class:expanded={synopsisExpanded} class="presentation">
   <div class="content">
-    <h1>{media.name}</h1>
-    <div class="metadata" aria-label="Media details">
-      {#if media.year}<span>{media.year}</span>{/if}
-      {#each media.genres as genre}<span>{genre}</span>{/each}
-      {#if runtime}<span>{runtime}</span>{/if}
-    </div>
+    <div
+      class="copy"
+      in:fly|global={{
+        y: prefersReducedMotion.current ? 0 : 9,
+        duration: prefersReducedMotion.current ? 0 : 320
+      }}
+    >
+      <h1>{media.name}</h1>
+      <div class="metadata" aria-label="Media details">
+        {#if media.year}<span>{media.year}</span>{/if}
+        {#each media.genres as genre}<span>{genre}</span>{/each}
+        {#if runtime}<span>{runtime}</span>{/if}
+      </div>
 
-    {#if media.description}
-      {#if synopsisExpanded}
-        <div class="synopsis expanded-copy">
-          <p>{media.description}</p>
-          <button type="button" onclick={() => (synopsisExpanded = false)}
-            >Show less</button
+      {#if media.description}
+        {#if synopsisExpanded}
+          <div class="synopsis expanded-copy">
+            <p>{media.description}</p>
+            <button type="button" onclick={() => (synopsisExpanded = false)}
+              >Show less</button
+            >
+          </div>
+        {:else}
+          <button
+            type="button"
+            class="synopsis collapsed-copy"
+            aria-label="Expand synopsis"
+            onclick={() => (synopsisExpanded = true)}
           >
-        </div>
-      {:else}
-        <button
-          type="button"
-          class="synopsis collapsed-copy"
-          aria-label="Expand synopsis"
-          onclick={() => (synopsisExpanded = true)}
-        >
-          <span>{media.description}</span>
-        </button>
+            <span>{media.description}</span>
+          </button>
+        {/if}
       {/if}
-    {/if}
+    </div>
 
     {#if !synopsisExpanded}
       <div class="selectors" aria-label="Playback options">
@@ -74,37 +84,33 @@
           <Select
             label="Video quality"
             value={selectedVideo}
-            onchange={(event) => onvideo(event.currentTarget.value)}
-          >
-            {#each tracks('video') as track}
-              <option value={track.id}
-                >{track.label || track.height || track.id}</option
-              >
-            {/each}
-          </Select>
+            options={tracks('video').map((track) => ({
+              value: track.id,
+              label: track.label || String(track.height || track.id)
+            }))}
+            onvaluechange={onvideo}
+          />
           <Select
             label="Audio track"
             value={selectedAudio}
-            onchange={(event) => onaudio(event.currentTarget.value)}
-          >
-            {#each tracks('audio') as track}
-              <option value={track.id}
-                >{track.label || track.lang || track.id}</option
-              >
-            {/each}
-          </Select>
+            options={tracks('audio').map((track) => ({
+              value: track.id,
+              label: track.label || track.lang || track.id
+            }))}
+            onvaluechange={onaudio}
+          />
           <Select
             label="Subtitle track"
             value={selectedSubtitle}
-            onchange={(event) => onsubtitle(event.currentTarget.value)}
-          >
-            <option value="">No Subtitles</option>
-            {#each tracks('subtitle') as track}
-              <option value={track.id}
-                >{track.label || track.lang || track.id}</option
-              >
-            {/each}
-          </Select>
+            options={[
+              { value: '', label: 'No Subtitles' },
+              ...tracks('subtitle').map((track) => ({
+                value: track.id,
+                label: track.label || track.lang || track.id
+              }))
+            ]}
+            onvaluechange={onsubtitle}
+          />
         {/if}
       </div>
       {#if playbackError}<p class="playback-error" role="status">
@@ -116,8 +122,6 @@
 
 <style>
   .presentation {
-    position: relative;
-    z-index: 2;
     width: 100%;
     padding: var(--space-4) var(--layout-gutter) var(--space-5);
   }
@@ -125,7 +129,10 @@
     width: min(100%, var(--content-width));
     display: grid;
     gap: var(--space-3);
-    animation: content-in 320ms ease-out both;
+  }
+  .copy {
+    display: grid;
+    gap: var(--space-3);
   }
   h1,
   p {
@@ -192,12 +199,6 @@
   .playback-error {
     color: var(--color-danger);
   }
-  @keyframes content-in {
-    from {
-      opacity: 0;
-      transform: translateY(9px);
-    }
-  }
   @media (max-width: 900px) {
     h1 {
       font-size: clamp(34px, 9vw, 64px);
@@ -209,11 +210,6 @@
     }
     .collapsed-copy {
       max-height: 5.8em;
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .content {
-      animation: none;
     }
   }
 </style>
