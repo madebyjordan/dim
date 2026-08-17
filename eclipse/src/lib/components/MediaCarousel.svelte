@@ -119,18 +119,17 @@
     display: flex;
     align-items: end;
     gap: var(--space-6);
-    padding: var(--space-4) var(--layout-gutter) var(--space-6);
+    padding: calc(var(--space-4) + 12px) var(--layout-gutter) var(--space-6);
   }
   .card {
     position: relative;
     width: 190px;
     aspect-ratio: 2 / 3;
     flex: none;
-    overflow: hidden;
+    overflow: visible;
     border-radius: 20px;
     background: var(--color-surface);
-    content-visibility: auto;
-    contain-intrinsic-size: auto 300px 450px;
+    isolation: isolate;
     scroll-snap-align: center;
     transition:
       transform var(--motion-normal) ease,
@@ -138,17 +137,46 @@
   }
   .card.selected {
     transform: translateY(-12px) scale(1.025);
-    box-shadow:
-      0 0 0 3px rgba(255, 255, 255, 0.92),
-      0 20px 55px rgba(0, 0, 0, 0.56);
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.56);
+  }
+  .card.selected::before {
+    position: absolute;
+    z-index: 3;
+    inset: -3px;
+    padding: 3px;
+    border-radius: inherit;
+    background: conic-gradient(
+      from var(--selected-border-angle),
+      rgba(255, 255, 255, 0) 0deg,
+      rgba(255, 255, 255, var(--selected-glow-one)) var(--selected-stop-one),
+      rgba(255, 255, 255, 0) calc(var(--selected-stop-one) + 58deg),
+      rgba(255, 255, 255, var(--selected-glow-two)) var(--selected-stop-two),
+      rgba(255, 255, 255, 0) calc(var(--selected-stop-two) + 66deg),
+      rgba(255, 255, 255, var(--selected-glow-three)) var(--selected-stop-three),
+      rgba(255, 255, 255, 0) 360deg
+    );
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    content: '';
+    animation: selected-border-shimmer 18s ease-in-out infinite;
   }
   .select {
+    position: relative;
+    z-index: 1;
     width: 100%;
     height: 100%;
     display: block;
     padding: 0;
     overflow: hidden;
     border: 0;
+    border-radius: inherit;
     color: inherit;
     background: transparent;
     cursor: pointer;
@@ -159,6 +187,7 @@
   }
   .play {
     position: absolute;
+    z-index: 2;
     inset: 50% auto auto 50%;
     width: 64px;
     aspect-ratio: 1;
@@ -209,6 +238,107 @@
     }
     .card {
       transition: none;
+    }
+    .card.selected::before {
+      animation: none;
+    }
+  }
+
+  @property --selected-border-angle {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 0deg;
+  }
+  @property --selected-stop-one {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 34deg;
+  }
+  @property --selected-stop-two {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 174deg;
+  }
+  @property --selected-stop-three {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 292deg;
+  }
+  @property --selected-glow-one {
+    syntax: '<number>';
+    inherits: false;
+    initial-value: 1;
+  }
+  @property --selected-glow-two {
+    syntax: '<number>';
+    inherits: false;
+    initial-value: 0.28;
+  }
+  @property --selected-glow-three {
+    syntax: '<number>';
+    inherits: false;
+    initial-value: 0.64;
+  }
+  @keyframes selected-border-shimmer {
+    0% {
+      --selected-border-angle: 7deg;
+      --selected-stop-one: 34deg;
+      --selected-stop-two: 174deg;
+      --selected-stop-three: 292deg;
+      --selected-glow-one: 1;
+      --selected-glow-two: 0.22;
+      --selected-glow-three: 0.62;
+      opacity: 0.72;
+    }
+    17% {
+      --selected-border-angle: 81deg;
+      --selected-stop-one: 61deg;
+      --selected-stop-two: 203deg;
+      --selected-stop-three: 274deg;
+      --selected-glow-one: 0.3;
+      --selected-glow-two: 1;
+      --selected-glow-three: 0.12;
+      opacity: 0.94;
+    }
+    36% {
+      --selected-border-angle: 49deg;
+      --selected-stop-one: 22deg;
+      --selected-stop-two: 158deg;
+      --selected-stop-three: 327deg;
+      --selected-glow-one: 0.76;
+      --selected-glow-two: 0.16;
+      --selected-glow-three: 1;
+      opacity: 0.64;
+    }
+    58% {
+      --selected-border-angle: 191deg;
+      --selected-stop-one: 79deg;
+      --selected-stop-two: 226deg;
+      --selected-stop-three: 301deg;
+      --selected-glow-one: 0.12;
+      --selected-glow-two: 0.7;
+      --selected-glow-three: 0.34;
+      opacity: 1;
+    }
+    77% {
+      --selected-border-angle: 154deg;
+      --selected-stop-one: 43deg;
+      --selected-stop-two: 181deg;
+      --selected-stop-three: 342deg;
+      --selected-glow-one: 0.9;
+      --selected-glow-two: 0.08;
+      --selected-glow-three: 0.82;
+      opacity: 0.7;
+    }
+    100% {
+      --selected-border-angle: 367deg;
+      --selected-stop-one: 34deg;
+      --selected-stop-two: 174deg;
+      --selected-stop-three: 292deg;
+      --selected-glow-one: 1;
+      --selected-glow-two: 0.22;
+      --selected-glow-three: 0.62;
+      opacity: 0.72;
     }
   }
 </style>

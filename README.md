@@ -1,6 +1,6 @@
 <h1 align="center">Eclipse</h1>
 
-![Dashboard](docs/design/dashboard.jpg)
+![Dashboard](docs/design/eclipse-design-home.png)
 [![Discord](https://img.shields.io/discord/834495310332035123)](https://discord.gg/gBPyQ7NVah)
 
 Eclipse is a self-media manager based on Dim. Eclipse builds on Dim's foundation and media engine nightfall, expanding on the overall user experience, making it more broadly accessible to a wider audience.
