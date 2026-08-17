@@ -58,6 +58,7 @@
   let paused = $state(true);
   let muted = $state(false);
   let controlsTimer: number | null = null;
+  const controlsIdleMs = 1_250;
 
   const playbackKey = 'eclipse.playback-session';
   const tracks = (kind: PlaybackTrack['content_type']) =>
@@ -81,11 +82,11 @@
     controlsVisible = true;
     if (controlsTimer !== null) window.clearTimeout(controlsTimer);
     controlsTimer = null;
-    if (!keepOpen && !video?.paused) {
+    if (!keepOpen) {
       controlsTimer = window.setTimeout(() => {
         if (!controlsPanel?.contains(document.activeElement))
           controlsVisible = false;
-      }, 3_000);
+      }, controlsIdleMs);
     }
   }
 
@@ -336,12 +337,14 @@
     };
     const onPause = () => {
       paused = true;
-      showControls(true);
+      showControls();
     };
     video.addEventListener('timeupdate', onTime);
     video.addEventListener('durationchange', onDuration);
     video.addEventListener('play', onPlay);
     video.addEventListener('pause', onPause);
+    // Begin the idle countdown on entry; pointer movement is not required to arm it.
+    showControls();
     (async () => {
       try {
         const stale = sessionStorage.getItem(playbackKey);

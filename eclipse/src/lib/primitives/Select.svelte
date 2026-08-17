@@ -38,12 +38,18 @@
     open = true;
   }
 
-  function choose(index: number) {
+  function choose(index: number, restoreFocus: boolean) {
     const option = options[index];
     if (!option) return;
     onvaluechange(option.value);
     open = false;
-    root.querySelector<HTMLButtonElement>('.trigger')?.focus();
+    if (restoreFocus) {
+      root.querySelector<HTMLButtonElement>('.trigger')?.focus();
+    } else if (document.activeElement instanceof HTMLElement) {
+      // Pointer selection is complete. Do not leave focus pinned inside player controls,
+      // otherwise their accessibility focus guard prevents the inactivity fade indefinitely.
+      document.activeElement.blur();
+    }
   }
 
   function handleTriggerKeydown(event: KeyboardEvent) {
@@ -63,7 +69,7 @@
       activeIndex = event.key === 'Home' ? 0 : options.length - 1;
     } else if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      choose(activeIndex);
+      choose(activeIndex, true);
     } else if (event.key === 'Escape' || event.key === 'Tab') {
       open = false;
     }
@@ -124,7 +130,7 @@
           class:active={index === activeIndex}
           data-option={index}
           tabindex="-1"
-          onclick={() => choose(index)}
+          onclick={(event) => choose(index, event.detail === 0)}
           onpointerenter={() => (activeIndex = index)}>{option.label}</button
         >
       {/each}
