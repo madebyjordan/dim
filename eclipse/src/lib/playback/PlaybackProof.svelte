@@ -23,12 +23,14 @@
     initialVideo = '',
     initialAudio = '',
     initialSubtitle = '',
+    autoplay = false,
     onexit = () => undefined
   }: {
     fileId: string;
     initialVideo?: string;
     initialAudio?: string;
     initialSubtitle?: string;
+    autoplay?: boolean;
     onexit?: () => void;
   } = $props();
   let surface: HTMLElement;
@@ -176,7 +178,7 @@
       }),
       true
     );
-    player.initialize(video, manifestUrl(), false);
+    player.initialize(video, manifestUrl(), autoplay);
     dashPlayer = player;
   }
 

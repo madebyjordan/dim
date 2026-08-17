@@ -59,7 +59,9 @@
   let playbackError = $state<string | null>(null);
   let PlaybackSurface = $state<PlaybackComponent | null>(null);
   let playbackActive = $state(false);
+  let playbackRevealed = $state(false);
   let playbackWasActive = false;
+  let playbackRevealTimer: number | null = null;
   let selectionVersion = 0;
   let searchVersion = 0;
 
@@ -308,6 +310,7 @@
     if (playback.subtitle) query.set('subtitle', playback.subtitle);
 
     playbackActive = true;
+    schedulePlaybackReveal();
     pushState(`/play/${selectedFile.id}?${query}`, {
       ...page.state,
       playback
@@ -329,9 +332,29 @@
     history.back();
   }
 
+  function schedulePlaybackReveal() {
+    playbackRevealed = false;
+    if (playbackRevealTimer !== null) {
+      window.clearTimeout(playbackRevealTimer);
+    }
+    // Streaming starts immediately while Eclipse's chrome clears the viewport.
+    playbackRevealTimer = window.setTimeout(() => {
+      playbackRevealed = true;
+      playbackRevealTimer = null;
+    }, 210);
+  }
+
   $effect(() => {
     const state = page.state as PlaybackHistoryState;
     const nextActive = Boolean(state.playback);
+    if (!playbackWasActive && nextActive) schedulePlaybackReveal();
+    if (playbackWasActive && !nextActive) {
+      playbackRevealed = false;
+      if (playbackRevealTimer !== null) {
+        window.clearTimeout(playbackRevealTimer);
+        playbackRevealTimer = null;
+      }
+    }
     if (!playbackWasActive && nextActive && preparedPlayback) {
       void disposePreparedPlayback(false);
     }
@@ -390,6 +413,9 @@
       unsubscribe();
       window.clearInterval(scanTimer);
       selectionVersion += 1;
+      if (playbackRevealTimer !== null) {
+        window.clearTimeout(playbackRevealTimer);
+      }
       void disposePreparedPlayback();
     };
   });
@@ -464,7 +490,10 @@
 </main>
 
 {#if playbackActive}
-  <div class:ready={PlaybackSurface !== null} class="playback-layer">
+  <div
+    class:ready={PlaybackSurface !== null && playbackRevealed}
+    class="playback-layer"
+  >
     {#if PlaybackSurface}
       {@const playback = (page.state as PlaybackHistoryState).playback}
       {#if playback}
@@ -473,6 +502,7 @@
           initialVideo={playback.video}
           initialAudio={playback.audio}
           initialSubtitle={playback.subtitle}
+          autoplay
           onexit={exitPlayback}
         />
       {/if}
@@ -496,12 +526,51 @@
     overflow: hidden;
     isolation: isolate;
     background: var(--color-canvas);
-    opacity: 1;
-    transition: opacity 180ms ease;
   }
   .experience.watching {
     pointer-events: none;
+  }
+  .experience :global(.header),
+  .experience :global(.presentation),
+  .experience .browse,
+  .experience :global(.backdrop) {
+    will-change: opacity, transform;
+  }
+  .experience :global(.header) {
+    transition:
+      opacity 170ms ease,
+      transform 210ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .experience :global(.presentation) {
+    transition:
+      opacity 170ms 25ms ease,
+      transform 220ms 25ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .experience .browse {
+    transition:
+      opacity 160ms 45ms ease,
+      transform 230ms 45ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .experience :global(.backdrop) {
+    transition:
+      opacity 210ms 120ms ease,
+      transform 330ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .experience.watching :global(.header) {
     opacity: 0;
+    transform: translate3d(0, -14px, 0);
+  }
+  .experience.watching :global(.presentation) {
+    opacity: 0;
+    transform: translate3d(-10px, 6px, 0);
+  }
+  .experience.watching .browse {
+    opacity: 0;
+    transform: translate3d(0, 28px, 0);
+  }
+  .experience.watching :global(.backdrop) {
+    opacity: 0;
+    transform: scale(1.018);
   }
   .playback-layer {
     position: fixed;
@@ -510,10 +579,12 @@
     overflow: hidden;
     background: #000;
     opacity: 0;
-    transition: opacity 180ms ease;
+    pointer-events: none;
+    transition: opacity 240ms ease;
   }
   .playback-layer.ready {
     opacity: 1;
+    pointer-events: auto;
   }
   .player-loading {
     position: absolute;
@@ -562,7 +633,10 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .experience,
+    .experience :global(.header),
+    .experience :global(.presentation),
+    .experience .browse,
+    .experience :global(.backdrop),
     .playback-layer {
       transition-duration: 0ms;
     }
