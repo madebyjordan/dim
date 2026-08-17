@@ -123,6 +123,10 @@
 <style>
   .presentation {
     width: 100%;
+    min-height: max(360px, calc(100svh - var(--header-height) - 350px));
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
     padding: var(--space-4) var(--layout-gutter) var(--space-5);
   }
   .content {
@@ -202,6 +206,16 @@
   @media (max-width: 900px) {
     h1 {
       font-size: clamp(34px, 9vw, 64px);
+    }
+  }
+  @media (max-width: 700px) {
+    .presentation {
+      min-height: max(320px, calc(100svh - var(--header-height) - 290px));
+    }
+  }
+  @media (min-width: 1800px) {
+    .presentation {
+      min-height: max(420px, calc(100svh - var(--header-height) - 420px));
     }
   }
   @media (max-height: 720px) and (min-width: 901px) {
