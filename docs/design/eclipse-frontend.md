@@ -1,7 +1,7 @@
 # Eclipse frontend foundation
 
 Eclipse is a greenfield SvelteKit client. It shares Dim's Rust backend and domain contracts, but it
-does not import or build on the legacy React application.
+is the repository's sole frontend implementation.
 
 ## Runtime boundaries
 

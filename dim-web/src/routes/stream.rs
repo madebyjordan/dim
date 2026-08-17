@@ -283,9 +283,10 @@ fn build_tracks(
         target,
     );
     let mut tracks = Vec::new();
+    let source_quality_height = dim_core::streaming::planner::source_quality_height(width, height);
     let direct_is_default = direct_play_is_default(
         &prefs.default_video_quality,
-        height,
+        source_quality_height,
         plan.direct_play_supported,
     );
 
@@ -330,7 +331,7 @@ fn build_tracks(
                     Some("arib-std-b67") => "HLG",
                     _ => "SDR",
                 }))
-                .set_label(direct_play_label(height, stream_bitrate)),
+                .set_label(direct_play_label(width, height, stream_bitrate)),
             context,
             profile: PlannedProfile::DirectVideo,
         });
@@ -338,16 +339,20 @@ fn build_tracks(
 
     let mut assigned_default = direct_is_default;
     let preferred_resolution_available = match prefs.default_video_quality {
-        DefaultVideoQuality::Resolution(resolution, _) => plan
-            .renditions
-            .iter()
-            .any(|quality| quality.height == resolution),
+        DefaultVideoQuality::Resolution(resolution, _) => plan.renditions.iter().any(|quality| {
+            let rendition_width =
+                ((width as f64 * quality.height as f64 / height as f64).round() as u64).max(2) & !1;
+            dim_core::streaming::planner::source_quality_height(rendition_width, quality.height)
+                == resolution
+        }),
         DefaultVideoQuality::DirectPlay => plan.direct_play_supported,
     };
     for quality in plan.renditions.iter().copied() {
         let target_width =
             ((width as f64 * quality.height as f64 / height as f64).round() as u64).max(2) & !1;
-        let is_preferred_resolution = matches!(prefs.default_video_quality, DefaultVideoQuality::Resolution(res, _) if res == quality.height);
+        let quality_tier =
+            dim_core::streaming::planner::source_quality_height(target_width, quality.height);
+        let is_preferred_resolution = matches!(prefs.default_video_quality, DefaultVideoQuality::Resolution(res, _) if res == quality_tier);
         let first_transcode = tracks.iter().all(|track| track.manifest.is_direct);
         let is_default = !assigned_default
             && (is_preferred_resolution || first_transcode && !preferred_resolution_available);
@@ -405,7 +410,7 @@ fn build_tracks(
                 .set_segment_durations(segment_durations)
                 .set_label(quality_to_label(
                     quality.bitrate,
-                    quality.height,
+                    quality_tier,
                     Some(quality.bitrate),
                 )),
             context,
@@ -757,13 +762,14 @@ fn fallback_audio_bitrate(channels: u64) -> u64 {
     channels.saturating_mul(64_000).max(128_000)
 }
 
-fn direct_play_label(height: u64, stream_bitrate: Option<u64>) -> String {
+fn direct_play_label(width: u64, height: u64, stream_bitrate: Option<u64>) -> String {
+    let quality_height = dim_core::streaming::planner::source_quality_height(width, height);
     match stream_bitrate {
         Some(bitrate) => format!(
-            "Direct Play ({height}p, {})",
+            "Direct Play ({quality_height}p, {})",
             bitrate_to_label(bitrate).replace(' ', "")
         ),
-        None => format!("Direct Play ({height}p)"),
+        None => format!("Direct Play ({quality_height}p)"),
     }
 }
 
@@ -1704,11 +1710,13 @@ mod tests {
 
     #[test]
     fn direct_play_label_uses_only_reliable_stream_bitrate() {
-        assert_eq!(direct_play_label(1080, None), "Direct Play (1080p)");
+        assert_eq!(direct_play_label(1920, 1080, None), "Direct Play (1080p)");
         assert_eq!(
-            direct_play_label(1080, Some(6_277_855)),
+            direct_play_label(1920, 1080, Some(6_277_855)),
             "Direct Play (1080p, 6.28Mb/s)"
         );
+        assert_eq!(direct_play_label(1920, 800, None), "Direct Play (1080p)");
+        assert_eq!(direct_play_label(1280, 536, None), "Direct Play (720p)");
     }
 
     #[test]

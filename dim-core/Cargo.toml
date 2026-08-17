@@ -8,9 +8,6 @@ license.workspace = true
 
 [features]
 vaapi = ["nightfall/vaapi"]
-# The build script enables this when the UI bundle already exists at `ui/build`.
-# If enabled explicitly, the build script will panic if something went wrong.
-embed_ui = []
 
 [dependencies]
 # git dependencies

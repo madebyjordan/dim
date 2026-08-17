@@ -196,7 +196,8 @@ pub fn plan_video_for_target(
         && exact_source_match
         && browser_decode_supported
         && hdr_output_supported;
-    let mut bounded_qualities = source_bounded_qualities(source.height, source.bitrate);
+    let mut bounded_qualities =
+        source_bounded_qualities_for_dimensions(source.width, source.height, source.bitrate);
     if target == PlaybackTargetKind::Airplay
         && source.height > 1080
         && source.frame_rate <= 60
@@ -364,6 +365,34 @@ pub fn source_bounded_qualities(height: u64, bitrate: u64) -> Vec<Quality> {
     // Very small sources still need one usable transcode choice.  It is always source-sized.
     if qualities.is_empty() && height > 0 {
         qualities.push(Quality { height, bitrate });
+    }
+    qualities
+}
+
+/// Returns the conventional playback tier for an encoded frame. Cropped widescreen masters
+/// retain the tier of their uncropped canvas (for example 1920x800 is 1080p), while taller and
+/// portrait video continues to be classified by its actual height.
+pub fn source_quality_height(width: u64, height: u64) -> u64 {
+    let canvas_height = height.max(width.saturating_mul(9).div_ceil(16));
+    VIDEO_QUALITIES
+        .iter()
+        .find(|quality| quality.height <= canvas_height)
+        .map(|quality| quality.height)
+        .unwrap_or(height)
+}
+
+pub fn source_bounded_qualities_for_dimensions(
+    width: u64,
+    height: u64,
+    bitrate: u64,
+) -> Vec<Quality> {
+    let tier_height = source_quality_height(width, height);
+    let mut qualities = source_bounded_qualities(tier_height, bitrate);
+
+    // Preserve a source-sized top rendition for cropped masters; the tier is only a label and
+    // must never cause the encoder to upscale the stored frame.
+    if height > 0 && tier_height > height && qualities.first().is_some_and(|q| q.height > height) {
+        qualities[0].height = height;
     }
     qualities
 }
@@ -673,5 +702,22 @@ mod tests {
     #[test]
     fn preserves_a_sub_480p_source_without_upscaling() {
         assert_eq!(source_bounded_qualities(360, 700_000)[0].height, 360);
+    }
+
+    #[test]
+    fn classifies_cropped_widescreen_sources_by_their_canvas() {
+        assert_eq!(source_quality_height(1920, 800), 1080);
+        assert_eq!(source_quality_height(1280, 536), 720);
+        assert_eq!(source_quality_height(720, 1280), 1080);
+    }
+
+    #[test]
+    fn cropped_source_ladder_starts_native_without_upscaling() {
+        let qualities = source_bounded_qualities_for_dimensions(1920, 800, 8_000_000);
+        assert_eq!(
+            qualities.iter().map(|q| q.height).collect::<Vec<_>>(),
+            vec![800, 720, 480]
+        );
+        assert!(qualities.iter().all(|q| q.height <= 800));
     }
 }

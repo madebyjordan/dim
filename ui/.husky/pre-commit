@@ -1,6 +1,0 @@
-#!/bin/sh
-. "$(dirname "$0")/_/husky.sh"
-
-cd ui
-corepack yarn run lint-staged
-corepack yarn run fmt

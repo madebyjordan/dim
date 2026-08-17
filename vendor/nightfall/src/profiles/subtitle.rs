@@ -37,7 +37,8 @@ impl TranscodingProfile for WebvttTranscodeProfile {
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
-        if ["srt", "ass", "ssa", "subrip"].contains(&ctx.input_ctx.codec.as_str())
+        if ["srt", "ass", "ssa", "subrip", "webvtt", "vtt"]
+            .contains(&ctx.input_ctx.codec.as_str())
             && ctx.output_ctx.codec == "webvtt"
         {
             return Ok(());
@@ -55,6 +56,34 @@ impl TranscodingProfile for WebvttTranscodeProfile {
 
     fn is_stdio_stream(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::{InputCtx, OutputCtx};
+
+    fn context(codec: &str) -> ProfileContext {
+        ProfileContext {
+            input_ctx: InputCtx {
+                codec: codec.into(),
+                ..Default::default()
+            },
+            output_ctx: OutputCtx {
+                codec: "webvtt".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn accepts_all_advertised_text_subtitle_codecs() {
+        let profile = WebvttTranscodeProfile;
+        for codec in ["srt", "subrip", "ass", "ssa", "webvtt", "vtt"] {
+            assert!(profile.supports(&context(codec)).is_ok(), "{codec}");
+        }
     }
 }
 

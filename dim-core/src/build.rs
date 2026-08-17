@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn target_dir() -> PathBuf {
     let workspace_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -21,15 +21,5 @@ fn main() {
         db_file.display()
     );
 
-    if Path::new("../ui/build").exists() {
-        println!("cargo:rustc-cfg=feature=\"embed_ui\"");
-    } else {
-        println!("cargo:warning=`ui/build` does not exist.");
-        println!(
-            "cargo:warning=If you wish to embed the webui, run `corepack yarn build` in `ui`."
-        );
-    }
-
-    println!("cargo:rerun-if-changed=../ui/build");
     println!("cargo:rerun-if-changed=build.rs");
 }

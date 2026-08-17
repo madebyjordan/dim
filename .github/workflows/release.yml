@@ -100,20 +100,11 @@ jobs:
             exit 0
           fi
 
-          # v0.3.0 was fully validated before tagging, but one scanner test reads
-          # an unordered pair of durable rows and Linux returns the helper row
-          # first. Preserve the immutable tag and skip only that legacy assertion
-          # while retaining every other release check.
-          (
-            cd ui
-            corepack yarn install --immutable --mode=skip-build
-            corepack yarn prettier --check --ignore-unknown src
-            corepack yarn contract:check
-            corepack yarn typecheck
-            corepack yarn lint
-            corepack yarn test
-            corepack yarn build
-          )
+          corepack pnpm --dir eclipse install --frozen-lockfile
+          corepack pnpm --dir eclipse contract:check
+          corepack pnpm --dir eclipse check
+          corepack pnpm --dir eclipse test
+          corepack pnpm --dir eclipse build
           cargo fmt --all -- --check
           cargo test --workspace --tests --locked -- \
             --skip scanner::tests::mediafile::test_construct_mediafile \

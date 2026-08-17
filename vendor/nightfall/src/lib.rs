@@ -370,22 +370,28 @@ impl StateManager {
             .get_mut(&id)
             .ok_or(NightfallError::SessionDoesntExist)?;
 
-        if session.try_wait()
-            && session
-                .exit_status
-                .as_ref()
-                .is_some_and(|status| !status.success())
+        if !session.has_started() {
+            session.start().await?;
+            // Subtitle stdout is redirected to a file that exists as soon as the process starts.
+            // Existence is not readiness: make callers poll until FFmpeg closes the completed file.
+            return Err(NightfallError::ChunkNotDone);
+        }
+
+        if !session.try_wait() {
+            return Err(NightfallError::ChunkNotDone);
+        }
+
+        if session
+            .exit_status
+            .as_ref()
+            .is_some_and(|status| !status.success())
         {
             session.join().await;
             if session.next_profile().is_some() {
                 session.reset_to(0);
-            } else {
-                return Err(NightfallError::ProfileChainExhausted);
+                return Err(NightfallError::ChunkNotDone);
             }
-        }
-
-        if !session.has_started() {
-            session.start().await?;
+            return Err(NightfallError::ProfileChainExhausted);
         }
 
         session.subtitle(name).ok_or(NightfallError::ChunkNotDone)

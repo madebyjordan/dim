@@ -4,13 +4,8 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const source = resolve(root, "api-contract/openapi.json");
-const eclipse = process.argv.includes("--eclipse");
-const project = eclipse ? "eclipse" : "ui";
-const target = resolve(
-  root,
-  project,
-  eclipse ? "src/lib/api/generated.ts" : "src/api/generated.ts"
-);
+const project = "eclipse";
+const target = resolve(root, project, "src/lib/api/generated.ts");
 const contract = JSON.parse(await readFile(source, "utf8"));
 
 function type(schema) {

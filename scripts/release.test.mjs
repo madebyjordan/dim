@@ -286,14 +286,6 @@ test("every workspace application crate inherits the canonical version", () => {
   }
 });
 
-test("the pre-commit hook uses the repository-pinned Yarn sequentially", () => {
-  const hook = readFileSync(resolve(root, "ui/.husky/pre-commit"), "utf8");
-  assert.match(hook, /corepack yarn run lint-staged/);
-  assert.match(hook, /corepack yarn run fmt/);
-  assert.doesNotMatch(hook, /^\s*yarn run/m);
-  assert.doesNotMatch(hook, /&/);
-});
-
 test("clean synchronized checkout is a valid release input", () => {
   const item = fixture();
   try {

@@ -8,8 +8,7 @@ Eclipse is a self-media manager based on Dim. Eclipse builds on Dim's foundation
 ## Running from source
 
 Dim's supported source-development path is macOS or Linux. The repository pins Rust in
-`rust-toolchain.toml`, Node.js in `.nvmrc`, pnpm in the root `package.json`, and Yarn 4 in
-`ui/package.json` for UI-internal tooling.
+`rust-toolchain.toml`, Node.js in `.nvmrc`, and pnpm in the root and Eclipse package manifests.
 
 ### Prerequisites
 
@@ -41,9 +40,6 @@ Enable the repository-pinned pnpm command once after installing Node.js:
 ```sh
 corepack enable pnpm
 ```
-
-The bootstrap script invokes the UI's pinned Yarn 4 version through Corepack directly, so Yarn
-does not need to be installed globally and its global shim does not need to be enabled.
 
 ### Build and run
 

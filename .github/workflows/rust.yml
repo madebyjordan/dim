@@ -20,16 +20,6 @@ jobs:
       - run: sudo apt-get install -y libva-dev libva-drm2 libva2 sqlite3 ffmpeg
       - uses: actions/checkout@v4
 
-      # - name: Download UI artifacts
-      #   uses: dawidd6/action-download-artifact@v2
-      #   with:
-      #     workflow: react.yml
-      #     workflow_conclusion: success
-      #     branch: master
-      #     name: webui
-      #     path: ui/build
-      #     repo: ${{github.repository}}
-
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: rustfmt, clippy
@@ -37,8 +27,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
-          cache: yarn
-          cache-dependency-path: ui/yarn.lock
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Enable Corepack
         run: corepack enable

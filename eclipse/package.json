@@ -12,8 +12,8 @@
     "build": "pnpm contract:check && vite build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "contract:generate": "node ../scripts/generate-api-contract.mjs --eclipse",
-    "contract:check": "node ../scripts/generate-api-contract.mjs --eclipse --check"
+    "contract:generate": "node ../scripts/generate-api-contract.mjs",
+    "contract:check": "node ../scripts/generate-api-contract.mjs --check"
   },
   "dependencies": {
     "dashjs": "^5.0.3",
