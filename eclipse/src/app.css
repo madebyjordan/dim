@@ -2,6 +2,7 @@
   color-scheme: dark;
   --color-canvas: #000000;
   --color-surface: #121212;
+  --color-brand: #ffb363;
   --color-control: rgba(255, 255, 255, 0.42);
   --color-control-subtle: rgba(255, 255, 255, 0.18);
   --color-control-hover: rgba(255, 255, 255, 0.1);
