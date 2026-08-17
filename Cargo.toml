@@ -13,7 +13,7 @@ members = [
 exclude = ["vendor/nightfall"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Valerian G. <valerian@dusklabs.io>"]
 edition = "2021"
 license = "AGPL-3.0-only"
