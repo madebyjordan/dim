@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
+  CANONICAL_REPOSITORY,
   INITIAL_VERSION,
   latestStableVersion,
   nextVersion,
@@ -56,11 +57,18 @@ function fixture() {
 if [[ "\${1:-}" == "--version" ]]; then echo "gh fixture"; exit 0; fi
 if [[ "\${1:-}" == "auth" ]]; then exit 0; fi
 if [[ "\${1:-}" == "release" && "\${2:-}" == "view" ]]; then
-  if [[ "\${FAKE_RELEASE_EXISTS:-}" == "\${3:-}" ]]; then echo '{"tagName":"'"\${3}"'"}'; exit 0; fi
+  if [[ "\${FAKE_RELEASE_EXISTS:-}" == "\${3:-}" || ( "\${FAKE_WORKFLOW_RELEASE_EXISTS:-}" == "1" && -n "$(git tag --list "\${3:-}")" ) ]]; then echo '{"tagName":"'"\${3}"'"}'; exit 0; fi
   echo "release not found" >&2; exit 1
 fi
 if [[ "\${1:-}" == "release" && "\${2:-}" == "list" ]]; then
   echo "\${FAKE_RELEASE_LIST:-[]}"; exit 0
+fi
+if [[ "\${1:-}" == "run" && "\${2:-}" == "list" ]]; then
+  commit=$(git rev-parse HEAD)
+  status="\${FAKE_WORKFLOW_STATUS:-completed}"
+  conclusion="\${FAKE_WORKFLOW_CONCLUSION:-success}"
+  echo '[{"databaseId":123,"status":"'"$status"'","conclusion":"'"$conclusion"'","headSha":"'"$commit"'","headBranch":"v0.3.0","url":"https://github.com/madebyjordan/eclipse/actions/runs/123","createdAt":"2026-08-17T00:00:00Z"}]'
+  exit 0
 fi
 exit 1
 `
@@ -101,12 +109,12 @@ exec "${realGit}" "$@"
     "remote",
     "set-url",
     "origin",
-    "https://github.com/example/dim.git",
+    "https://github.com/madebyjordan/eclipse.git",
   ]);
   command(repository, "git", [
     "config",
     "url.file://" + remote + ".insteadOf",
-    "https://github.com/example/dim.git",
+    "https://github.com/madebyjordan/eclipse.git",
   ]);
 
   return {
@@ -126,7 +134,13 @@ function runRelease(
     testFixture.repository,
     process.execPath,
     ["scripts/release.mjs", mode, ...(dryRun ? ["--dry-run"] : [])],
-    { DIM_RELEASE_REPOSITORY: "example/dim", ...testFixture.env, ...env }
+    {
+      ECLIPSE_RELEASE_REPOSITORY: CANONICAL_REPOSITORY,
+      ECLIPSE_RELEASE_WORKFLOW_POLL_SECONDS: "0",
+      ECLIPSE_RELEASE_WORKFLOW_TIMEOUT_SECONDS: "1",
+      ...testFixture.env,
+      ...env,
+    }
   );
 }
 
@@ -220,12 +234,12 @@ test("only workspace.package.version is mutated", () => {
 
 test("GitHub release repository is derived from the configured remote", () => {
   assert.equal(
-    parseGitHubRepository("https://github.com/madebyjordan/dim.git"),
-    "madebyjordan/dim"
+    parseGitHubRepository("https://github.com/madebyjordan/eclipse.git"),
+    "madebyjordan/eclipse"
   );
   assert.equal(
-    parseGitHubRepository("git@github.com:madebyjordan/dim.git"),
-    "madebyjordan/dim"
+    parseGitHubRepository("git@github.com:madebyjordan/eclipse.git"),
+    "madebyjordan/eclipse"
   );
   assert.throws(
     () => parseGitHubRepository("https://example.com/dim.git"),
@@ -418,11 +432,14 @@ test("commit push failure prevents local and remote tag creation", () => {
   }
 });
 
-test("release tag points exactly at the successfully pushed release commit", () => {
+test("release succeeds only after its exact workflow and GitHub Release succeed", () => {
   const item = fixture();
   try {
     writeFileSync(resolve(item.repository, "pending.txt"), "pending\n");
-    const result = runRelease(item, { dryRun: false });
+    const result = runRelease(item, {
+      dryRun: false,
+      env: { FAKE_WORKFLOW_RELEASE_EXISTS: "1" },
+    });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const releaseCommit = command(item.repository, realGit, [
       "rev-parse",
@@ -454,6 +471,42 @@ test("release tag points exactly at the successfully pushed release commit", () 
       ]).stdout.trim(),
       "chore: release v0.3.0"
     );
+    assert.match(result.stdout, /Release commit pushed:/);
+    assert.match(result.stdout, /Tag pushed: v0\.3\.0/);
+    assert.match(result.stdout, /GitHub workflow running:/);
+    assert.match(result.stdout, /GitHub Release published:/);
+    assert.equal(
+      command(item.repository, realGit, ["tag", "-n1", "v0.3.0"]).stdout.trim(),
+      "v0.3.0          Eclipse v0.3.0"
+    );
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("failed release workflow makes the local release command fail", () => {
+  const item = fixture();
+  try {
+    writeFileSync(resolve(item.repository, "pending.txt"), "pending\n");
+    const result = runRelease(item, {
+      dryRun: false,
+      env: { FAKE_WORKFLOW_CONCLUSION: "failure" },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Release workflow.*failure/);
+    assert.doesNotMatch(result.stdout, /GitHub Release published/);
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("successful workflow without a GitHub Release still fails", () => {
+  const item = fixture();
+  try {
+    writeFileSync(resolve(item.repository, "pending.txt"), "pending\n");
+    const result = runRelease(item, { dryRun: false });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /succeeded but GitHub Release v0\.3\.0 was not created/);
   } finally {
     item.cleanup();
   }

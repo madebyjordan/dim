@@ -7,6 +7,9 @@ import { spawnSync } from "node:child_process";
 
 export const INITIAL_VERSION = "0.3.0";
 export const RELEASE_WORKFLOW = ".github/workflows/release.yml";
+export const CANONICAL_REPOSITORY = "madebyjordan/eclipse";
+const DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 3600;
+const DEFAULT_WORKFLOW_POLL_SECONDS = 10;
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -108,6 +111,70 @@ function assertReleaseMissing(repository, tag) {
   if (!/release not found|HTTP 404/i.test(detail)) {
     throw new Error(`Could not verify GitHub Release ${tag}: ${detail.trim()}`);
   }
+}
+
+function releaseExists(repository, tag, commit) {
+  const result = execute(
+    "gh",
+    ["release", "view", tag, "--repo", repository, "--json", "tagName"],
+    { capture: true, allowFailure: true }
+  );
+  if (result.status !== 0) return false;
+  const release = JSON.parse(result.stdout);
+  if (release.tagName !== tag) return false;
+  const taggedCommit = output("git", ["rev-list", "-n", "1", tag]);
+  if (taggedCommit !== commit) {
+    throw new Error(
+      `GitHub Release ${tag} exists, but local tag resolves to ${taggedCommit}, not release commit ${commit}`
+    );
+  }
+  return true;
+}
+
+function workflowRuns(repository, tag, commit) {
+  return JSON.parse(output("gh", [
+    "run", "list", "--repo", repository, "--workflow", RELEASE_WORKFLOW,
+    "--event", "push", "--branch", tag, "--commit", commit, "--limit", "10",
+    "--json", "databaseId,status,conclusion,headSha,headBranch,url,createdAt",
+  ])).filter((run) => run.headSha === commit && run.headBranch === tag);
+}
+
+function waitForReleaseWorkflow(repository, tag, commit) {
+  const timeoutSeconds = Number(process.env.ECLIPSE_RELEASE_WORKFLOW_TIMEOUT_SECONDS || DEFAULT_WORKFLOW_TIMEOUT_SECONDS);
+  const pollSeconds = Number(process.env.ECLIPSE_RELEASE_WORKFLOW_POLL_SECONDS || DEFAULT_WORKFLOW_POLL_SECONDS);
+  if (!(timeoutSeconds > 0) || !(pollSeconds >= 0)) {
+    throw new Error("Release workflow timeout and poll interval must be valid numbers");
+  }
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let announcedRun;
+  while (Date.now() <= deadline) {
+    const run = workflowRuns(repository, tag, commit)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+    if (run) {
+      if (announcedRun !== run.databaseId) {
+        console.log(`GitHub workflow running: ${run.url}`);
+        announcedRun = run.databaseId;
+      }
+      if (run.status === "completed") {
+        if (run.conclusion !== "success") {
+          throw new Error(
+            `Release workflow for ${tag} at ${commit} ${run.conclusion}: ${run.url}. Inspect the failed jobs, then rerun the existing tag with: gh workflow run ${RELEASE_WORKFLOW} --repo ${repository} -f tag=${tag}`
+          );
+        }
+        if (!releaseExists(repository, tag, commit)) {
+          throw new Error(
+            `Release workflow succeeded but GitHub Release ${tag} was not created. Inspect ${run.url} and do not retag; rerun the existing tag with workflow_dispatch after correcting publication.`
+          );
+        }
+        console.log(`GitHub Release published: https://github.com/${repository}/releases/tag/${tag}`);
+        return;
+      }
+    }
+    if (pollSeconds > 0) execute("sleep", [String(pollSeconds)]);
+  }
+  throw new Error(
+    `Timed out after ${timeoutSeconds}s waiting for the Release workflow for ${tag} at ${commit}. Check: https://github.com/${repository}/actions/workflows/release.yml`
+  );
 }
 
 function findLatestStableRelease(repository) {
@@ -215,8 +282,8 @@ function remoteBranchHead(remote, branch) {
 export function main(argv = process.argv.slice(2)) {
   try {
     const { mode, dryRun } = parseArguments(argv);
-    const branch = process.env.DIM_RELEASE_BRANCH || "master";
-    const remote = process.env.DIM_RELEASE_REMOTE || "origin";
+    const branch = process.env.ECLIPSE_RELEASE_BRANCH || "master";
+    const remote = process.env.ECLIPSE_RELEASE_REMOTE || "origin";
     const expectedUpstream = `${remote}/${branch}`;
     const manifestPath = resolve(root, "Cargo.toml");
     const currentManifest = readFileSync(manifestPath, "utf8");
@@ -267,9 +334,14 @@ export function main(argv = process.argv.slice(2)) {
 
     const remoteUrl = output("git", ["remote", "get-url", remote]);
     const repository =
-      process.env.DIM_RELEASE_REPOSITORY || parseGitHubRepository(remoteUrl);
+      process.env.ECLIPSE_RELEASE_REPOSITORY || parseGitHubRepository(remoteUrl);
     if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) {
       throw new Error(`Invalid GitHub repository identifier: ${repository}`);
+    }
+    if (repository.toLowerCase() !== CANONICAL_REPOSITORY) {
+      throw new Error(
+        `Release remote must resolve directly to ${CANONICAL_REPOSITORY}; found ${repository} from ${remoteUrl}. Update it with: git remote set-url ${remote} https://github.com/${CANONICAL_REPOSITORY}.git`
+      );
     }
     const baseVersion =
       mode === "initial" ? undefined : findLatestStableRelease(repository);
@@ -364,7 +436,8 @@ export function main(argv = process.argv.slice(2)) {
         }, not release commit ${releaseCommit}; tag was not created`
       );
     }
-    execute("git", ["tag", "-a", tag, releaseCommit, "-m", `Dim ${tag}`]);
+    console.log(`Release commit pushed: ${releaseCommit} -> ${expectedUpstream}`);
+    execute("git", ["tag", "-a", tag, releaseCommit, "-m", `Eclipse ${tag}`]);
     const taggedCommit = output("git", ["rev-list", "-n", "1", tag]);
     if (taggedCommit !== releaseCommit) {
       throw new Error(
@@ -372,9 +445,8 @@ export function main(argv = process.argv.slice(2)) {
       );
     }
     execute("git", ["push", remote, `refs/tags/${tag}`]);
-    console.log(
-      `Pushed release commit ${releaseCommit} and ${tag}; GitHub Actions will publish https://github.com/${repository}/releases/tag/${tag}`
-    );
+    console.log(`Tag pushed: ${tag} -> ${remote}`);
+    waitForReleaseWorkflow(repository, tag, releaseCommit);
   } catch (error) {
     console.error(`Release aborted: ${error.message}`);
     process.exitCode = 1;

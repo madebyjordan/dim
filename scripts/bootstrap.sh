@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DIM_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-DIM_RELEASE_BUILD=false
+ECLIPSE_RELEASE_BUILD=false
 DIM_SKIP_UI=false
 DIM_SKIP_RUST=false
 
@@ -14,7 +14,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --release)
-            DIM_RELEASE_BUILD=true
+            ECLIPSE_RELEASE_BUILD=true
             ;;
         --skip-ui)
             DIM_SKIP_UI=true
@@ -103,7 +103,7 @@ if [[ "$DIM_SKIP_RUST" == false ]]; then
     DIM_CARGO_ARGS=(build --locked)
     DIM_BINARY_PATH="$CARGO_TARGET_DIR/debug/dim"
     DIM_RUN_SUFFIX=""
-    if [[ "$DIM_RELEASE_BUILD" == true ]]; then
+    if [[ "$ECLIPSE_RELEASE_BUILD" == true ]]; then
         DIM_CARGO_ARGS+=(--release)
         DIM_BINARY_PATH="$CARGO_TARGET_DIR/release/dim"
         DIM_RUN_SUFFIX=" --release"
@@ -112,7 +112,7 @@ if [[ "$DIM_SKIP_RUST" == false ]]; then
     echo "Building Dim..."
     cargo "${DIM_CARGO_ARGS[@]}"
 
-    if [[ "$DIM_RELEASE_BUILD" == true ]]; then
+    if [[ "$ECLIPSE_RELEASE_BUILD" == true ]]; then
         mkdir -p "$CARGO_TARGET_DIR/release/utils"
         link_media_tool ffmpeg "$CARGO_TARGET_DIR/release/utils/ffmpeg"
         link_media_tool ffprobe "$CARGO_TARGET_DIR/release/utils/ffprobe"

@@ -182,5 +182,5 @@ jobs:
           gh release create "$TAG" artifacts/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "Dim $TAG" \
+            --title "Eclipse $TAG" \
             --generate-notes

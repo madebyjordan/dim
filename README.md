@@ -103,9 +103,9 @@ workspace crate inherits it, and Cargo synchronizes `Cargo.lock` when the releas
 the version.
 
 The root release commands validate, version, commit, push, and tag the synchronized release branch.
-The pushed tag automatically starts `.github/workflows/release.yml`, which builds and publishes the
-Linux archive, checksum, container tags, and GitHub Release. There is no separate manual version,
-tag, or GitHub Release step.
+The pushed tag starts `.github/workflows/release.yml`, which builds and publishes the Linux archive,
+checksum, Eclipse container tags, and GitHub Release. The command waits for that exact tag and
+commit's workflow run and succeeds only after confirming that the GitHub Release exists.
 
 The first fork release is deliberately bootstrapped as `v0.3.0`:
 
@@ -129,9 +129,10 @@ The command must run on `master` tracking `origin/master`, with authenticated `g
 `origin`, Node/Corepack, pnpm, Rust, FFmpeg/FFprobe, and the native build dependencies listed above.
 Pending tracked changes, non-ignored untracked files, and local commits ahead of `origin/master` are
 valid release inputs. Remote-only commits or a diverged branch abort; the command never pulls,
-merges, rebases, force-pushes, or overwrites remote history. Set `DIM_RELEASE_BRANCH` or
-`DIM_RELEASE_REMOTE` only when the fork's intended release branch or remote is intentionally
-different.
+merges, rebases, force-pushes, or overwrites remote history. The release remote must resolve
+directly to `madebyjordan/eclipse`; redirects from the former repository name are rejected. Set
+`ECLIPSE_RELEASE_BRANCH` or `ECLIPSE_RELEASE_REMOTE` only when the intended release branch or
+remote is intentionally different.
 
 Before mutation it fetches tags, verifies remote ancestry and tag/Release availability, reports
 every file that will enter the release commit, and runs the same frontend and Rust validation used
@@ -139,9 +140,20 @@ by the release workflow. A real release updates `Cargo.toml` and `Cargo.lock`, s
 non-ignored project changes, and creates one `chore: release vX.Y.Z` commit. It pushes `master`
 without force and verifies the remote commit before creating an annotated tag on that exact commit
 and pushing the tag separately. The one tag-triggered workflow builds the Linux x86_64 archive and
-checksum, publishes versioned Linux x86_64 GHCR tags, and creates the GitHub Release. Dry runs
+checksum, publishes versioned Linux x86_64 `ghcr.io/madebyjordan/eclipse` tags, and creates an
+`Eclipse vX.Y.Z` GitHub Release. Archives remain `dim-vX.Y.Z-linux-x86_64.tar.gz` because the
+packaged executable and runtime layout are still named `dim`. Dry runs
 execute the complete inspection and validation path but never modify files or the index, create a
 commit or tag, push, or publish anything.
+
+If a tag exists but publication failed, do not recreate or move it. After correcting the workflow,
+rerun it for the immutable tag, then verify the release:
+
+```sh
+gh workflow run .github/workflows/release.yml --repo madebyjordan/eclipse -f tag=v0.3.1
+gh run watch --repo madebyjordan/eclipse
+gh release view v0.3.1 --repo madebyjordan/eclipse
+```
 
 The release gate excludes two legacy scanner tests that can wait indefinitely on metadata/probe
 work: `test_construct_mediafile` and
@@ -179,15 +191,15 @@ In this example, the path `/media` on the host is made available at the same pat
 This name "media" is arbitrary and you can choose whatever you like.
 
 ```
-docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro ghcr.io/dusk-labs/dim:dev
+docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro ghcr.io/madebyjordan/eclipse:dev
 ```
 
-The multi-architecture image resides at `ghcr.io/dusk-labs/dim:master`.
+The multi-architecture image resides at `ghcr.io/madebyjordan/eclipse:master`.
 
 To use hardware acceleration, mount the relevant device:
 
 ```
-docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro --device=/dev/dri/renderD128 ghcr.io/dusk-labs/dim:dev
+docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro --device=/dev/dri/renderD128 ghcr.io/madebyjordan/eclipse:dev
 ```
 
 Refer to [docker-compose-template.yml](docker-compose-template.yml) to run Dim using Docker Compose.

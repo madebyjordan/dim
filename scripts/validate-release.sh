@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-DIM_RELEASE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$DIM_RELEASE_ROOT"
+ECLIPSE_RELEASE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ECLIPSE_RELEASE_ROOT"
 
 echo "Validating frontend lockfile, formatting, contract, types, lint, tests, and build..."
 corepack pnpm install --frozen-lockfile
