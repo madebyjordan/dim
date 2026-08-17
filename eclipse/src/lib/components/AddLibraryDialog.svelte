@@ -6,6 +6,7 @@
   import { session } from '$lib/auth/session.svelte';
   import Button from '$lib/primitives/Button.svelte';
   import IconButton from '$lib/primitives/IconButton.svelte';
+  import Select from '$lib/primitives/Select.svelte';
 
   let {
     open,
@@ -73,6 +74,10 @@
       submitting = false;
     }
   }
+
+  function setMediaType(value: string) {
+    if (value === 'movie' || value === 'tv') mediaType = value;
+  }
 </script>
 
 <dialog bind:this={dialog} {onclose}>
@@ -85,13 +90,18 @@
       Name
       <input bind:value={name} required autocomplete="off" />
     </label>
-    <label>
-      Type
-      <select bind:value={mediaType}>
-        <option value="movie">Movies</option>
-        <option value="tv">Shows</option>
-      </select>
-    </label>
+    <div class="field">
+      <span>Type</span>
+      <Select
+        label="Type"
+        value={mediaType}
+        options={[
+          { value: 'movie', label: 'Movies' },
+          { value: 'tv', label: 'Shows' }
+        ]}
+        onvaluechange={setMediaType}
+      />
+    </div>
     <section aria-label="Folder">
       <div class="path">{listing?.current ?? 'Loading folders…'}</div>
       <div class="directories">
@@ -159,20 +169,23 @@
     background: transparent;
     cursor: pointer;
   }
-  label {
+  label,
+  .field {
     display: grid;
     gap: 7px;
     color: var(--color-fg-muted);
     font-size: var(--text-sm);
   }
-  input,
-  select {
+  input {
     min-height: var(--control-height-large);
     padding: 0 var(--space-3);
     border: 1px solid var(--color-stroke);
     border-radius: var(--radius-md);
     color: var(--color-fg);
     background: var(--color-canvas);
+  }
+  .field :global(.select) {
+    width: 100%;
   }
   section {
     overflow: hidden;

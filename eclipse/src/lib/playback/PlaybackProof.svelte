@@ -85,9 +85,14 @@
     controlsTimer = null;
     if (!keepOpen) {
       controlsTimer = window.setTimeout(() => {
+        const focused = document.activeElement;
+        const popoutOpen =
+          focused instanceof HTMLElement &&
+          focused.closest('[data-popout-surface]') !== null &&
+          controlsPanel?.contains(focused);
         if (
-          !keyboardInteraction ||
-          !controlsPanel?.contains(document.activeElement)
+          !popoutOpen &&
+          (!keyboardInteraction || !controlsPanel?.contains(focused))
         )
           controlsVisible = false;
       }, controlsIdleMs);
@@ -116,7 +121,7 @@
     keyboardInteraction = true;
     showControls();
     if (
-      event.target instanceof HTMLSelectElement ||
+      event.target instanceof HTMLButtonElement ||
       event.target instanceof HTMLInputElement
     )
       return;

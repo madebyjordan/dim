@@ -122,17 +122,21 @@
 
 <style>
   .presentation {
+    position: relative;
+    z-index: 6;
     width: 100%;
     min-height: max(360px, calc(100svh - var(--header-height) - 350px));
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
     padding: var(--space-4) var(--layout-gutter) var(--space-5);
+    pointer-events: none;
   }
   .content {
     width: min(100%, var(--content-width));
     display: grid;
     gap: var(--space-3);
+    pointer-events: auto;
   }
   .copy {
     display: grid;

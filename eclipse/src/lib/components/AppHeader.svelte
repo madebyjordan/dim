@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import type { HTMLButtonAttributes } from 'svelte/elements';
   import type { Library, User } from '$lib/api/generated';
   import { imageUrl } from '$lib/catalog/catalog';
   import IconButton from '$lib/primitives/IconButton.svelte';
+  import DropdownMenu from '$lib/primitives/DropdownMenu.svelte';
   import UserIcon from '$lib/icons/UserIcon.svelte';
   import EclipseMark from './EclipseMark.svelte';
 
@@ -30,9 +31,7 @@
 
   let searchOpen = $state(false);
   let searchQuery = $state('');
-  let profileOpen = $state(false);
   let searchInput = $state<HTMLInputElement>();
-  let profile = $state<HTMLDivElement>();
 
   $effect(() => {
     const query = searchQuery.trim();
@@ -40,16 +39,6 @@
       if (searchOpen) onsearch(query);
     }, 220);
     return () => window.clearTimeout(timer);
-  });
-
-  onMount(() => {
-    const closeProfile = (event: PointerEvent) => {
-      if (profileOpen && profile && !profile.contains(event.target as Node)) {
-        profileOpen = false;
-      }
-    };
-    window.addEventListener('pointerdown', closeProfile);
-    return () => window.removeEventListener('pointerdown', closeProfile);
   });
 
   function openSearch() {
@@ -63,6 +52,20 @@
     onsearchclose();
   }
 </script>
+
+{#snippet profileTrigger(attributes: HTMLButtonAttributes)}
+  <IconButton {...attributes} label="Open profile menu" tone="surface">
+    {#if user?.picture}
+      <img class="profile-avatar" src={imageUrl(user.picture) ?? ''} alt="" />
+    {:else}
+      <UserIcon size="100%" />
+    {/if}
+  </IconButton>
+{/snippet}
+
+{#snippet profileHeader()}
+  <span class="profile-name">{user?.username}</span>
+{/snippet}
 
 <header class="header">
   <div class="leading">
@@ -120,30 +123,13 @@
         <span>{scanText}</span><i aria-hidden="true"></i>
       </div>
     {/if}
-    <div class="profile" bind:this={profile}>
-      <IconButton
-        label="Open profile menu"
-        tone="surface"
-        expanded={profileOpen}
-        onclick={() => (profileOpen = !profileOpen)}
-      >
-        {#if user?.picture}
-          <img
-            class="profile-avatar"
-            src={imageUrl(user.picture) ?? ''}
-            alt=""
-          />
-        {:else}
-          <UserIcon size="100%" />
-        {/if}
-      </IconButton>
-      {#if profileOpen}
-        <div class="profile-menu">
-          <p>{user?.username}</p>
-          <button type="button" onclick={onlogout}>Sign out</button>
-        </div>
-      {/if}
-    </div>
+    <DropdownMenu
+      label="Profile menu"
+      trigger={profileTrigger}
+      header={profileHeader}
+      align="end"
+      items={[{ label: 'Sign out', onselect: onlogout }]}
+    />
   </div>
 </header>
 
@@ -185,8 +171,7 @@
   .search.open {
     width: 280px;
   }
-  nav button,
-  .profile-menu button {
+  nav button {
     border: 0;
     color: inherit;
     background: transparent;
@@ -249,9 +234,6 @@
     border-radius: 50%;
     animation: spin 900ms linear infinite;
   }
-  .profile {
-    position: relative;
-  }
   .profile-avatar {
     position: absolute;
     inset: 0;
@@ -259,32 +241,11 @@
     height: 100%;
     object-fit: cover;
   }
-  .profile-menu {
-    position: absolute;
-    top: calc(100% + 12px);
-    right: 0;
-    min-width: 170px;
-    padding: 12px;
-    border: 1px solid var(--color-stroke);
-    border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--color-surface) 96%, transparent);
-    box-shadow: var(--shadow-float);
-  }
-  .profile-menu p {
-    margin: var(--space-1) var(--space-2) 10px;
+  .profile-name {
+    display: block;
     overflow: hidden;
-    color: var(--color-fg-subtle);
-    font-size: 13px;
     text-overflow: ellipsis;
-  }
-  .profile-menu button {
-    width: 100%;
-    padding: 9px 8px;
-    border-radius: 7px;
-    text-align: left;
-  }
-  .profile-menu button:hover {
-    background: rgba(255, 255, 255, 0.08);
+    white-space: nowrap;
   }
   @keyframes spin {
     to {

@@ -4,19 +4,17 @@
 
   type Props = Omit<
     HTMLButtonAttributes,
-    'aria-label' | 'aria-expanded' | 'children' | 'class'
+    'aria-label' | 'children' | 'class'
   > & {
     label: string;
     children: Snippet;
     tone?: 'quiet' | 'surface';
-    expanded?: boolean;
   };
 
   let {
     label,
     children,
     tone = 'quiet',
-    expanded,
     type = 'button',
     ...attributes
   }: Props = $props();
@@ -27,7 +25,6 @@
   {type}
   class:surface={tone === 'surface'}
   aria-label={label}
-  aria-expanded={expanded}
 >
   {@render children()}
 </button>
