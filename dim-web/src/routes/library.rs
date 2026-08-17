@@ -59,6 +59,12 @@ struct LibraryScanProgress {
     error_summary: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateLibrary {
+    auto_scan: bool,
+}
+
 fn safe_scan_error(error: Option<&str>) -> Option<String> {
     let error = error?.trim();
     if error.is_empty() {
@@ -147,6 +153,25 @@ async fn spawn_library_scan(
         };
     }
     spawn_result
+}
+
+async fn spawn_library_watcher(state: &AppState, library: &Library) -> Result<(), &'static str> {
+    let library_id = library.id;
+    let mut watcher = FsWatcher::new(
+        state.conn.clone(),
+        library_id,
+        library.media_type,
+        state.event_tx.clone(),
+        metadata_provider(library.media_type),
+    );
+    state
+        .library_workers
+        .spawn(library_id, LibraryWorkerKind::Watcher, async move {
+            if let Err(error) = watcher.start_daemon().await {
+                tracing::error!(?error, library_id, "Filesystem watcher failed");
+            }
+        })
+        .await
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -343,32 +368,22 @@ pub async fn library_post(
     }
     drop(lock);
 
-    let tx_clone = state.event_tx.clone();
-
     let provider = metadata_provider(new_library.media_type);
-
-    let mut fs_watcher = FsWatcher::new(
-        state.conn.clone(),
-        id,
-        new_library.media_type,
-        tx_clone.clone(),
-        Arc::clone(&provider),
-    );
 
     if let Err(error) = spawn_library_scan(&state, id, Arc::clone(&provider)).await {
         tracing::error!(?error, library_id = id, "Library scanner was not started");
         return CreateLibraryError::Internal.into_response();
     }
 
-    if let Err(error) = state
-        .library_workers
-        .spawn(id, LibraryWorkerKind::Watcher, async move {
-            if let Err(error) = fs_watcher.start_daemon().await {
-                tracing::error!(?error, library_id = id, "Filesystem watcher failed");
-            }
-        })
-        .await
-    {
+    let library = Library {
+        id,
+        name: new_library.name,
+        locations: new_library.locations,
+        media_type: new_library.media_type,
+        hidden: false,
+        auto_scan: true,
+    };
+    if let Err(error) = spawn_library_watcher(&state, &library).await {
         tracing::error!(
             ?error,
             library_id = id,
@@ -378,6 +393,80 @@ pub async fn library_post(
     }
 
     Json(serde_json::json!({ "id": id, "scan_status": "scanning" })).into_response()
+}
+
+pub async fn library_patch(
+    _owner: Owner,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(update): Json<UpdateLibrary>,
+) -> Response {
+    let mut lock = state.conn.writer().lock_owned().await;
+    let mut tx = match dim_database::write_tx(&mut lock).await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(?error, "Error getting connection");
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not complete the request.",
+            );
+        }
+    };
+    let mut library = match Library::get_one(&mut tx, id).await {
+        Ok(library) if !library.hidden => library,
+        _ => {
+            return crate::error::api_error(
+                StatusCode::NOT_FOUND,
+                "library_not_found",
+                "The requested library was not found.",
+            )
+        }
+    };
+
+    if library.auto_scan != update.auto_scan {
+        if let Err(error) = Library::set_auto_scan(&mut tx, id, update.auto_scan).await {
+            tracing::error!(?error, library_id = id, "Failed to update library settings");
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not update the library.",
+            );
+        }
+        if let Err(error) = tx.commit().await {
+            tracing::error!(?error, library_id = id, "Failed to commit library settings");
+            return crate::error::api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Dim could not update the library.",
+            );
+        }
+        drop(lock);
+
+        if update.auto_scan {
+            if let Err(error) = spawn_library_watcher(&state, &library).await {
+                tracing::error!(
+                    ?error,
+                    library_id = id,
+                    "Filesystem watcher was not started"
+                );
+                return crate::error::api_error(
+                    StatusCode::CONFLICT,
+                    "library_stopping",
+                    "This library is stopping.",
+                );
+            }
+        } else {
+            state
+                .library_workers
+                .stop(id, LibraryWorkerKind::Watcher)
+                .await;
+        }
+        library.auto_scan = update.auto_scan;
+    }
+
+    library.locations.clear();
+    Json(library).into_response()
 }
 
 pub async fn library_scan_status(State(state): State<AppState>, Path(id): Path<i64>) -> Response {

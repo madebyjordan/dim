@@ -44,8 +44,11 @@ export type Library = {
   name: string;
   locations: Array<string>;
   media_type: string;
+  auto_scan: boolean;
   scan_status?: 'scanning' | 'complete' | 'failed' | 'cancelled';
 };
+
+export type UpdateLibrary = { auto_scan: boolean };
 
 export type Chapters = { credits: number };
 
@@ -273,6 +276,7 @@ export interface ApiOperations {
   listLibraries: '/library';
   createLibrary: '/library';
   getLibrary: '/library/{id}';
+  updateLibrary: '/library/{id}';
   deleteLibrary: '/library/{id}';
   getLibraryMedia: '/library/{id}/media';
   getUnmatched: '/library/{id}/unmatched';

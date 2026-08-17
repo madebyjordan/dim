@@ -420,10 +420,39 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
     let library = json_body(response).await;
     assert_eq!(library["name"], "Family Movies");
     assert_eq!(library["media_type"], "movie");
+    assert_eq!(library["auto_scan"], true);
     assert!(
         library.get("locations").is_none(),
         "normal library reads redact server paths"
     );
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            &format!("/api/v1/library/{id}"),
+            Some(&owner_token),
+            r#"{"auto_scan":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["auto_scan"], false);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::PATCH,
+            &format!("/api/v1/library/{id}"),
+            Some(&owner_token),
+            r#"{"auto_scan":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["auto_scan"], true);
 
     struct Dropped(Arc<AtomicBool>);
     impl Drop for Dropped {

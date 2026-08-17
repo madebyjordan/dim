@@ -68,6 +68,13 @@ export class ApiTransport {
     });
   }
 
+  patch<T>(path: string, body: unknown) {
+    return this.request<T>(path, {
+      method: 'PATCH',
+      body: JSON.stringify(body)
+    });
+  }
+
   delete(path: string) {
     return this.request<void>(path, { method: 'DELETE' });
   }

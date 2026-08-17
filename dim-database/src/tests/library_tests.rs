@@ -34,6 +34,27 @@ async fn test_get_one() {
     let result = library::Library::get_one(&mut tx, id).await.unwrap();
 
     assert_eq!(result.media_type, library::MediaType::Movie);
+    assert!(result.auto_scan);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_auto_scan() {
+    let mut conn = get_conn_memory().await.unwrap().writer().lock_owned().await;
+    let mut tx = write_tx(&mut conn).await.unwrap();
+    let id = create_test_library(&mut tx).await;
+
+    assert_eq!(
+        library::Library::set_auto_scan(&mut tx, id, false)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        !library::Library::get_one(&mut tx, id)
+            .await
+            .unwrap()
+            .auto_scan
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

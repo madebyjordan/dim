@@ -33,6 +33,10 @@ impl WorkerSet {
     fn into_workers(self) -> impl Iterator<Item = Worker> {
         self.scanner.into_iter().chain(self.watcher)
     }
+
+    fn is_empty(&self) -> bool {
+        self.scanner.is_none() && self.watcher.is_none()
+    }
 }
 
 #[derive(Default)]
@@ -96,6 +100,30 @@ impl LibraryWorkers {
             stop_worker(old).await;
         }
         Ok(())
+    }
+
+    /// Cancel one worker without preventing that worker kind from being started again later.
+    pub async fn stop(&self, library_id: i64, kind: LibraryWorkerKind) {
+        let worker = {
+            let mut state = self.state.lock().await;
+            let worker = state
+                .workers
+                .get_mut(&library_id)
+                .and_then(|workers| workers.slot(kind).take());
+            if state
+                .workers
+                .get(&library_id)
+                .map(WorkerSet::is_empty)
+                .unwrap_or(false)
+            {
+                state.workers.remove(&library_id);
+            }
+            worker
+        };
+
+        if let Some(worker) = worker {
+            stop_worker(worker).await;
+        }
     }
 
     /// Prevent new workers for `library_id`, cancel current workers, and await their exit.
@@ -204,5 +232,33 @@ mod tests {
             .spawn(3, LibraryWorkerKind::Scanner, async {})
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_one_kind_preserves_other_workers_and_allows_restart() {
+        let workers = LibraryWorkers::default();
+        let watcher_dropped = Arc::new(AtomicBool::new(false));
+        let watcher_dropped_task = watcher_dropped.clone();
+        workers
+            .spawn(4, LibraryWorkerKind::Scanner, std::future::pending())
+            .await
+            .unwrap();
+        workers
+            .spawn(4, LibraryWorkerKind::Watcher, async move {
+                let _guard = Dropped(watcher_dropped_task);
+                std::future::pending::<()>().await;
+            })
+            .await
+            .unwrap();
+
+        workers.stop(4, LibraryWorkerKind::Watcher).await;
+        assert!(watcher_dropped.load(Ordering::SeqCst));
+        assert!(workers.contains(4).await);
+        assert!(workers
+            .spawn(4, LibraryWorkerKind::Watcher, async {})
+            .await
+            .is_ok());
+
+        workers.shutdown().await;
     }
 }

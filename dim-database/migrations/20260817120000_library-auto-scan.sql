@@ -1,0 +1,2 @@
+ALTER TABLE library
+ADD COLUMN auto_scan INTEGER NOT NULL DEFAULT 1 CHECK (auto_scan IN (0, 1));

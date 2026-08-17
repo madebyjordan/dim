@@ -11,6 +11,7 @@
     PlaybackSession,
     ScanStatus,
     SearchResult,
+    UpdateLibrary,
     WebSocketEvent
   } from '$lib/api/generated';
   import { ApiError } from '$lib/api/transport';
@@ -79,6 +80,9 @@
     const remaining = active.length > 1 ? ` +${active.length - 1}` : '';
     return `Scanning ${library.name}${progress}${remaining}`;
   });
+  const activeLibraryScanning = $derived(
+    activeLibraryId !== null && scans[activeLibraryId]?.status === 'scanning'
+  );
 
   function isMissing(cause: unknown) {
     return cause instanceof ApiError && cause.status === 404;
@@ -162,6 +166,53 @@
     items = [];
     clearSelection();
     await loadLibraryMedia(library.id);
+  }
+
+  async function updateLibraryAutoScan(library: Library, enabled: boolean) {
+    error = null;
+    try {
+      const updated = await session.api.patch<Library>(
+        `library/${library.id}`,
+        { auto_scan: enabled } satisfies UpdateLibrary
+      );
+      libraries = libraries.map((current) =>
+        current.id === updated.id ? updated : current
+      );
+    } catch (cause) {
+      error =
+        cause instanceof Error
+          ? cause.message
+          : 'Auto scan could not be updated';
+      throw cause;
+    }
+  }
+
+  async function scanLibrary(library: Library) {
+    error = null;
+    try {
+      const status = await session.api.post<ScanStatus>(
+        `library/${library.id}/scan`
+      );
+      scans = { ...scans, [library.id]: status };
+    } catch (cause) {
+      error =
+        cause instanceof Error ? cause.message : 'The scan could not start';
+      throw cause;
+    }
+  }
+
+  async function deleteLibrary(library: Library) {
+    error = null;
+    try {
+      await session.api.delete(`library/${library.id}`);
+      await refreshLibraries();
+    } catch (cause) {
+      error =
+        cause instanceof Error
+          ? cause.message
+          : 'The library could not be deleted';
+      throw cause;
+    }
   }
 
   async function disposePreparedPlayback(resetTracks = true) {
@@ -443,6 +494,10 @@
     {activeLibraryId}
     user={session.user}
     {scanText}
+    {activeLibraryScanning}
+    onlibraryautoscan={updateLibraryAutoScan}
+    onlibraryscan={scanLibrary}
+    onlibrarydelete={deleteLibrary}
     onlibrary={(library) => void chooseLibrary(library)}
     onsearch={(query) => void search(query)}
     onsearchclose={closeSearch}

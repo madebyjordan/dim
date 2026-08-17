@@ -10,7 +10,7 @@
 
   type Props = {
     label: string;
-    popupRole: 'listbox' | 'menu';
+    popupRole: 'dialog' | 'listbox' | 'menu';
     trigger: Snippet<[HTMLButtonAttributes]>;
     children: Snippet<[PopoutController]>;
     align?: 'start' | 'end';
@@ -74,7 +74,11 @@
 
   function handleTriggerKeydown(event: KeyboardEvent) {
     triggerElement = event.currentTarget as HTMLButtonElement;
-    if (!['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) return;
+    const openingKeys =
+      popupRole === 'dialog'
+        ? ['Enter', ' ']
+        : ['ArrowDown', 'ArrowUp', 'Enter', ' '];
+    if (!openingKeys.includes(event.key)) return;
     event.preventDefault();
     event.stopPropagation();
     void openPopout(event.key);
@@ -85,7 +89,7 @@
       event.preventDefault();
       event.stopPropagation();
       close();
-    } else if (event.key === 'Tab') {
+    } else if (event.key === 'Tab' && popupRole !== 'dialog') {
       close(false);
     } else {
       onkeydown?.(event, controller);

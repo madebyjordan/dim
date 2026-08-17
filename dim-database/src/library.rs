@@ -73,6 +73,8 @@ pub struct Library {
     pub media_type: MediaType,
     /// Is library hidden?
     pub hidden: bool,
+    /// Whether the filesystem watcher should automatically ingest changes.
+    pub auto_scan: bool,
 }
 
 impl Library {
@@ -82,19 +84,22 @@ impl Library {
     /// This method will not return the locations indexed for this library, if you need those you
     /// must query for them separately.
     pub async fn get_all(conn: &mut crate::Transaction<'_>) -> Vec<Self> {
-        sqlx::query!(r#"SELECT id, name, media_type as "media_type: MediaType", hidden as "hidden: bool" FROM library WHERE NOT hidden"#)
-            .fetch_all(&mut *conn)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|x| Self {
-                id: x.id,
-                name: x.name,
-                media_type: x.media_type,
-                hidden: x.hidden,
-                locations: vec![],
-            })
-            .collect()
+        sqlx::query_as::<_, (i64, String, MediaType, bool, bool)>(
+            "SELECT id, name, media_type, hidden, auto_scan FROM library WHERE NOT hidden",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, name, media_type, hidden, auto_scan)| Self {
+            id,
+            name,
+            media_type,
+            hidden,
+            auto_scan,
+            locations: vec![],
+        })
+        .collect()
     }
 
     pub async fn get_locations(
@@ -120,13 +125,13 @@ impl Library {
         conn: &mut crate::Transaction<'_>,
         lib_id: i64,
     ) -> Result<Self, DatabaseError> {
-        let library = sqlx::query!(
-            r#"SELECT id, name, media_type as "media_type: MediaType", hidden as "hidden: bool" FROM library
-            WHERE id = ?"#,
-            lib_id
-        )
-        .fetch_one(&mut *conn)
-        .await?;
+        let (id, name, media_type, hidden, auto_scan) =
+            sqlx::query_as::<_, (i64, String, MediaType, bool, bool)>(
+                "SELECT id, name, media_type, hidden, auto_scan FROM library WHERE id = ?",
+            )
+            .bind(lib_id)
+            .fetch_one(&mut *conn)
+            .await?;
 
         let locations = sqlx::query_scalar!(
             r#"SELECT location FROM indexed_paths
@@ -137,12 +142,28 @@ impl Library {
         .await?;
 
         Ok(Self {
-            id: library.id,
-            name: library.name,
-            media_type: library.media_type,
-            hidden: library.hidden,
+            id,
+            name,
+            media_type,
+            hidden,
+            auto_scan,
             locations,
         })
+    }
+
+    pub async fn set_auto_scan(
+        conn: &mut crate::Transaction<'_>,
+        id: i64,
+        auto_scan: bool,
+    ) -> Result<usize, DatabaseError> {
+        Ok(
+            sqlx::query("UPDATE library SET auto_scan = ? WHERE id = ? AND NOT hidden")
+                .bind(auto_scan)
+                .bind(id)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected() as usize,
+        )
     }
 
     /// Method filters the database for a library with the id supplied and deletes it.

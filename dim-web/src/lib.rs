@@ -127,7 +127,9 @@ fn library_routes(_app: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/library/:id",
-            get(routes::library::library_get_one).delete(routes::library::library_delete),
+            get(routes::library::library_get_one)
+                .patch(routes::library::library_patch)
+                .delete(routes::library::library_delete),
         )
         .route(
             "/api/v1/library/:id/unmatched",

@@ -9,7 +9,7 @@
 {#if backdrop}
   <div
     class="backdrop"
-    style:background-image={`linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.35) 20%, var(--color-canvas) 95%), url("${backdrop}")`}
+    style:background-image={`linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.5) 0%, var(--color-canvas) 95%), url("${backdrop}")`}
     aria-hidden="true"
   ></div>
 {/if}

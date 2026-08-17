@@ -32,6 +32,13 @@ pub async fn run_scanners(conn: DbConnection, tx: EventTx, workers: &LibraryWork
         let mut libs = dim_database::library::Library::get_all(&mut db_tx).await;
 
         for lib in libs.drain(..) {
+            if !lib.auto_scan {
+                info!(
+                    "Automatic scanning is disabled for {} with id: {}",
+                    lib.name, lib.id
+                );
+                continue;
+            }
             info!("Starting scanner for {} with id: {}", lib.name, lib.id);
 
             let library_id = lib.id;
@@ -46,21 +53,15 @@ pub async fn run_scanners(conn: DbConnection, tx: EventTx, workers: &LibraryWork
                 _ => unreachable!(),
             };
 
-            let mut watcher = scanner::daemon::FsWatcher::new(
-                conn.clone(),
-                library_id,
-                media_type,
-                tx_clone.clone(),
-                Arc::clone(&provider),
-            );
-
             let conn_clone = conn.clone();
+            let scanner_provider = Arc::clone(&provider);
+            let scanner_tx = tx_clone.clone();
 
             if let Err(error) = workers
                 .spawn(library_id, LibraryWorkerKind::Scanner, async move {
                     let mut conn = conn_clone;
                     if let Err(error) =
-                        scanner::start(&mut conn, library_id, tx_clone.clone(), provider).await
+                        scanner::start(&mut conn, library_id, scanner_tx, scanner_provider).await
                     {
                         tracing::error!(?error, library_id, "Library scan failed");
                     }
@@ -70,6 +71,13 @@ pub async fn run_scanners(conn: DbConnection, tx: EventTx, workers: &LibraryWork
                 tracing::warn!(?error, library_id, "Scanner was not started");
             }
 
+            let mut watcher = scanner::daemon::FsWatcher::new(
+                conn.clone(),
+                library_id,
+                media_type,
+                tx_clone,
+                Arc::clone(&provider),
+            );
             if let Err(error) = workers
                 .spawn(library_id, LibraryWorkerKind::Watcher, async move {
                     if let Err(error) = watcher.start_daemon().await {

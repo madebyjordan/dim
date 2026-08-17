@@ -6,12 +6,17 @@
   import DropdownMenu from '$lib/primitives/DropdownMenu.svelte';
   import UserIcon from '$lib/icons/UserIcon.svelte';
   import EclipseMark from './EclipseMark.svelte';
+  import LibrarySettingsMenu from './LibrarySettingsMenu.svelte';
 
   let {
     libraries,
     activeLibraryId,
     user,
     scanText,
+    activeLibraryScanning,
+    onlibraryautoscan,
+    onlibraryscan,
+    onlibrarydelete,
     onlibrary,
     onsearch,
     onsearchclose,
@@ -22,6 +27,13 @@
     activeLibraryId: number | null;
     user: User | null;
     scanText: string | null;
+    activeLibraryScanning: boolean;
+    onlibraryautoscan: (
+      library: Library,
+      enabled: boolean
+    ) => void | Promise<void>;
+    onlibraryscan: (library: Library) => void | Promise<void>;
+    onlibrarydelete: (library: Library) => void | Promise<void>;
     onlibrary: (library: Library) => void;
     onsearch: (query: string) => void;
     onsearchclose: () => void;
@@ -32,6 +44,9 @@
   let searchOpen = $state(false);
   let searchQuery = $state('');
   let searchInput = $state<HTMLInputElement>();
+  const activeLibrary = $derived(
+    libraries.find((library) => library.id === activeLibraryId) ?? null
+  );
 
   $effect(() => {
     const query = searchQuery.trim();
@@ -122,6 +137,15 @@
       <div class="scan" role="status" aria-live="polite">
         <span>{scanText}</span><i aria-hidden="true"></i>
       </div>
+    {/if}
+    {#if user?.roles.includes('owner') && activeLibrary}
+      <LibrarySettingsMenu
+        library={activeLibrary}
+        scanning={activeLibraryScanning}
+        onautoscan={(enabled) => onlibraryautoscan(activeLibrary, enabled)}
+        onscan={() => onlibraryscan(activeLibrary)}
+        ondelete={() => onlibrarydelete(activeLibrary)}
+      />
     {/if}
     <DropdownMenu
       label="Profile menu"
