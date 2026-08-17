@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { goto } from '$app/navigation';
+  import { goto, pushState } from '$app/navigation';
+  import { page } from '$app/state';
   import { onMount } from 'svelte';
   import type {
     Library,
@@ -28,6 +29,17 @@
   import { determineCapabilities } from '$lib/playback/capabilities';
   import { realtime } from '$lib/realtime/socket.svelte';
 
+  type PlaybackComponent =
+    typeof import('$lib/playback/PlaybackProof.svelte').default;
+  type PlaybackHistoryState = {
+    playback?: {
+      fileId: string;
+      video: string;
+      audio: string;
+      subtitle: string;
+    };
+  };
+
   let libraries = $state<Array<Library>>([]);
   let activeLibraryId = $state<number | null>(null);
   let items = $state<Array<CatalogItem>>([]);
@@ -45,6 +57,9 @@
   let addLibraryOpen = $state(false);
   let error = $state<string | null>(null);
   let playbackError = $state<string | null>(null);
+  let PlaybackSurface = $state<PlaybackComponent | null>(null);
+  let playbackActive = $state(false);
+  let playbackWasActive = false;
   let selectionVersion = 0;
   let searchVersion = 0;
 
@@ -147,12 +162,14 @@
     await loadLibraryMedia(library.id);
   }
 
-  async function disposePreparedPlayback() {
+  async function disposePreparedPlayback(resetTracks = true) {
     const gid = preparedPlayback?.gid;
     preparedPlayback = null;
-    selectedVideo = '';
-    selectedAudio = '';
-    selectedSubtitle = '';
+    if (resetTracks) {
+      selectedVideo = '';
+      selectedAudio = '';
+      selectedSubtitle = '';
+    }
     if (gid) {
       await session.api
         .delete(`stream/${gid}/state/kill`)
@@ -188,8 +205,16 @@
         return;
       }
       preparedPlayback = prepared;
-      selectedVideo = preferredTrack(prepared, 'video')?.id ?? '';
-      selectedAudio = preferredTrack(prepared, 'audio')?.id ?? '';
+      selectedVideo = prepared.tracks.some(
+        (track) => track.content_type === 'video' && track.id === selectedVideo
+      )
+        ? selectedVideo
+        : (preferredTrack(prepared, 'video')?.id ?? '');
+      selectedAudio = prepared.tracks.some(
+        (track) => track.content_type === 'audio' && track.id === selectedAudio
+      )
+        ? selectedAudio
+        : (preferredTrack(prepared, 'audio')?.id ?? '');
     } catch (cause) {
       if (version === selectionVersion) {
         playbackError =
@@ -269,14 +294,58 @@
     if (activeLibraryId !== null) void loadLibraryMedia(activeLibraryId);
   }
 
-  function launchPlayback() {
+  async function launchPlayback() {
     if (!selectedFile) return;
+    const playback = {
+      fileId: String(selectedFile.id),
+      video: selectedVideo,
+      audio: selectedAudio,
+      subtitle: selectedSubtitle
+    };
     const query = new URLSearchParams();
-    if (selectedVideo) query.set('video', selectedVideo);
-    if (selectedAudio) query.set('audio', selectedAudio);
-    if (selectedSubtitle) query.set('subtitle', selectedSubtitle);
-    void goto(`/play/${selectedFile.id}?${query}`);
+    if (playback.video) query.set('video', playback.video);
+    if (playback.audio) query.set('audio', playback.audio);
+    if (playback.subtitle) query.set('subtitle', playback.subtitle);
+
+    playbackActive = true;
+    pushState(`/play/${selectedFile.id}?${query}`, {
+      ...page.state,
+      playback
+    });
+    const componentPromise = import('$lib/playback/PlaybackProof.svelte');
+    await disposePreparedPlayback(false);
+    try {
+      PlaybackSurface = (await componentPromise).default;
+    } catch (cause) {
+      playbackActive = false;
+      playbackError =
+        cause instanceof Error ? cause.message : 'The player could not load';
+      history.back();
+    }
   }
+
+  function exitPlayback() {
+    if (!playbackActive) return;
+    history.back();
+  }
+
+  $effect(() => {
+    const state = page.state as PlaybackHistoryState;
+    const nextActive = Boolean(state.playback);
+    if (!playbackWasActive && nextActive && preparedPlayback) {
+      void disposePreparedPlayback(false);
+    }
+    if (playbackWasActive && !nextActive && selectedFile && !preparedPlayback) {
+      void preparePlayback(selectedFile, selectionVersion);
+    }
+    playbackWasActive = nextActive;
+    playbackActive = nextActive;
+    if (playbackActive && !PlaybackSurface) {
+      void import('$lib/playback/PlaybackProof.svelte').then(
+        (module) => (PlaybackSurface = module.default)
+      );
+    }
+  });
 
   function handleRealtime(event: WebSocketEvent) {
     if (
@@ -334,7 +403,11 @@
   />
 </svelte:head>
 
-<main class="experience">
+<main
+  class:watching={playbackActive}
+  class="experience"
+  aria-hidden={playbackActive}
+>
   {#if selectedMedia}
     {#key selectedMedia.id}<MediaBackdrop media={selectedMedia} />{/key}
   {/if}
@@ -390,6 +463,26 @@
   {/if}
 </main>
 
+{#if playbackActive}
+  <div class:ready={PlaybackSurface !== null} class="playback-layer">
+    {#if PlaybackSurface}
+      {@const playback = (page.state as PlaybackHistoryState).playback}
+      {#if playback}
+        <PlaybackSurface
+          fileId={playback.fileId}
+          initialVideo={playback.video}
+          initialAudio={playback.audio}
+          initialSubtitle={playback.subtitle}
+          onexit={exitPlayback}
+        />
+      {/if}
+    {:else}
+      <span class="player-loading" role="status" aria-label="Opening playback"
+      ></span>
+    {/if}
+  </div>
+{/if}
+
 <AddLibraryDialog
   open={addLibraryOpen}
   onclose={() => (addLibraryOpen = false)}
@@ -403,6 +496,34 @@
     overflow: hidden;
     isolation: isolate;
     background: var(--color-canvas);
+    opacity: 1;
+    transition: opacity 180ms ease;
+  }
+  .experience.watching {
+    pointer-events: none;
+    opacity: 0;
+  }
+  .playback-layer {
+    position: fixed;
+    z-index: 100;
+    inset: 0;
+    overflow: hidden;
+    background: #000;
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+  .playback-layer.ready {
+    opacity: 1;
+  }
+  .player-loading {
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: 24px;
+    aspect-ratio: 1;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 800ms linear infinite;
   }
   .browse {
     position: absolute;
@@ -438,6 +559,12 @@
   @keyframes spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .experience,
+    .playback-layer {
+      transition-duration: 0ms;
     }
   }
 </style>

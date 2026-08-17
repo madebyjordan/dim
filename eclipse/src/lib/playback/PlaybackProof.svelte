@@ -22,15 +22,21 @@
     fileId,
     initialVideo = '',
     initialAudio = '',
-    initialSubtitle = ''
+    initialSubtitle = '',
+    onexit = () => undefined
   }: {
     fileId: string;
     initialVideo?: string;
     initialAudio?: string;
     initialSubtitle?: string;
+    onexit?: () => void;
   } = $props();
+  let surface: HTMLElement;
+  let controlsPanel: HTMLElement;
   let video: HTMLVideoElement;
   let timeOutput: HTMLOutputElement;
+  let durationOutput: HTMLOutputElement;
+  let seekInput: HTMLInputElement;
   let dashPlayer: { destroy(): void; attachSource(url: string): void } | null =
     null;
   let playbackSession = $state<PlaybackSession | null>(null);
@@ -46,6 +52,10 @@
   let airPlayState = $state<
     'unavailable' | 'available' | 'preparing' | 'ready' | 'active'
   >('unavailable');
+  let controlsVisible = $state(true);
+  let paused = $state(true);
+  let muted = $state(false);
+  let controlsTimer: number | null = null;
 
   const playbackKey = 'eclipse.playback-session';
   const tracks = (kind: PlaybackTrack['content_type']) =>
@@ -53,6 +63,74 @@
     [];
   const preferred = (kind: PlaybackTrack['content_type']) =>
     tracks(kind).find((track) => track.is_default) ?? tracks(kind)[0];
+
+  function formatTime(seconds: number) {
+    if (!Number.isFinite(seconds)) return '0:00';
+    const whole = Math.max(0, Math.floor(seconds));
+    const hours = Math.floor(whole / 3600);
+    const minutes = Math.floor((whole % 3600) / 60);
+    const rest = String(whole % 60).padStart(2, '0');
+    return hours > 0
+      ? `${hours}:${String(minutes).padStart(2, '0')}:${rest}`
+      : `${minutes}:${rest}`;
+  }
+
+  function showControls(keepOpen = false) {
+    controlsVisible = true;
+    if (controlsTimer !== null) window.clearTimeout(controlsTimer);
+    controlsTimer = null;
+    if (!keepOpen && !video?.paused) {
+      controlsTimer = window.setTimeout(() => {
+        if (!controlsPanel?.contains(document.activeElement))
+          controlsVisible = false;
+      }, 3_000);
+    }
+  }
+
+  function togglePlayback() {
+    if (video.paused) void video.play();
+    else video.pause();
+    showControls();
+  }
+
+  function toggleMute() {
+    video.muted = !video.muted;
+    muted = video.muted;
+    showControls();
+  }
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void surface.requestFullscreen();
+    showControls(true);
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    showControls();
+    if (
+      event.target instanceof HTMLSelectElement ||
+      event.target instanceof HTMLInputElement
+    )
+      return;
+    if (event.key === 'Escape') {
+      if (!document.fullscreenElement) onexit();
+      return;
+    }
+    if (event.key === ' ' || event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      togglePlayback();
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      video.currentTime = Math.max(0, video.currentTime - 10);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      video.currentTime = Math.min(
+        video.duration || Infinity,
+        video.currentTime + 10
+      );
+    } else if (event.key.toLowerCase() === 'm') toggleMute();
+    else if (event.key.toLowerCase() === 'f') toggleFullscreen();
+  }
 
   function manifestUrl(replaceVideo = false) {
     if (!playbackSession) return '';
@@ -243,9 +321,25 @@
     let disposed = false;
     const onTime = () => {
       // Deliberately non-reactive: timeupdate writes only to this local output node.
-      if (timeOutput) timeOutput.value = `${Math.floor(video.currentTime)}s`;
+      if (timeOutput) timeOutput.value = formatTime(video.currentTime);
+      if (seekInput) seekInput.value = String(video.currentTime);
+    };
+    const onDuration = () => {
+      if (durationOutput) durationOutput.value = formatTime(video.duration);
+      if (seekInput) seekInput.max = String(video.duration || 0);
+    };
+    const onPlay = () => {
+      paused = false;
+      showControls();
+    };
+    const onPause = () => {
+      paused = true;
+      showControls(true);
     };
     video.addEventListener('timeupdate', onTime);
+    video.addEventListener('durationchange', onDuration);
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
     (async () => {
       try {
         const stale = sessionStorage.getItem(playbackKey);
@@ -289,168 +383,309 @@
     return () => {
       disposed = true;
       video.removeEventListener('timeupdate', onTime);
+      video.removeEventListener('durationchange', onDuration);
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      if (controlsTimer !== null) window.clearTimeout(controlsTimer);
       void cleanup();
     };
   });
 </script>
 
-<section class="proof" aria-label="Playback">
-  <header>
-    <a href="/" aria-label="Return to library">←</a>
-  </header>
+<svelte:window
+  onpointermove={() => showControls()}
+  onpointerdown={() => showControls()}
+  onkeydown={handleKeydown}
+/>
 
-  <div class="stage">
-    <video bind:this={video} controls playsinline></video>
-    {#if phase === 'loading'}<p class="overlay">
-        Preparing authenticated stream…
-      </p>{/if}
-    {#if phase === 'error'}<p class="overlay error">{error}</p>{/if}
-  </div>
+<section
+  class:controls-visible={controlsVisible}
+  class="player"
+  aria-label="Playback"
+  bind:this={surface}
+>
+  <video bind:this={video} playsinline onclick={togglePlayback}></video>
 
-  <div class="controls">
-    <Select
-      label="Video quality"
-      value={selectedVideo}
-      options={tracks('video').map((track) => ({
-        value: track.id,
-        label: track.label || String(track.height || track.id)
-      }))}
-      onvaluechange={(value) => switchTrack('video', value)}
-      disabled={phase !== 'ready'}
-    />
-    <Select
-      label="Audio track"
-      value={selectedAudio}
-      options={tracks('audio').map((track) => ({
-        value: track.id,
-        label: track.label || track.lang || track.id
-      }))}
-      onvaluechange={(value) => switchTrack('audio', value)}
-      disabled={phase !== 'ready'}
-    />
-    <Select
-      label="Subtitle track"
-      value={selectedSubtitle}
-      options={[
-        { value: '', label: 'No Subtitles' },
-        ...tracks('subtitle').map((track) => ({
-          value: track.id,
-          label: track.label || track.lang || track.id
-        }))
-      ]}
-      onvaluechange={switchSubtitle}
-      disabled={phase !== 'ready'}
-    />
-    <output
-      class="visually-hidden"
-      bind:this={timeOutput}
-      aria-label="Elapsed time">0s</output
-    >
-    <Button
-      tone="surface"
-      onclick={prepareAirPlay}
-      disabled={airPlayState === 'unavailable' || airPlayState === 'preparing'}
-    >
-      {airPlayState === 'ready'
-        ? 'Choose AirPlay target'
-        : airPlayState === 'active'
-          ? 'AirPlay active'
-          : airPlayState === 'preparing'
-            ? 'Preparing AirPlay…'
-            : airPlayState === 'available'
-              ? 'Prepare AirPlay'
-              : 'AirPlay unavailable'}</Button
-    >
+  {#if phase === 'loading'}
+    <p class="status">Preparing authenticated stream…</p>
+  {:else if phase === 'error'}
+    <div class="status failure">
+      <p>{error}</p>
+      <Button tone="surface" onclick={onexit}>Return to Eclipse</Button>
+    </div>
+  {/if}
+
+  <div
+    class="controls"
+    bind:this={controlsPanel}
+    aria-hidden={!controlsVisible}
+    onfocusin={() => showControls(true)}
+    onfocusout={() => showControls()}
+  >
+    <div class="topbar">
+      <button
+        class="round"
+        type="button"
+        onclick={onexit}
+        aria-label="Exit playback">←</button
+      >
+    </div>
+
+    <div class="control-deck">
+      {#if error && phase !== 'error'}<p class="notice" role="status">
+          {error}
+        </p>{/if}
+      <div class="timeline">
+        <input
+          bind:this={seekInput}
+          aria-label="Seek"
+          type="range"
+          min="0"
+          max="0"
+          step="0.1"
+          value="0"
+          oninput={(event) =>
+            (video.currentTime = Number(event.currentTarget.value))}
+        />
+        <span class="time">
+          <output bind:this={timeOutput} aria-label="Current time">0:00</output>
+          <span aria-hidden="true">/</span>
+          <output bind:this={durationOutput} aria-label="Duration">0:00</output>
+        </span>
+      </div>
+
+      <div class="control-row">
+        <button
+          class="round primary"
+          type="button"
+          onclick={togglePlayback}
+          aria-label={paused ? 'Play' : 'Pause'}
+        >
+          {paused ? '▶' : 'Ⅱ'}
+        </button>
+        <button
+          class="round"
+          type="button"
+          onclick={toggleMute}
+          aria-label={muted ? 'Unmute' : 'Mute'}
+        >
+          {muted ? '🔇' : '🔊'}
+        </button>
+        <input
+          class="volume"
+          aria-label="Volume"
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          value="1"
+          oninput={(event) => {
+            video.volume = Number(event.currentTarget.value);
+            video.muted = video.volume === 0;
+            muted = video.muted;
+          }}
+        />
+
+        <div class="track-controls">
+          <Select
+            label="Video quality"
+            value={selectedVideo}
+            options={tracks('video').map((track) => ({
+              value: track.id,
+              label: track.label || String(track.height || track.id)
+            }))}
+            onvaluechange={(value) => switchTrack('video', value)}
+            disabled={phase !== 'ready'}
+          />
+          <Select
+            label="Audio track"
+            value={selectedAudio}
+            options={tracks('audio').map((track) => ({
+              value: track.id,
+              label: track.label || track.lang || track.id
+            }))}
+            onvaluechange={(value) => switchTrack('audio', value)}
+            disabled={phase !== 'ready'}
+          />
+          <Select
+            label="Subtitles"
+            value={selectedSubtitle}
+            options={[
+              { value: '', label: 'No Subtitles' },
+              ...tracks('subtitle').map((track) => ({
+                value: track.id,
+                label: track.label || track.lang || track.id
+              }))
+            ]}
+            onvaluechange={switchSubtitle}
+            disabled={phase !== 'ready'}
+          />
+        </div>
+
+        {#if airPlayState !== 'unavailable'}
+          <button
+            class="text-control"
+            type="button"
+            onclick={prepareAirPlay}
+            disabled={airPlayState === 'preparing'}
+          >
+            {airPlayState === 'active'
+              ? 'AirPlay active'
+              : airPlayState === 'preparing'
+                ? 'Preparing…'
+                : 'AirPlay'}
+          </button>
+        {/if}
+        <button
+          class="round"
+          type="button"
+          onclick={toggleFullscreen}
+          aria-label="Toggle fullscreen">⛶</button
+        >
+      </div>
+    </div>
   </div>
-  {#if error && phase !== 'error'}<p class="notice">{error}</p>{/if}
 </section>
 
 <style>
-  .proof {
-    min-height: 100vh;
-    padding: var(--space-6);
-    background: var(--color-canvas);
+  .player {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    color: #fff;
+    background: #000;
+    cursor: none;
   }
-  header {
-    display: flex;
-    align-items: center;
-    max-width: 1100px;
-    margin: 0 auto 1.5rem;
+  .player.controls-visible {
+    cursor: default;
   }
   p {
     margin: 0;
-  }
-  header a {
-    width: 42px;
-    aspect-ratio: 1;
-    display: grid;
-    place-items: center;
-    border-radius: var(--radius-round);
-    color: var(--color-fg);
-    background: var(--color-surface);
-    font-size: 1.25rem;
-  }
-  .stage {
-    position: relative;
-    max-width: 1100px;
-    aspect-ratio: 16/9;
-    margin: auto;
-    overflow: hidden;
-    border: 1px solid var(--color-stroke);
-    border-radius: var(--radius-lg);
-    background: #000;
-    box-shadow: var(--shadow-float);
   }
   video {
     width: 100%;
     height: 100%;
     display: block;
+    object-fit: contain;
+    background: #000;
   }
-  .overlay {
+  .status {
     position: absolute;
     inset: 0;
     display: grid;
     place-items: center;
-    color: var(--color-fg-muted);
-    background: rgba(0, 0, 0, 0.45);
+    color: rgba(255, 255, 255, 0.72);
+    pointer-events: none;
   }
-  .error,
-  .notice {
-    color: var(--color-danger);
+  .failure {
+    align-content: center;
+    gap: 18px;
+    pointer-events: auto;
   }
   .controls {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(130px, 1fr)) auto;
-    gap: 0.8rem;
-    align-items: end;
-    max-width: 1100px;
-    margin: 1rem auto;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms ease;
+    background: linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0.48),
+      transparent 24%,
+      transparent 58%,
+      rgba(0, 0, 0, 0.82)
+    );
   }
-  .notice {
-    max-width: 1100px;
-    margin: 0.5rem auto;
-    color: var(--color-fg-muted);
-    font-size: var(--text-xs);
+  .controls-visible .controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .topbar {
+    padding: max(20px, env(safe-area-inset-top))
+      max(24px, env(safe-area-inset-right));
+  }
+  .control-deck {
+    display: grid;
+    gap: 12px;
+    padding: 20px max(24px, env(safe-area-inset-right))
+      max(22px, env(safe-area-inset-bottom));
+  }
+  .timeline {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .timeline input {
+    flex: 1;
+  }
+  .time {
+    min-width: 8.5rem;
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    color: rgba(255, 255, 255, 0.76);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+  }
+  .control-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .track-controls {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+  }
+  .round,
+  .text-control {
+    height: 42px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #fff;
+    background: rgba(12, 12, 12, 0.58);
+    backdrop-filter: blur(14px);
+    cursor: pointer;
+  }
+  .round {
+    width: 42px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+  }
+  .round.primary {
+    color: #07110d;
+    background: var(--color-accent);
+  }
+  .text-control {
+    padding: 0 14px;
+    border-radius: 10px;
+  }
+  .volume {
+    width: 92px;
+  }
+  input[type='range'] {
+    accent-color: var(--color-accent);
   }
   .notice {
     color: var(--color-danger);
-  }
-  .visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-    border: 0;
+    font-size: var(--text-xs);
   }
   @media (max-width: 800px) {
-    .proof {
-      padding: var(--space-4);
+    .track-controls {
+      position: absolute;
+      right: 20px;
+      bottom: 76px;
     }
+    .volume {
+      display: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
     .controls {
-      grid-template-columns: 1fr 1fr;
+      transition-duration: 0ms;
     }
   }
 </style>
