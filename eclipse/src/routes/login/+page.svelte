@@ -61,14 +61,14 @@
     display: grid;
     gap: 1rem;
     padding: 2rem;
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    background: var(--surface-raised);
-    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-lg);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-float);
   }
   p {
     margin: 0;
-    color: var(--accent);
+    color: var(--color-accent);
     font-weight: 800;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -80,27 +80,27 @@
   label {
     display: grid;
     gap: 0.4rem;
-    color: var(--text-muted);
+    color: var(--color-fg-muted);
     font-size: 0.85rem;
   }
   input,
   button {
-    min-height: 44px;
-    border: 1px solid var(--border);
-    border-radius: 9px;
+    min-height: var(--control-height-large);
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-md);
     padding: 0 0.8rem;
-    color: var(--text);
-    background: var(--surface-canvas);
+    color: var(--color-fg);
+    background: var(--color-canvas);
   }
   button {
-    border-color: var(--accent);
+    border-color: var(--color-accent);
     color: #08100d;
-    background: var(--accent);
+    background: var(--color-accent);
     font-weight: 750;
     cursor: pointer;
   }
   .error {
-    color: var(--danger);
+    color: var(--color-danger);
     font-size: 0.85rem;
   }
 </style>

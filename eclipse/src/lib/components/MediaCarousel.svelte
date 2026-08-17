@@ -128,13 +128,13 @@
     flex: none;
     overflow: hidden;
     border-radius: clamp(14px, 1vw, 38px);
-    background: #141414;
+    background: var(--color-surface);
     content-visibility: auto;
     contain-intrinsic-size: auto 300px 450px;
     scroll-snap-align: center;
     transition:
-      transform 220ms ease,
-      box-shadow 220ms ease;
+      transform var(--motion-normal) ease,
+      box-shadow var(--motion-normal) ease;
   }
   .card.selected {
     transform: translateY(-12px) scale(1.025);
@@ -154,7 +154,7 @@
     cursor: pointer;
   }
   .select:focus-visible {
-    outline: 3px solid #fff;
+    outline: 3px solid var(--color-fg);
     outline-offset: -6px;
   }
   .play {
@@ -166,7 +166,7 @@
     place-items: center;
     padding: 0;
     border: 1px solid rgba(255, 255, 255, 0.7);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     color: #0a0a0a;
     background: rgba(255, 255, 255, 0.9);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.46);

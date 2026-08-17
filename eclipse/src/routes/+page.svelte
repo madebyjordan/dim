@@ -398,13 +398,17 @@
     min-height: 100svh;
     overflow: hidden;
     isolation: isolate;
-    background: #0d0d0d;
+    background: var(--color-canvas);
   }
   .floor {
     position: absolute;
     inset: 47% 0 0;
     z-index: 3;
-    background: linear-gradient(0deg, #0d0d0d 0 76%, transparent 100%);
+    background: linear-gradient(
+      0deg,
+      var(--color-canvas) 0 76%,
+      transparent 100%
+    );
     pointer-events: none;
   }
   .selected .floor {
@@ -436,9 +440,9 @@
     bottom: 42px;
     width: 18px;
     aspect-ratio: 1;
-    border: 2px solid rgba(255, 255, 255, 0.18);
-    border-top-color: rgba(255, 255, 255, 0.72);
-    border-radius: 50%;
+    border: 2px solid var(--color-stroke);
+    border-top-color: var(--color-fg-muted);
+    border-radius: var(--radius-round);
     animation: spin 800ms linear infinite;
   }
   @keyframes spin {

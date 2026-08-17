@@ -6,6 +6,8 @@
     PlaybackTrack
   } from '$lib/api/generated';
   import { session } from '$lib/auth/session.svelte';
+  import Button from '$lib/primitives/Button.svelte';
+  import Select from '$lib/primitives/Select.svelte';
   import {
     determineCapabilities,
     type BrowserCapabilities
@@ -306,49 +308,44 @@
   </div>
 
   <div class="controls">
-    <label aria-label="Video quality">
-      <span class="visually-hidden">Video quality</span>
-      <select
-        value={selectedVideo}
-        onchange={(event) => switchTrack('video', event.currentTarget.value)}
-        disabled={phase !== 'ready'}
-      >
-        {#each tracks('video') as track}<option value={track.id}
-            >{track.label || track.height || track.id}</option
-          >{/each}
-      </select>
-    </label>
-    <label aria-label="Audio track">
-      <span class="visually-hidden">Audio track</span>
-      <select
-        value={selectedAudio}
-        onchange={(event) => switchTrack('audio', event.currentTarget.value)}
-        disabled={phase !== 'ready'}
-      >
-        {#each tracks('audio') as track}<option value={track.id}
-            >{track.label || track.lang || track.id}</option
-          >{/each}
-      </select>
-    </label>
-    <label aria-label="Subtitle track">
-      <span class="visually-hidden">Subtitle track</span>
-      <select
-        value={selectedSubtitle}
-        onchange={(event) => switchSubtitle(event.currentTarget.value)}
-        disabled={phase !== 'ready'}
-      >
-        <option value="">No Subtitles</option>
-        {#each tracks('subtitle') as track}<option value={track.id}
-            >{track.label || track.lang || track.id}</option
-          >{/each}
-      </select>
-    </label>
+    <Select
+      label="Video quality"
+      value={selectedVideo}
+      onchange={(event) => switchTrack('video', event.currentTarget.value)}
+      disabled={phase !== 'ready'}
+    >
+      {#each tracks('video') as track}<option value={track.id}
+          >{track.label || track.height || track.id}</option
+        >{/each}
+    </Select>
+    <Select
+      label="Audio track"
+      value={selectedAudio}
+      onchange={(event) => switchTrack('audio', event.currentTarget.value)}
+      disabled={phase !== 'ready'}
+    >
+      {#each tracks('audio') as track}<option value={track.id}
+          >{track.label || track.lang || track.id}</option
+        >{/each}
+    </Select>
+    <Select
+      label="Subtitle track"
+      value={selectedSubtitle}
+      onchange={(event) => switchSubtitle(event.currentTarget.value)}
+      disabled={phase !== 'ready'}
+    >
+      <option value="">No Subtitles</option>
+      {#each tracks('subtitle') as track}<option value={track.id}
+          >{track.label || track.lang || track.id}</option
+        >{/each}
+    </Select>
     <output
       class="visually-hidden"
       bind:this={timeOutput}
       aria-label="Elapsed time">0s</output
     >
-    <button
+    <Button
+      tone="surface"
       onclick={prepareAirPlay}
       disabled={airPlayState === 'unavailable' || airPlayState === 'preparing'}
     >
@@ -360,8 +357,8 @@
             ? 'Preparing AirPlay…'
             : airPlayState === 'available'
               ? 'Prepare AirPlay'
-              : 'AirPlay unavailable'}
-    </button>
+              : 'AirPlay unavailable'}</Button
+    >
   </div>
   {#if error && phase !== 'error'}<p class="notice">{error}</p>{/if}
 </section>
@@ -370,7 +367,7 @@
   .proof {
     min-height: 100vh;
     padding: clamp(1rem, 2.2vw, 2rem);
-    background: var(--surface-canvas);
+    background: var(--color-canvas);
   }
   header {
     display: flex;
@@ -386,9 +383,9 @@
     aspect-ratio: 1;
     display: grid;
     place-items: center;
-    border-radius: 50%;
-    color: var(--text);
-    background: var(--surface-raised);
+    border-radius: var(--radius-round);
+    color: var(--color-fg);
+    background: var(--color-surface);
     font-size: 1.25rem;
   }
   .stage {
@@ -397,10 +394,10 @@
     aspect-ratio: 16/9;
     margin: auto;
     overflow: hidden;
-    border: 1px solid var(--border);
-    border-radius: 18px;
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-lg);
     background: #000;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--shadow-float);
   }
   video {
     width: 100%;
@@ -412,12 +409,12 @@
     inset: 0;
     display: grid;
     place-items: center;
-    color: var(--text-muted);
+    color: var(--color-fg-muted);
     background: rgba(0, 0, 0, 0.45);
   }
   .error,
   .notice {
-    color: var(--danger);
+    color: var(--color-danger);
   }
   .controls {
     display: grid;
@@ -427,33 +424,14 @@
     max-width: 1100px;
     margin: 1rem auto;
   }
-  label {
-    display: grid;
-  }
-  select,
-  button {
-    min-height: 42px;
-    padding: 0 0.7rem;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    color: var(--text);
-    background: var(--surface-raised);
-  }
-  button {
-    cursor: pointer;
-  }
-  button:disabled {
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
   .notice {
     max-width: 1100px;
     margin: 0.5rem auto;
-    color: var(--text-muted);
+    color: var(--color-fg-muted);
     font-size: 0.75rem;
   }
   .notice {
-    color: var(--danger);
+    color: var(--color-danger);
   }
   .visually-hidden {
     position: absolute;

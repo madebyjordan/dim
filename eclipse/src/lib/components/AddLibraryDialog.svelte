@@ -4,6 +4,8 @@
     DirectoryListing
   } from '$lib/api/generated';
   import { session } from '$lib/auth/session.svelte';
+  import Button from '$lib/primitives/Button.svelte';
+  import IconButton from '$lib/primitives/IconButton.svelte';
 
   let {
     open,
@@ -77,9 +79,7 @@
   <form onsubmit={submit}>
     <header>
       <h2>Add Library</h2>
-      <button type="button" class="close" aria-label="Close" onclick={onclose}
-        >×</button
-      >
+      <IconButton label="Close" onclick={onclose}>×</IconButton>
     </header>
     <label>
       Name
@@ -111,12 +111,12 @@
     </section>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <footer>
-      <button type="button" class="cancel" onclick={onclose}>Cancel</button>
-      <button
+      <Button onclick={onclose}>Cancel</Button>
+      <Button
         type="submit"
-        class="submit"
+        tone="primary"
         disabled={!name.trim() || !selected || submitting}
-        >{submitting ? 'Adding…' : 'Add Library'}</button
+        >{submitting ? 'Adding…' : 'Add Library'}</Button
       >
     </footer>
   </form>
@@ -127,11 +127,11 @@
     width: min(92vw, 560px);
     max-height: min(82vh, 720px);
     padding: 0;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 18px;
-    color: #fff;
-    background: #141414;
-    box-shadow: 0 30px 90px rgba(0, 0, 0, 0.72);
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-lg);
+    color: var(--color-fg);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-float);
   }
   dialog::backdrop {
     background: rgba(0, 0, 0, 0.72);
@@ -139,56 +139,51 @@
   }
   form {
     display: grid;
-    gap: 18px;
-    padding: 24px;
+    gap: var(--space-4);
+    padding: var(--space-5);
   }
   header,
   footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-3);
   }
   h2,
   p {
     margin: 0;
   }
-  .close,
-  .directories button,
-  footer button {
+  .directories button {
     border: 0;
     color: inherit;
     background: transparent;
     cursor: pointer;
   }
-  .close {
-    font-size: 28px;
-  }
   label {
     display: grid;
     gap: 7px;
-    color: rgba(255, 255, 255, 0.58);
+    color: var(--color-fg-muted);
     font-size: 13px;
   }
   input,
   select {
-    min-height: 44px;
-    padding: 0 12px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 9px;
-    color: #fff;
-    background: #0d0d0d;
+    min-height: var(--control-height-large);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-md);
+    color: var(--color-fg);
+    background: var(--color-canvas);
   }
   section {
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 10px;
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-md);
   }
   .path {
     padding: 11px 13px;
     overflow: hidden;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    color: rgba(255, 255, 255, 0.48);
+    color: var(--color-fg-subtle);
     font: 12px var(--font-mono);
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -214,25 +209,8 @@
   footer {
     justify-content: end;
   }
-  footer button {
-    min-height: 42px;
-    padding: 0 16px;
-    border-radius: 9px;
-  }
-  .cancel {
-    color: rgba(255, 255, 255, 0.58);
-  }
-  .submit {
-    color: #0a0a0a;
-    background: #fff;
-    font-weight: 700;
-  }
-  .submit:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
   .error {
-    color: #ff9a9a;
+    color: var(--color-danger);
     font-size: 13px;
   }
 </style>

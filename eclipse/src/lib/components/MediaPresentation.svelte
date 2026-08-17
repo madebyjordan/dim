@@ -5,6 +5,7 @@
     PlaybackTrack
   } from '$lib/api/generated';
   import { imageUrl, runtimeLabel } from '$lib/catalog/catalog';
+  import Select from '$lib/primitives/Select.svelte';
 
   let {
     media,
@@ -41,7 +42,7 @@
   {#if backdrop}
     <div
       class="backdrop"
-      style:background-image={`linear-gradient(90deg, rgba(8, 8, 8, 0.94) 0%, rgba(8, 8, 8, 0.6) 43%, rgba(8, 8, 8, 0.12) 75%), linear-gradient(0deg, #0d0d0d 0%, transparent 52%), url("${backdrop}")`}
+      style:background-image={`linear-gradient(90deg, rgba(0, 0, 0, 0.1) 0%, rgba(0, 0, 0, 0.6) 10%, rgba(8, 8, 8, 0.12) 75%), linear-gradient(0deg, #000000 0%, transparent 50%), url("${backdrop}")`}
     ></div>
   {/if}
   <div class="content">
@@ -77,8 +78,8 @@
         {#if playbackLoading}
           <span class="preparing">Preparing playback…</span>
         {:else if playback}
-          <select
-            aria-label="Video quality"
+          <Select
+            label="Video quality"
             value={selectedVideo}
             onchange={(event) => onvideo(event.currentTarget.value)}
           >
@@ -87,9 +88,9 @@
                 >{track.label || track.height || track.id}</option
               >
             {/each}
-          </select>
-          <select
-            aria-label="Audio track"
+          </Select>
+          <Select
+            label="Audio track"
             value={selectedAudio}
             onchange={(event) => onaudio(event.currentTarget.value)}
           >
@@ -98,9 +99,9 @@
                 >{track.label || track.lang || track.id}</option
               >
             {/each}
-          </select>
-          <select
-            aria-label="Subtitle track"
+          </Select>
+          <Select
+            label="Subtitle track"
             value={selectedSubtitle}
             onchange={(event) => onsubtitle(event.currentTarget.value)}
           >
@@ -110,7 +111,7 @@
                 >{track.label || track.lang || track.id}</option
               >
             {/each}
-          </select>
+          </Select>
         {/if}
       </div>
       {#if playbackError}<p class="playback-error" role="status">
@@ -125,24 +126,24 @@
     position: absolute;
     inset: 0 0 auto;
     z-index: 1;
-    min-height: 72%;
+    min-height: 100dvh;
     overflow: hidden;
     pointer-events: none;
   }
   .backdrop {
     position: absolute;
     inset: 0;
-    background-position: center 24%;
+    background-position: center 50%;
     background-size: cover;
-    opacity: 0.82;
-    animation: backdrop-in 420ms ease-out both;
+    opacity: 0.5;
+    animation: backdrop-in 300ms ease-out both;
   }
   .content {
     position: relative;
     width: min(44vw, 760px);
     display: grid;
     gap: clamp(12px, 1.5vh, 24px);
-    margin: clamp(120px, 17vh, 210px) 0 0 clamp(28px, 5vw, 280px);
+    margin: clamp(120px, 10vh, 210px) 0 0 clamp(28px, 5vw, 280px);
     pointer-events: auto;
     animation: content-in 320ms ease-out both;
   }
@@ -151,29 +152,24 @@
     margin: 0;
   }
   h1 {
-    max-width: 14ch;
-    font-size: clamp(38px, 4.6vw, 112px);
-    font-weight: 680;
-    letter-spacing: -0.055em;
-    line-height: 0.94;
+    max-width: 25ch;
+    font-size: clamp(40px, 3.5vw, 96px);
+    font-weight: 400;
+    line-height: 1;
     text-wrap: balance;
   }
   .metadata {
     display: flex;
     flex-wrap: wrap;
     gap: 7px 18px;
-    color: rgba(255, 255, 255, 0.68);
-    font-size: clamp(13px, 0.92vw, 22px);
-  }
-  .metadata span + span::before {
-    content: '·';
-    margin-right: 18px;
-    color: rgba(255, 255, 255, 0.3);
+    color: var(--color-fg);
+    font-size: clamp(13px, 16px, 22px);
+    margin-bottom: 12px;
   }
   .synopsis {
-    width: min(100%, 690px);
+    width: min(100%, 60ch);
     color: rgba(255, 255, 255, 0.78);
-    font-size: clamp(14px, 1vw, 23px);
+    font-size: clamp(13px, 16px, 22px);
     line-height: 1.55;
   }
   .collapsed-copy {
@@ -198,7 +194,7 @@
     margin-top: 18px;
     padding: 0;
     border: 0;
-    color: #fff;
+    color: var(--color-fg);
     background: transparent;
     font-weight: 650;
     cursor: pointer;
@@ -207,25 +203,15 @@
     min-height: 42px;
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
-  }
-  select {
-    max-width: 260px;
-    min-height: 40px;
-    padding: 0 32px 0 13px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 8px;
-    color: #fff;
-    background: rgba(10, 10, 10, 0.72);
-    backdrop-filter: blur(12px);
+    gap: var(--space-2);
   }
   .preparing,
   .playback-error {
-    color: rgba(255, 255, 255, 0.48);
+    color: var(--color-fg-subtle);
     font-size: 13px;
   }
   .playback-error {
-    color: #ffaaaa;
+    color: var(--color-danger);
   }
   @keyframes backdrop-in {
     from {

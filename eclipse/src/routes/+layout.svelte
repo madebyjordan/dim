@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import { session } from '$lib/auth/session.svelte';
   import { realtime } from '$lib/realtime/socket.svelte';
+  import Button from '$lib/primitives/Button.svelte';
 
   let { children } = $props();
   let realtimeStarted = false;
@@ -54,7 +55,7 @@
     <div class="mark">!</div>
     <h1>Eclipse could not start</h1>
     <p>{session.error}</p>
-    <button onclick={() => session.bootstrap()}>Retry</button>
+    <Button tone="surface" onclick={() => session.bootstrap()}>Retry</Button>
   </main>
 {:else}
   {@render children()}
@@ -67,7 +68,7 @@
     place-content: center;
     justify-items: center;
     gap: 0.8rem;
-    color: var(--text-muted);
+    color: var(--color-fg-muted);
   }
   .mark {
     width: 48px;
@@ -76,22 +77,14 @@
     place-items: center;
     border-radius: 14px;
     color: #08100d;
-    background: var(--accent);
+    background: var(--color-accent);
     font-weight: 900;
   }
   .error .mark {
-    background: var(--danger);
+    background: var(--color-danger);
   }
   h1,
   p {
     margin: 0;
-  }
-  button {
-    margin-top: 0.5rem;
-    padding: 0.7rem 1rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    background: var(--surface-raised);
   }
 </style>

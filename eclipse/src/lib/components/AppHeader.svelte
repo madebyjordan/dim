@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { Library, User } from '$lib/api/generated';
   import { imageUrl } from '$lib/catalog/catalog';
+  import IconButton from '$lib/primitives/IconButton.svelte';
   import EclipseMark from './EclipseMark.svelte';
 
   let {
@@ -65,10 +66,8 @@
 <header class="header">
   <div class="leading">
     <div class:open={searchOpen} class="search">
-      <button
-        type="button"
-        class="search-button"
-        aria-label={searchOpen ? 'Close search' : 'Search media'}
+      <IconButton
+        label={searchOpen ? 'Close search' : 'Search media'}
         onclick={() => (searchOpen ? closeSearch() : openSearch())}
       >
         {#if searchOpen}
@@ -81,7 +80,7 @@
             <path d="m16.2 16.2 5 5" />
           </svg>
         {/if}
-      </button>
+      </IconButton>
       {#if searchOpen}
         <input
           bind:this={searchInput}
@@ -121,22 +120,25 @@
       </div>
     {/if}
     <div class="profile" bind:this={profile}>
-      <button
-        type="button"
-        class="profile-button"
-        aria-label="Open profile menu"
-        aria-expanded={profileOpen}
+      <IconButton
+        label="Open profile menu"
+        appearance="surface"
+        expanded={profileOpen}
         onclick={() => (profileOpen = !profileOpen)}
       >
         {#if user?.picture}
-          <img src={imageUrl(user.picture) ?? ''} alt="" />
+          <img
+            class="profile-avatar"
+            src={imageUrl(user.picture) ?? ''}
+            alt=""
+          />
         {:else}
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="8" r="3.1" />
             <path d="M5.5 20v-1.2a6.5 6.5 0 0 1 13 0V20" />
           </svg>
         {/if}
-      </button>
+      </IconButton>
       {#if profileOpen}
         <div class="profile-menu">
           <p>{user?.username}</p>
@@ -188,23 +190,15 @@
   .search.open {
     width: clamp(190px, 19vw, 440px);
   }
-  .search-button,
   nav button,
-  .profile-button,
   .profile-menu button {
     border: 0;
     color: inherit;
     background: transparent;
     cursor: pointer;
   }
-  .search-button {
-    width: clamp(38px, 2.3vw, 68px);
-    height: clamp(38px, 2.3vw, 68px);
-    flex: none;
-    padding: 0;
-  }
-  .search-button svg,
-  .profile-button svg {
+  .search svg,
+  .profile svg {
     width: 100%;
     height: 100%;
     fill: none;
@@ -219,7 +213,7 @@
     border: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.35);
     outline: 0;
-    color: #fff;
+    color: var(--color-fg);
     background: transparent;
     font-size: clamp(17px, 1.15vw, 34px);
   }
@@ -235,21 +229,21 @@
   nav button {
     flex: none;
     padding: 9px 0;
-    color: rgba(255, 255, 255, 0.38);
+    color: var(--color-fg-subtle);
     font-size: clamp(17px, 1.25vw, 38px);
     font-weight: 560;
     letter-spacing: -0.025em;
     white-space: nowrap;
-    transition: color 160ms ease;
+    transition: color var(--motion-fast) ease;
   }
   nav button:hover,
   nav button.active,
   nav button:focus-visible {
-    color: #fff;
+    color: var(--color-fg);
   }
   .scan {
     gap: 10px;
-    color: rgba(255, 255, 255, 0.55);
+    color: var(--color-fg-subtle);
     font-size: clamp(12px, 0.78vw, 22px);
     white-space: nowrap;
   }
@@ -257,25 +251,14 @@
     width: 13px;
     aspect-ratio: 1;
     border: 1.5px solid rgba(255, 255, 255, 0.22);
-    border-top-color: #fff;
+    border-top-color: var(--color-fg);
     border-radius: 50%;
     animation: spin 900ms linear infinite;
   }
   .profile {
     position: relative;
   }
-  .profile-button {
-    width: clamp(48px, 3.35vw, 92px);
-    aspect-ratio: 1;
-    display: grid;
-    place-items: center;
-    padding: 24%;
-    overflow: hidden;
-    border-radius: 50%;
-    color: #f6f6f6;
-    background: rgba(255, 255, 255, 0.18);
-  }
-  .profile-button img {
+  .profile-avatar {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -288,15 +271,15 @@
     right: 0;
     min-width: 170px;
     padding: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.13);
-    border-radius: 12px;
-    background: rgba(22, 22, 22, 0.96);
-    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.42);
+    border: 1px solid var(--color-stroke);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--color-surface) 96%, transparent);
+    box-shadow: var(--shadow-float);
   }
   .profile-menu p {
-    margin: 4px 8px 10px;
+    margin: var(--space-1) var(--space-2) 10px;
     overflow: hidden;
-    color: rgba(255, 255, 255, 0.55);
+    color: var(--color-fg-subtle);
     font-size: 13px;
     text-overflow: ellipsis;
   }
@@ -340,7 +323,7 @@
       z-index: 3;
       width: auto;
       padding-right: 8px;
-      background: #0d0d0d;
+      background: var(--color-canvas);
     }
     .search.open + nav {
       visibility: hidden;

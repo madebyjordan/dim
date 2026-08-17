@@ -56,7 +56,11 @@ pnpm build
 pnpm dev
 ```
 
-Open [http://localhost:8000](http://localhost:8000) after Dim starts. To build and run an optimized binary, pass `--release` to both commands:
+`pnpm build` bootstraps the Rust binary and production Eclipse bundle. `pnpm dev` then starts the
+Rust backend on port 8000 and the SvelteKit/Vite development frontend at
+[http://localhost:5173](http://localhost:5173). Use the Vite URL for active development: Svelte and
+CSS edits update through HMR, while API, artwork, streaming, and WebSocket requests are proxied to
+Rust. To build and run an optimized single-server binary, pass `--release` to both commands:
 
 ```sh
 pnpm build --release

@@ -41,7 +41,7 @@
   }
   .poster {
     overflow: hidden;
-    background: #141414;
+    background: var(--color-surface);
   }
   img {
     display: block;
