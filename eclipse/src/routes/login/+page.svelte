@@ -54,13 +54,13 @@
     min-height: 100vh;
     display: grid;
     place-items: center;
-    padding: 1.5rem;
+    padding: var(--space-5);
   }
   form {
     width: min(100%, 360px);
     display: grid;
-    gap: 1rem;
-    padding: 2rem;
+    gap: var(--space-4);
+    padding: var(--space-6);
     border: 1px solid var(--color-stroke);
     border-radius: var(--radius-lg);
     background: var(--color-surface);
@@ -74,14 +74,14 @@
     text-transform: uppercase;
   }
   h1 {
-    margin: -0.5rem 0 0.5rem;
-    font-size: 2rem;
+    margin: calc(-1 * var(--space-2)) 0 var(--space-2);
+    font-size: 32px;
   }
   label {
     display: grid;
-    gap: 0.4rem;
+    gap: var(--space-2);
     color: var(--color-fg-muted);
-    font-size: 0.85rem;
+    font-size: var(--text-sm);
   }
   input,
   button {
@@ -101,6 +101,6 @@
   }
   .error {
     color: var(--color-danger);
-    font-size: 0.85rem;
+    font-size: var(--text-sm);
   }
 </style>

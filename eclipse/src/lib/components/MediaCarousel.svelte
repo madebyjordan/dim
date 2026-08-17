@@ -118,16 +118,16 @@
     width: max-content;
     display: flex;
     align-items: end;
-    gap: clamp(18px, 2.6vw, 150px);
-    padding: 18px clamp(32px, 5.2vw, 300px) clamp(28px, 4.5vh, 110px);
+    gap: var(--space-6);
+    padding: var(--space-4) var(--layout-gutter) var(--space-6);
   }
   .card {
     position: relative;
-    width: clamp(150px, 13.5vw, 780px);
+    width: 190px;
     aspect-ratio: 2 / 3;
     flex: none;
     overflow: hidden;
-    border-radius: clamp(14px, 1vw, 38px);
+    border-radius: 20px;
     background: var(--color-surface);
     content-visibility: auto;
     contain-intrinsic-size: auto 300px 450px;
@@ -160,7 +160,7 @@
   .play {
     position: absolute;
     inset: 50% auto auto 50%;
-    width: clamp(48px, 4vw, 104px);
+    width: 64px;
     aspect-ratio: 1;
     display: grid;
     place-items: center;
@@ -184,10 +184,23 @@
       padding-inline: 18px;
     }
     .card {
-      width: min(42vw, 190px);
+      width: 160px;
+      border-radius: var(--radius-md);
     }
     .card.selected {
       transform: translateY(-7px) scale(1.015);
+    }
+  }
+  @media (min-width: 1800px) {
+    .track {
+      gap: var(--space-7);
+    }
+    .card {
+      width: 240px;
+      border-radius: var(--radius-lg);
+    }
+    .play {
+      width: 76px;
     }
   }
   @media (prefers-reduced-motion: reduce) {

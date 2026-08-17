@@ -22,6 +22,7 @@
   } from '$lib/catalog/catalog';
   import AddLibraryDialog from '$lib/components/AddLibraryDialog.svelte';
   import AppHeader from '$lib/components/AppHeader.svelte';
+  import MediaBackdrop from '$lib/components/MediaBackdrop.svelte';
   import MediaCarousel from '$lib/components/MediaCarousel.svelte';
   import MediaPresentation from '$lib/components/MediaPresentation.svelte';
   import { determineCapabilities } from '$lib/playback/capabilities';
@@ -333,7 +334,11 @@
   />
 </svelte:head>
 
-<main class:selected={selectedMedia !== null} class="experience">
+<main class="experience">
+  {#if selectedMedia}
+    {#key selectedMedia.id}<MediaBackdrop media={selectedMedia} />{/key}
+  {/if}
+
   <AppHeader
     {libraries}
     {activeLibraryId}
@@ -364,7 +369,6 @@
     {/key}
   {/if}
 
-  <div class="floor" aria-hidden="true"></div>
   {#if items.length > 0}
     <div class="browse">
       <MediaCarousel
@@ -400,20 +404,6 @@
     isolation: isolate;
     background: var(--color-canvas);
   }
-  .floor {
-    position: absolute;
-    inset: 47% 0 0;
-    z-index: 3;
-    background: linear-gradient(
-      0deg,
-      var(--color-canvas) 0 76%,
-      transparent 100%
-    );
-    pointer-events: none;
-  }
-  .selected .floor {
-    inset-block-start: 57%;
-  }
   .browse {
     position: absolute;
     inset: auto 0 0;
@@ -448,17 +438,6 @@
   @keyframes spin {
     to {
       transform: rotate(360deg);
-    }
-  }
-  @media (max-width: 700px) {
-    .experience {
-      min-height: 100dvh;
-    }
-    .floor {
-      inset-block-start: 45%;
-    }
-    .selected .floor {
-      inset-block-start: 60%;
     }
   }
 </style>

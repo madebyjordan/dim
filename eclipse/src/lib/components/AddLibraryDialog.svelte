@@ -163,7 +163,7 @@
     display: grid;
     gap: 7px;
     color: var(--color-fg-muted);
-    font-size: 13px;
+    font-size: var(--text-sm);
   }
   input,
   select {
@@ -184,7 +184,7 @@
     overflow: hidden;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     color: var(--color-fg-subtle);
-    font: 12px var(--font-mono);
+    font: var(--text-xs) var(--font-mono);
     text-overflow: ellipsis;
     white-space: nowrap;
   }

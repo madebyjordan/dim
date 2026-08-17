@@ -153,12 +153,12 @@
   .header {
     position: relative;
     z-index: 20;
-    min-height: clamp(92px, 10.2vh, 180px);
-    display: flex;
+    min-height: var(--header-height);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
-    justify-content: space-between;
-    gap: 28px;
-    padding: 0 clamp(28px, 4.9vw, 280px);
+    gap: var(--space-6);
+    padding-inline: var(--layout-gutter);
   }
   .leading,
   .trailing,
@@ -169,17 +169,14 @@
   }
   .leading {
     min-width: 0;
-    gap: clamp(30px, 3.5vw, 190px);
+    gap: var(--space-7);
   }
   .trailing {
     justify-content: end;
-    gap: clamp(18px, 2vw, 80px);
+    gap: var(--space-5);
   }
   .brand {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
+    grid-column: 2;
   }
   .search {
     height: 52px;
@@ -188,7 +185,7 @@
     gap: 12px;
   }
   .search.open {
-    width: clamp(190px, 19vw, 440px);
+    width: 280px;
   }
   nav button,
   .profile-menu button {
@@ -215,11 +212,11 @@
     outline: 0;
     color: var(--color-fg);
     background: transparent;
-    font-size: clamp(17px, 1.15vw, 34px);
+    font-size: var(--text-md);
   }
   nav {
     min-width: 0;
-    gap: clamp(18px, 2.3vw, 110px);
+    gap: var(--space-5);
     overflow-x: auto;
     scrollbar-width: none;
   }
@@ -230,7 +227,7 @@
     flex: none;
     padding: 9px 0;
     color: var(--color-fg-subtle);
-    font-size: clamp(17px, 1.25vw, 38px);
+    font-size: var(--text-lg);
     font-weight: 560;
     letter-spacing: -0.025em;
     white-space: nowrap;
@@ -244,7 +241,7 @@
   .scan {
     gap: 10px;
     color: var(--color-fg-subtle);
-    font-size: clamp(12px, 0.78vw, 22px);
+    font-size: var(--text-sm);
     white-space: nowrap;
   }
   .scan i {
@@ -297,11 +294,10 @@
       transform: rotate(360deg);
     }
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1100px) {
     .header {
-      min-height: 78px;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 16px;
-      padding-inline: 20px;
     }
     .leading {
       gap: 18px;
@@ -318,15 +314,10 @@
   }
   @media (max-width: 620px) {
     .search.open {
-      position: absolute;
-      inset: 13px 76px 13px 18px;
-      z-index: 3;
-      width: auto;
-      padding-right: 8px;
-      background: var(--color-canvas);
+      width: 100%;
     }
     .search.open + nav {
-      visibility: hidden;
+      display: none;
     }
     nav button {
       font-size: 15px;

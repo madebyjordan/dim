@@ -366,7 +366,7 @@
 <style>
   .proof {
     min-height: 100vh;
-    padding: clamp(1rem, 2.2vw, 2rem);
+    padding: var(--space-6);
     background: var(--color-canvas);
   }
   header {
@@ -428,7 +428,7 @@
     max-width: 1100px;
     margin: 0.5rem auto;
     color: var(--color-fg-muted);
-    font-size: 0.75rem;
+    font-size: var(--text-xs);
   }
   .notice {
     color: var(--color-danger);
@@ -444,6 +444,9 @@
     border: 0;
   }
   @media (max-width: 800px) {
+    .proof {
+      padding: var(--space-4);
+    }
     .controls {
       grid-template-columns: 1fr 1fr;
     }

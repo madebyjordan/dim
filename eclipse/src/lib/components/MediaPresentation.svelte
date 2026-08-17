@@ -4,7 +4,7 @@
     PlaybackSession,
     PlaybackTrack
   } from '$lib/api/generated';
-  import { imageUrl, runtimeLabel } from '$lib/catalog/catalog';
+  import { runtimeLabel } from '$lib/catalog/catalog';
   import Select from '$lib/primitives/Select.svelte';
 
   let {
@@ -35,16 +35,9 @@
   const tracks = (kind: PlaybackTrack['content_type']) =>
     playback?.tracks.filter((track) => track.content_type === kind) ?? [];
   const runtime = $derived(runtimeLabel(media.duration));
-  const backdrop = $derived(imageUrl(media.backdrop_path));
 </script>
 
 <section class:expanded={synopsisExpanded} class="presentation">
-  {#if backdrop}
-    <div
-      class="backdrop"
-      style:background-image={`linear-gradient(90deg, rgba(0, 0, 0, 0.1) 0%, rgba(0, 0, 0, 0.6) 10%, rgba(8, 8, 8, 0.12) 75%), linear-gradient(0deg, #000000 0%, transparent 50%), url("${backdrop}")`}
-    ></div>
-  {/if}
   <div class="content">
     <h1>{media.name}</h1>
     <div class="metadata" aria-label="Media details">
@@ -123,28 +116,15 @@
 
 <style>
   .presentation {
-    position: absolute;
-    inset: 0 0 auto;
-    z-index: 1;
-    min-height: 100dvh;
-    overflow: hidden;
-    pointer-events: none;
-  }
-  .backdrop {
-    position: absolute;
-    inset: 0;
-    background-position: center 50%;
-    background-size: cover;
-    opacity: 0.5;
-    animation: backdrop-in 300ms ease-out both;
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    padding: var(--space-4) var(--layout-gutter) var(--space-5);
   }
   .content {
-    position: relative;
-    width: min(44vw, 760px);
+    width: min(100%, var(--content-width));
     display: grid;
-    gap: clamp(12px, 1.5vh, 24px);
-    margin: clamp(120px, 10vh, 210px) 0 0 clamp(28px, 5vw, 280px);
-    pointer-events: auto;
+    gap: var(--space-3);
     animation: content-in 320ms ease-out both;
   }
   h1,
@@ -153,7 +133,7 @@
   }
   h1 {
     max-width: 25ch;
-    font-size: clamp(40px, 3.5vw, 96px);
+    font-size: clamp(40px, 3vw, 96px);
     font-weight: 400;
     line-height: 1;
     text-wrap: balance;
@@ -163,13 +143,12 @@
     flex-wrap: wrap;
     gap: 7px 18px;
     color: var(--color-fg);
-    font-size: clamp(13px, 16px, 22px);
-    margin-bottom: 12px;
+    font-size: var(--text-md);
   }
   .synopsis {
     width: min(100%, 60ch);
     color: rgba(255, 255, 255, 0.78);
-    font-size: clamp(13px, 16px, 22px);
+    font-size: var(--text-md);
     line-height: 1.55;
   }
   .collapsed-copy {
@@ -186,7 +165,7 @@
     mask-image: linear-gradient(#000 0 58%, transparent 100%);
   }
   .expanded-copy {
-    max-height: min(44vh, 490px);
+    max-height: 20rem;
     overflow-y: auto;
     padding-right: 18px;
   }
@@ -208,15 +187,10 @@
   .preparing,
   .playback-error {
     color: var(--color-fg-subtle);
-    font-size: 13px;
+    font-size: var(--text-sm);
   }
   .playback-error {
     color: var(--color-danger);
-  }
-  @keyframes backdrop-in {
-    from {
-      opacity: 0;
-    }
   }
   @keyframes content-in {
     from {
@@ -225,28 +199,11 @@
     }
   }
   @media (max-width: 900px) {
-    .presentation {
-      min-height: 70%;
-    }
-    .backdrop {
-      background-position: 62% top;
-    }
-    .content {
-      width: min(88vw, 620px);
-      margin: 100px 20px 0;
-    }
     h1 {
       font-size: clamp(34px, 9vw, 64px);
     }
-    .synopsis {
-      max-width: min(82vw, 570px);
-    }
   }
   @media (max-height: 720px) and (min-width: 901px) {
-    .content {
-      margin-top: 100px;
-      gap: 10px;
-    }
     h1 {
       font-size: clamp(34px, 4vw, 68px);
     }
@@ -255,7 +212,6 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .backdrop,
     .content {
       animation: none;
     }

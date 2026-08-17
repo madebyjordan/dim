@@ -35,7 +35,7 @@
 <style>
   button {
     position: relative;
-    width: clamp(38px, 2.3vw, 68px);
+    width: 44px;
     aspect-ratio: 1;
     display: grid;
     flex: none;
@@ -48,9 +48,17 @@
     cursor: pointer;
   }
   button.surface {
-    width: clamp(48px, 3.35vw, 92px);
+    width: 52px;
     padding: 24%;
     overflow: hidden;
     background: rgba(255, 255, 255, 0.18);
+  }
+  @media (min-width: 1800px) {
+    button {
+      width: 52px;
+    }
+    button.surface {
+      width: 64px;
+    }
   }
 </style>
