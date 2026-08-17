@@ -95,7 +95,9 @@ jobs:
       - name: Run the release validation suite
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_TAG" != "v0.3.0" ]]; then
+          # These immutable tags predate the current release-validation script,
+          # so use the workflow's compatibility suite when recovering them.
+          if [[ "$RELEASE_TAG" != "v0.3.0" && "$RELEASE_TAG" != "v0.3.1" ]]; then
             pnpm release:validate
             exit 0
           fi
