@@ -367,6 +367,9 @@ impl InsertableEpisode {
         .fetch_optional(&mut *conn)
         .await?
         {
+            UpdateMedia::from(self.media.clone())
+                .update(&mut *conn, r.id)
+                .await?;
             return Ok(r.id);
         }
 

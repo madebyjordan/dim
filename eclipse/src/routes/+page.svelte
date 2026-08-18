@@ -344,9 +344,12 @@
         showSeasons = seasons.map((season) => ({ ...season, episodes: [] }));
         showPresentation = {
           seasonCount: media.season_count ?? seasons.length,
-          startYear: media.year,
+          startYear: media.start_year ?? media.year,
           endYear: media.end_year ?? undefined,
-          ongoing: media.ongoing ?? true
+          // Absence of a series status must not be interpreted as "ongoing".
+          // Older servers omit this field, and doing so previously made every
+          // show display “Present”.
+          ongoing: media.ongoing ?? false
         };
         selectedFile = null;
       } else {

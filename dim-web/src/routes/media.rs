@@ -277,28 +277,84 @@ pub async fn get_media_by_id(
         #[derive(sqlx::FromRow)]
         struct ShowRun {
             season_count: i64,
+            start_year: Option<i64>,
             end_year: Option<i64>,
         }
 
         let run = sqlx::query_as::<_, ShowRun>(
-            r#"SELECT COUNT(DISTINCT season.id) AS season_count,
-                      MAX(_tblmedia.year) AS end_year
-               FROM season
-               LEFT JOIN episode ON episode.seasonid = season.id
-               LEFT JOIN _tblmedia ON _tblmedia.id = episode.id
-               WHERE season.tvshowid = ?"#,
+            r#"SELECT
+                (SELECT COUNT(*) FROM season WHERE tvshowid = ?) AS season_count,
+                (SELECT media.year
+                   FROM season AS first_season
+                   JOIN episode AS first_episode ON first_episode.seasonid = first_season.id
+                   JOIN _tblmedia AS media ON media.id = first_episode.id
+                  WHERE first_season.tvshowid = ? AND media.year IS NOT NULL
+                  ORDER BY first_season.season_number ASC, first_episode.episode_ ASC
+                  LIMIT 1) AS start_year,
+                (SELECT media.year
+                   FROM season AS last_season
+                   JOIN episode AS last_episode ON last_episode.seasonid = last_season.id
+                   JOIN _tblmedia AS media ON media.id = last_episode.id
+                  WHERE last_season.tvshowid = ? AND media.year IS NOT NULL
+                  ORDER BY last_season.season_number DESC, last_episode.episode_ DESC
+                  LIMIT 1) AS end_year"#,
         )
+        .bind(id)
+        .bind(id)
         .bind(id)
         .fetch_one(&mut tx)
         .await
         .map_err(DatabaseError::from)?;
+        let provider_run = sqlx::query_as::<_, (Option<i64>, Option<bool>)>(
+            "SELECT end_year, ongoing FROM show_metadata WHERE media_id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut tx)
+        .await
+        .map_err(DatabaseError::from)?;
+        let remote_run = if provider_run.is_none() {
+            let provider_id = sqlx::query_scalar::<_, String>(
+                r#"SELECT mediafile.provider_external_id
+                   FROM mediafile
+                   JOIN episode ON episode.id = mediafile.media_id
+                   JOIN season ON season.id = episode.seasonid
+                   WHERE season.tvshowid = ?
+                     AND mediafile.metadata_provider = 'tmdb'
+                     AND mediafile.provider_external_id IS NOT NULL
+                   LIMIT 1"#,
+            )
+            .bind(id)
+            .fetch_optional(&mut tx)
+            .await
+            .map_err(DatabaseError::from)?;
+
+            if let Some(provider_id) = provider_id {
+                TV_PROVIDER
+                    .search_by_id(&provider_id)
+                    .await
+                    .ok()
+                    .map(|metadata| {
+                        (
+                            metadata.end_date.map(|date| date.year() as i64),
+                            metadata.ongoing,
+                        )
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let current_year = chrono::Utc::now().year() as i64;
+        let (provider_end_year, provider_ongoing) =
+            provider_run.or(remote_run).unwrap_or((None, None));
         Some(json!({
             "season_count": run.season_count,
-            "end_year": run.end_year,
+            "start_year": run.start_year,
+            "end_year": provider_end_year.or(run.end_year),
             // The provider data retained by Dim has no explicit series status. A show
             // with an episode in this or the prior calendar year is treated as active.
-            "ongoing": run.end_year.is_some_and(|year| year >= current_year - 1),
+            "ongoing": provider_ongoing.unwrap_or_else(|| run.end_year.is_some_and(|year| year >= current_year - 1)),
         }))
     } else {
         None

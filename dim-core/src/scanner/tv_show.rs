@@ -92,6 +92,8 @@ impl TvMatcher {
         // TODO: insert poster and backdrops.
         let (emedia, eseason, eepisode) = result;
         let provider_external_id = emedia.external_id.clone();
+        let show_end_year = emedia.end_date.map(|date| date.year() as i64);
+        let show_ongoing = emedia.ongoing;
 
         let posters = emedia
             .posters
@@ -146,6 +148,21 @@ impl TvMatcher {
             .await
             .inspect_err(|error| error!(?error, ?file, "Failed to lazy insert tv show"))
             .map_err(Error::GetOrInsertMedia)?;
+
+        sqlx::query(
+            r#"INSERT INTO show_metadata (media_id, end_year, ongoing)
+               VALUES (?, ?, ?)
+               ON CONFLICT(media_id) DO UPDATE SET
+                 end_year = excluded.end_year,
+                 ongoing = excluded.ongoing"#,
+        )
+        .bind(parent_id)
+        .bind(show_end_year)
+        .bind(show_ongoing)
+        .execute(&mut *tx)
+        .await
+        .map_err(dim_database::DatabaseError::from)
+        .map_err(Error::GetOrInsertMedia)?;
 
         // NOTE: We want to decouple this media from all genres and essentially rebuild the list.
         // Its a lot simpler than doing a diff-update but it might be more expensive.
@@ -321,6 +338,7 @@ impl TvMatcher {
             added: Utc::now().to_string(),
             media_type: MediaType::Episode,
             description: result.description.clone(),
+            year: result.air_date.map(|date| date.year() as _),
             backdrop: still_ids.first().map(|x| x.id),
             ..Default::default()
         };

@@ -53,6 +53,9 @@ describe('catalog presentation helpers', () => {
     expect(
       showYearLabel({ seasonCount: 2, startYear: 2024, ongoing: true })
     ).toBe('2024–Present');
+    expect(
+      showYearLabel({ seasonCount: 1, startYear: 2008, ongoing: false })
+    ).toBe('2008');
     expect(seasonCountLabel(1)).toBe('1 Season');
     expect(seasonCountLabel(5)).toBe('5 Seasons');
   });

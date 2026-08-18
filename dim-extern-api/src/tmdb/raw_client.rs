@@ -24,6 +24,8 @@ pub struct TMDBMediaObject {
     pub title: String,
     #[serde(alias = "first_air_date")]
     pub release_date: Option<String>,
+    pub last_air_date: Option<String>,
+    pub status: Option<String>,
     pub overview: Option<String>,
     pub vote_average: Option<f64>,
     pub poster_path: Option<String>,
@@ -44,6 +46,18 @@ impl From<TMDBMediaObject> for ExternalMedia {
                 chrono::DateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S %z")
                     .ok()
                     .map(|dt| dt.with_timezone(&chrono::Utc))
+            }),
+            end_date: media.last_air_date.and_then(|date| {
+                let value = format!("{date} 00:00:00 +0000");
+                chrono::DateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S %z")
+                    .ok()
+                    .map(|date| date.with_timezone(&chrono::Utc))
+            }),
+            ongoing: media.status.map(|status| {
+                matches!(
+                    status.as_str(),
+                    "Returning Series" | "In Production" | "Planned"
+                )
             }),
             posters: media
                 .poster_path
@@ -191,6 +205,7 @@ pub struct TvEpisode {
     pub name: Option<String>,
     pub episode_number: u64,
     pub overview: Option<String>,
+    pub air_date: Option<String>,
     pub still_path: Option<String>,
     pub vote_average: Option<f64>,
     pub vote_count: Option<u64>,
@@ -203,6 +218,7 @@ impl From<TvEpisode> for ExternalEpisode {
             name,
             episode_number,
             overview,
+            air_date,
             still_path,
             ..
         } = episode;
@@ -211,6 +227,12 @@ impl From<TvEpisode> for ExternalEpisode {
             external_id: id.to_string(),
             title: name,
             description: overview,
+            air_date: air_date.and_then(|date| {
+                let value = format!("{date} 00:00:00 +0000");
+                chrono::DateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S %z")
+                    .ok()
+                    .map(|date| date.with_timezone(&chrono::Utc))
+            }),
             stills: still_path
                 .map(|x| vec![format!("https://image.tmdb.org/t/p/original{x}")])
                 .unwrap_or_default(),

@@ -60,6 +60,11 @@ pub struct ExternalMedia {
     /// The release date or first air date of this media object.
     #[serde(with = "chrono::serde::ts_seconds_option")]
     pub release_date: Option<chrono::DateTime<chrono::Utc>>,
+    /// The final air date when the provider reports that the series has ended.
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub end_date: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the provider reports that the series is still returning episodes.
+    pub ongoing: Option<bool>,
     /// A list of posters for this media object.
     pub posters: Vec<String>,
     /// A list of backdrops for this media object.
@@ -91,6 +96,9 @@ pub struct ExternalEpisode {
     pub external_id: String,
     pub title: Option<String>,
     pub description: Option<String>,
+    /// The episode's original air date.
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub air_date: Option<chrono::DateTime<chrono::Utc>>,
     pub episode_number: u64,
     pub stills: Vec<String>,
     pub duration: Option<Duration>,
