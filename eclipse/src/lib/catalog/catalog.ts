@@ -13,7 +13,7 @@ export type CatalogItem = MediaSummary & {
 };
 
 export type ShowPresentation = {
-  seasonCount: number;
+  seasonCount?: number;
   startYear?: number;
   endYear?: number;
   ongoing: boolean;

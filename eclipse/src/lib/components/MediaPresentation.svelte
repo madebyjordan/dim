@@ -75,8 +75,9 @@
         {/if}
         {#if !isEpisode}{#each media.genres as genre}<span>{genre}</span
             >{/each}{/if}
-        {#if isShow && show}<span>{seasonCountLabel(show.seasonCount)}</span
-          >{/if}
+        {#if isShow && show?.seasonCount !== undefined}
+          <span>{seasonCountLabel(show.seasonCount)}</span>
+        {/if}
         {#if !isShow && runtime}<span>{runtime}</span>{/if}
       </div>
 

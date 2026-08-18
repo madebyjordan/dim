@@ -65,6 +65,8 @@ pub struct ExternalMedia {
     pub end_date: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether the provider reports that the series is still returning episodes.
     pub ongoing: Option<bool>,
+    /// The provider's canonical number of seasons for the series.
+    pub season_count: Option<u64>,
     /// A list of posters for this media object.
     pub posters: Vec<String>,
     /// A list of backdrops for this media object.

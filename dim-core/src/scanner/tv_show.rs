@@ -94,6 +94,7 @@ impl TvMatcher {
         let provider_external_id = emedia.external_id.clone();
         let show_end_year = emedia.end_date.map(|date| date.year() as i64);
         let show_ongoing = emedia.ongoing;
+        let show_season_count = emedia.season_count.map(|count| count as i64);
 
         let posters = emedia
             .posters
@@ -150,15 +151,17 @@ impl TvMatcher {
             .map_err(Error::GetOrInsertMedia)?;
 
         sqlx::query(
-            r#"INSERT INTO show_metadata (media_id, end_year, ongoing)
-               VALUES (?, ?, ?)
+            r#"INSERT INTO show_metadata (media_id, end_year, ongoing, season_count)
+               VALUES (?, ?, ?, ?)
                ON CONFLICT(media_id) DO UPDATE SET
                  end_year = excluded.end_year,
-                 ongoing = excluded.ongoing"#,
+                 ongoing = excluded.ongoing,
+                 season_count = excluded.season_count"#,
         )
         .bind(parent_id)
         .bind(show_end_year)
         .bind(show_ongoing)
+        .bind(show_season_count)
         .execute(&mut *tx)
         .await
         .map_err(dim_database::DatabaseError::from)

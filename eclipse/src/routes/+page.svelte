@@ -343,7 +343,7 @@
         if (version !== selectionVersion) return;
         showSeasons = seasons.map((season) => ({ ...season, episodes: [] }));
         showPresentation = {
-          seasonCount: media.season_count ?? seasons.length,
+          seasonCount: media.season_count,
           startYear: media.start_year ?? media.year,
           endYear: media.end_year ?? undefined,
           // Absence of a series status must not be interpreted as "ongoing".

@@ -26,6 +26,7 @@ pub struct TMDBMediaObject {
     pub release_date: Option<String>,
     pub last_air_date: Option<String>,
     pub status: Option<String>,
+    pub number_of_seasons: Option<u64>,
     pub overview: Option<String>,
     pub vote_average: Option<f64>,
     pub poster_path: Option<String>,
@@ -59,6 +60,7 @@ impl From<TMDBMediaObject> for ExternalMedia {
                     "Returning Series" | "In Production" | "Planned"
                 )
             }),
+            season_count: media.number_of_seasons,
             posters: media
                 .poster_path
                 .into_iter()
