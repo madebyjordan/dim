@@ -3,7 +3,9 @@ import {
   flattenLibraryMedia,
   imageUrl,
   playableFile,
-  runtimeLabel
+  runtimeLabel,
+  seasonCountLabel,
+  showYearLabel
 } from './catalog';
 
 describe('catalog presentation helpers', () => {
@@ -37,5 +39,21 @@ describe('catalog presentation helpers', () => {
         files as Parameters<typeof playableFile>[1]
       )?.id
     ).toBe(11);
+  });
+
+  it('formats show runs and season counts', () => {
+    expect(
+      showYearLabel({
+        seasonCount: 5,
+        startYear: 2008,
+        endYear: 2013,
+        ongoing: false
+      })
+    ).toBe('2008–2013');
+    expect(
+      showYearLabel({ seasonCount: 2, startYear: 2024, ongoing: true })
+    ).toBe('2024–Present');
+    expect(seasonCountLabel(1)).toBe('1 Season');
+    expect(seasonCountLabel(5)).toBe('5 Seasons');
   });
 });

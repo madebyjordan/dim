@@ -273,6 +273,37 @@ pub async fn get_media_by_id(
         _ => None,
     };
 
+    let show_run = if media.media_type == MediaType::Tv {
+        #[derive(sqlx::FromRow)]
+        struct ShowRun {
+            season_count: i64,
+            end_year: Option<i64>,
+        }
+
+        let run = sqlx::query_as::<_, ShowRun>(
+            r#"SELECT COUNT(DISTINCT season.id) AS season_count,
+                      MAX(_tblmedia.year) AS end_year
+               FROM season
+               LEFT JOIN episode ON episode.seasonid = season.id
+               LEFT JOIN _tblmedia ON _tblmedia.id = episode.id
+               WHERE season.tvshowid = ?"#,
+        )
+        .bind(id)
+        .fetch_one(&mut tx)
+        .await
+        .map_err(DatabaseError::from)?;
+        let current_year = chrono::Utc::now().year() as i64;
+        Some(json!({
+            "season_count": run.season_count,
+            "end_year": run.end_year,
+            // The provider data retained by Dim has no explicit series status. A show
+            // with an episode in this or the prior calendar year is treated as active.
+            "ongoing": run.end_year.is_some_and(|year| year >= current_year - 1),
+        }))
+    } else {
+        None
+    };
+
     const EPISODE_DONE_THRESH: f64 = 0.9;
 
     let next_episode_id = match Episode::get_by_id(&mut tx, id).await {
@@ -321,6 +352,7 @@ pub async fn get_media_by_id(
         "genres": genres,
         "duration": duration,
         "tags": quality_tags,
+        ..?show_run,
         ..?next_episode_id,
         ..?season_episode_tag,
         ..?progress

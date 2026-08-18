@@ -8,12 +8,14 @@
     items,
     selectedId,
     playable,
+    selectionAction = 'play',
     onselect,
     onplay
   }: {
     items: Array<CatalogItem>;
     selectedId: number | null;
     playable: boolean;
+    selectionAction?: 'play' | 'open';
     onselect: (item: CatalogItem) => void;
     onplay: () => void;
   } = $props();
@@ -83,27 +85,26 @@
           onkeydown={(event) => handleKey(event, index)}
         >
           <LazyPoster src={imageUrl(item.poster_path)} alt={item.name} />
-          {#if item.episode !== undefined}
-            <span class="episode-label">
-              <strong
-                >S{String(item.season ?? 0).padStart(2, '0')} E{String(
-                  item.episode
-                ).padStart(2, '0')}</strong
-              >
-              <span>{item.name}</span>
-            </span>
-          {/if}
         </button>
-        {#if selectedId === item.id && playable}
+        {#if selectedId === item.id && (playable || selectionAction === 'open')}
           <button
             type="button"
             class="play"
-            aria-label={`Play ${item.name}`}
-            onclick={onplay}
+            class:open={selectionAction === 'open'}
+            aria-label={selectionAction === 'open'
+              ? `Open ${item.name}`
+              : `Play ${item.name}`}
+            onclick={selectionAction === 'open' ? () => onselect(item) : onplay}
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 5.5v13l10-6.5z" />
-            </svg>
+            {#if selectionAction === 'open'}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 11h10.2l-4.6-4.6L12 5l7 7-7 7-1.4-1.4 4.6-4.6H5z" />
+              </svg>
+            {:else}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 5.5v13l10-6.5z" />
+              </svg>
+            {/if}
           </button>
         {/if}
       </article>
@@ -195,26 +196,6 @@
     outline: 3px solid var(--color-fg);
     outline-offset: -6px;
   }
-  .episode-label {
-    position: absolute;
-    inset: auto 0 0;
-    display: grid;
-    gap: 3px;
-    padding: 42px 14px 14px;
-    color: var(--color-fg);
-    background: linear-gradient(transparent, rgba(0, 0, 0, 0.92));
-    text-align: left;
-  }
-  .episode-label strong {
-    font-size: var(--text-xs);
-    letter-spacing: 0.05em;
-  }
-  .episode-label span {
-    overflow: hidden;
-    font-size: var(--text-sm);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .play {
     position: absolute;
     z-index: 2;
@@ -236,6 +217,9 @@
     width: 45%;
     fill: currentColor;
     transform: translateX(5%);
+  }
+  .play.open svg {
+    transform: none;
   }
   @media (max-width: 700px) {
     .track {

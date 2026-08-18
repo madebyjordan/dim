@@ -5,6 +5,11 @@
     PlaybackTrack
   } from '$lib/api/generated';
   import { runtimeLabel } from '$lib/catalog/catalog';
+  import {
+    seasonCountLabel,
+    showYearLabel,
+    type ShowPresentation
+  } from '$lib/catalog/catalog';
   import Select from '$lib/primitives/Select.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
   import { fly } from 'svelte/transition';
@@ -19,7 +24,8 @@
     selectedSubtitle,
     onvideo,
     onaudio,
-    onsubtitle
+    onsubtitle,
+    show
   }: {
     media: Media;
     playback: PlaybackSession | null;
@@ -31,12 +37,20 @@
     onvideo: (id: string) => void;
     onaudio: (id: string) => void;
     onsubtitle: (id: string) => void;
+    show?: ShowPresentation | null;
   } = $props();
 
   let synopsisExpanded = $state(false);
   const tracks = (kind: PlaybackTrack['content_type']) =>
     playback?.tracks.filter((track) => track.content_type === kind) ?? [];
   const runtime = $derived(runtimeLabel(media.duration));
+  const isEpisode = $derived(media.media_type === 'episode');
+  const isShow = $derived(media.media_type === 'tv');
+
+  $effect(() => {
+    media.id;
+    synopsisExpanded = false;
+  });
 </script>
 
 <section class:expanded={synopsisExpanded} class="presentation">
@@ -50,9 +64,20 @@
     >
       <h1>{media.name}</h1>
       <div class="metadata" aria-label="Media details">
-        {#if media.year}<span>{media.year}</span>{/if}
-        {#each media.genres as genre}<span>{genre}</span>{/each}
-        {#if runtime}<span>{runtime}</span>{/if}
+        {#if isEpisode && media.episode !== undefined}
+          <span>Episode {media.episode}</span>
+        {/if}
+        {#if isShow && show}
+          {@const years = showYearLabel(show)}
+          {#if years}<span>{years}</span>{/if}
+        {:else if media.year}
+          <span>{media.year}</span>
+        {/if}
+        {#if !isEpisode}{#each media.genres as genre}<span>{genre}</span
+            >{/each}{/if}
+        {#if isShow && show}<span>{seasonCountLabel(show.seasonCount)}</span
+          >{/if}
+        {#if !isShow && runtime}<span>{runtime}</span>{/if}
       </div>
 
       {#if media.description}

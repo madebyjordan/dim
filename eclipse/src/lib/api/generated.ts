@@ -84,6 +84,9 @@ export type Media = {
   prev_episode_id?: number;
   rating?: number;
   season?: number;
+  season_count?: number;
+  end_year?: number | null;
+  ongoing?: boolean;
   year?: number;
   tags?: Record<string, unknown>;
 };

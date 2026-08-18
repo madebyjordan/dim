@@ -9,7 +9,28 @@ export type CatalogItem = MediaSummary & {
   library_id?: number;
   season?: number;
   episode?: number;
+  media_type?: string;
 };
+
+export type ShowPresentation = {
+  seasonCount: number;
+  startYear?: number;
+  endYear?: number;
+  ongoing: boolean;
+};
+
+export function showYearLabel(show: ShowPresentation): string | null {
+  if (!show.startYear) return null;
+  if (show.ongoing) return `${show.startYear}–Present`;
+  if (show.endYear && show.endYear !== show.startYear) {
+    return `${show.startYear}–${show.endYear}`;
+  }
+  return String(show.startYear);
+}
+
+export function seasonCountLabel(count: number): string {
+  return `${count} ${count === 1 ? 'Season' : 'Seasons'}`;
+}
 
 export function flattenLibraryMedia(
   groups: Record<string, Array<MediaSummary>>

@@ -19,8 +19,10 @@
   import {
     flattenLibraryMedia,
     fromSearchResult,
+    imageUrl,
     playableFile,
-    type CatalogItem
+    type CatalogItem,
+    type ShowPresentation
   } from '$lib/catalog/catalog';
   import AddLibraryDialog from '$lib/components/AddLibraryDialog.svelte';
   import AppHeader from '$lib/components/AppHeader.svelte';
@@ -45,8 +47,15 @@
   let activeLibraryId = $state<number | null>(null);
   let items = $state<Array<CatalogItem>>([]);
   let libraryItems = $state<Array<CatalogItem>>([]);
-  let showParentItems = $state<Array<CatalogItem>>([]);
   let openShow = $state<{ id: number; name: string } | null>(null);
+  type SeasonView = {
+    id: number;
+    season_number: number;
+    episodes: Array<CatalogItem>;
+  };
+  let showSeasons = $state<Array<SeasonView>>([]);
+  let activeSeason = $state<number | null>(null);
+  let showPresentation = $state<ShowPresentation | null>(null);
   let selectedId = $state<number | null>(null);
   let selectedMedia = $state<Media | null>(null);
   let selectedFile = $state<MediaFile | null>(null);
@@ -91,6 +100,18 @@
     return cause instanceof ApiError && cause.status === 404;
   }
 
+  async function preloadBackdrop(media: Media) {
+    const source = imageUrl(media.backdrop_path);
+    if (!source) return;
+    await new Promise<void>((resolve) => {
+      const image = new Image();
+      image.onload = () => resolve();
+      image.onerror = () => resolve();
+      image.src = source;
+      if (image.complete) resolve();
+    });
+  }
+
   async function loadLibraryMedia(libraryId: number) {
     catalogLoading = true;
     error = null;
@@ -101,8 +122,10 @@
       if (activeLibraryId === libraryId && !searching) {
         libraryItems = flattenLibraryMedia(groups);
         items = libraryItems;
-        showParentItems = [];
         openShow = null;
+        showSeasons = [];
+        activeSeason = null;
+        showPresentation = null;
       }
     } catch (cause) {
       if (activeLibraryId === libraryId && !searching) {
@@ -148,7 +171,9 @@
       activeLibraryId = null;
       items = [];
       libraryItems = [];
-      showParentItems = [];
+      showSeasons = [];
+      activeSeason = null;
+      showPresentation = null;
       catalogLoading = false;
       clearSelection();
       return;
@@ -173,8 +198,10 @@
     activeLibraryId = library.id;
     items = [];
     libraryItems = [];
-    showParentItems = [];
     openShow = null;
+    showSeasons = [];
+    activeSeason = null;
+    showPresentation = null;
     clearSelection();
     await loadLibraryMedia(library.id);
   }
@@ -290,50 +317,37 @@
   }
 
   async function selectItem(item: CatalogItem) {
-    if (selectedId === item.id) return;
+    if (selectedId === item.id) {
+      if (selectedMedia?.media_type === 'tv' && !openShow) {
+        await openSelectedShow();
+      }
+      return;
+    }
     const version = ++selectionVersion;
     void disposePreparedPlayback();
     selectedId = item.id;
-    selectedMedia = null;
     selectedFile = null;
     playbackError = null;
     detailLoading = true;
     try {
       const media = await session.api.get<Media>(`media/${item.id}`);
       if (version !== selectionVersion) return;
+      await preloadBackdrop(media);
+      if (version !== selectionVersion) return;
       selectedMedia = media;
       if (media.media_type === 'tv') {
-        const parentItems = items;
         type SeasonSummary = { id: number; season_number: number };
-        type EpisodeSummary = {
-          id: number;
-          name: string;
-          thumbnail_url?: string | null;
-          episode: number;
-        };
         const seasons = await session.api.get<Array<SeasonSummary>>(
           `tv/${media.id}/season`
         );
-        const episodeGroups = await Promise.all(
-          seasons.map(async (season) => ({
-            season: season.season_number,
-            episodes: await session.api.get<Array<EpisodeSummary>>(
-              `season/${season.id}/episodes`
-            )
-          }))
-        );
         if (version !== selectionVersion) return;
-        items = episodeGroups.flatMap(({ season, episodes }) =>
-          episodes.map((episode) => ({
-            id: episode.id,
-            name: episode.name,
-            poster_path: episode.thumbnail_url,
-            season,
-            episode: episode.episode
-          }))
-        );
-        showParentItems = parentItems;
-        openShow = { id: media.id, name: media.name };
+        showSeasons = seasons.map((season) => ({ ...season, episodes: [] }));
+        showPresentation = {
+          seasonCount: media.season_count ?? seasons.length,
+          startYear: media.year,
+          endYear: media.end_year ?? undefined,
+          ongoing: media.ongoing ?? true
+        };
         selectedFile = null;
       } else {
         const files = await session.api.get<Array<MediaFile>>(
@@ -355,11 +369,46 @@
     }
   }
 
-  function closeShow() {
-    openShow = null;
-    items = showParentItems.length > 0 ? showParentItems : libraryItems;
-    showParentItems = [];
-    clearSelection();
+  async function chooseSeason(seasonNumber: number) {
+    const season = showSeasons.find(
+      (candidate) => candidate.season_number === seasonNumber
+    );
+    if (!season) return;
+    activeSeason = seasonNumber;
+    if (season.episodes.length === 0) {
+      type EpisodeSummary = {
+        id: number;
+        name: string;
+        thumbnail_url?: string | null;
+        episode: number;
+      };
+      const episodes = await session.api.get<Array<EpisodeSummary>>(
+        `season/${season.id}/episodes`
+      );
+      season.episodes = episodes.map((episode) => ({
+        id: episode.id,
+        name: episode.name,
+        poster_path: episode.thumbnail_url,
+        season: seasonNumber,
+        episode: episode.episode,
+        media_type: 'episode'
+      }));
+      showSeasons = [...showSeasons];
+    }
+    if (activeSeason === seasonNumber) {
+      items = season.episodes;
+      const firstEpisode = season.episodes[0];
+      if (firstEpisode) await selectItem(firstEpisode);
+      else clearSelection();
+    }
+  }
+
+  async function openSelectedShow() {
+    if (!selectedMedia || selectedMedia.media_type !== 'tv') return;
+    openShow = { id: selectedMedia.id, name: selectedMedia.name };
+    const firstSeason = showSeasons[0];
+    items = [];
+    if (firstSeason) await chooseSeason(firstSeason.season_number);
   }
 
   async function search(query: string) {
@@ -374,7 +423,9 @@
     searching = true;
     catalogLoading = true;
     openShow = null;
-    showParentItems = [];
+    showSeasons = [];
+    activeSeason = null;
+    showPresentation = null;
     clearSelection();
     try {
       const results = await session.api.get<Array<SearchResult>>('search', {
@@ -542,7 +593,7 @@
   aria-hidden={playbackActive}
 >
   {#if selectedMedia}
-    {#key selectedMedia.id}<MediaBackdrop media={selectedMedia} />{/key}
+    <MediaBackdrop media={selectedMedia} />
   {/if}
 
   <AppHeader
@@ -562,37 +613,47 @@
   />
 
   {#if selectedMedia}
-    {#key selectedMedia.id}
-      <MediaPresentation
-        media={selectedMedia}
-        playback={preparedPlayback}
-        playbackLoading={detailLoading ||
-          (!!selectedFile && !preparedPlayback && !playbackError)}
-        {playbackError}
-        {selectedVideo}
-        {selectedAudio}
-        {selectedSubtitle}
-        onvideo={(id) => (selectedVideo = id)}
-        onaudio={(id) => (selectedAudio = id)}
-        onsubtitle={(id) => (selectedSubtitle = id)}
-      />
-    {/key}
+    <MediaPresentation
+      media={selectedMedia}
+      playback={preparedPlayback}
+      playbackLoading={detailLoading ||
+        (!!selectedFile && !preparedPlayback && !playbackError)}
+      {playbackError}
+      {selectedVideo}
+      {selectedAudio}
+      {selectedSubtitle}
+      onvideo={(id) => (selectedVideo = id)}
+      onaudio={(id) => (selectedAudio = id)}
+      onsubtitle={(id) => (selectedSubtitle = id)}
+      show={showPresentation}
+    />
   {/if}
 
   {#if items.length > 0 || openShow}
-    <div class="browse">
+    <div class:show-detail={openShow !== null} class="browse">
       {#if openShow}
-        <button class="back-to-library" type="button" onclick={closeShow}>
-          <span aria-hidden="true">←</span>
-          All shows
-        </button>
-        <h2 class="rail-title">{openShow.name} episodes</h2>
+        <nav class="season-tabs" aria-label={`${openShow.name} seasons`}>
+          {#each showSeasons as season (season.id)}
+            <button
+              type="button"
+              class:active={activeSeason === season.season_number}
+              aria-current={activeSeason === season.season_number
+                ? 'page'
+                : undefined}
+              onclick={() => void chooseSeason(season.season_number)}
+              >Season {season.season_number}</button
+            >
+          {/each}
+        </nav>
       {/if}
       {#if items.length > 0}
         <MediaCarousel
           {items}
           {selectedId}
           playable={selectedFile !== null}
+          selectionAction={!openShow && selectedMedia?.media_type === 'tv'
+            ? 'open'
+            : 'play'}
           onselect={(item) => void selectItem(item)}
           onplay={launchPlayback}
         />
@@ -723,26 +784,32 @@
     inset: auto 0 0;
     z-index: 5;
   }
-  .back-to-library {
-    margin-left: var(--layout-gutter);
+  .browse.show-detail {
+    position: relative;
+    inset: auto;
+  }
+  .empty-show {
+    margin: 8px var(--layout-gutter) 0;
+  }
+  .season-tabs {
+    display: flex;
+    gap: clamp(18px, 2vw, 34px);
+    margin: 0 var(--layout-gutter) -4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .season-tabs button {
+    flex: none;
     padding: 0;
     border: 0;
     color: var(--color-fg-muted);
     background: transparent;
     font: inherit;
+    font-size: var(--text-lg);
     cursor: pointer;
   }
-  .back-to-library:hover,
-  .back-to-library:focus-visible {
+  .season-tabs button.active {
     color: var(--color-fg);
-  }
-  .rail-title,
-  .empty-show {
-    margin: 8px var(--layout-gutter) 0;
-  }
-  .rail-title {
-    font-size: var(--text-lg);
-    font-weight: 600;
   }
   .empty-show {
     padding-bottom: var(--space-6);
