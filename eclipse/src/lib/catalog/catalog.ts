@@ -5,7 +5,11 @@ import type {
   SearchResult
 } from '$lib/api/generated';
 
-export type CatalogItem = MediaSummary & { library_id?: number };
+export type CatalogItem = MediaSummary & {
+  library_id?: number;
+  season?: number;
+  episode?: number;
+};
 
 export function flattenLibraryMedia(
   groups: Record<string, Array<MediaSummary>>

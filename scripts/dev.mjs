@@ -25,6 +25,22 @@ function start(name, command, args, options = {}) {
   return child;
 }
 
+async function runBeforeStart(name, command, args) {
+  await new Promise((resolveDone, reject) => {
+    const child = spawn(command, args, { cwd: root, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolveDone();
+      else
+        reject(
+          new Error(
+            `${name} ${signal ? `stopped after ${signal}` : `exited with code ${code}`}`,
+          ),
+        );
+    });
+  });
+}
+
 function terminate(child, signal = "SIGTERM") {
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
@@ -54,6 +70,9 @@ if (release) {
     env: { ...process.env, DIM_BIND_ADDRESS: "0.0.0.0" },
   });
 } else {
+  // run.sh intentionally executes a prepared artifact. Development must rebuild first or a
+  // restart can silently run stale Rust while Vite serves current UI code.
+  await runBeforeStart("Dim backend build", "cargo", ["build", "--locked", "-p", "dim"]);
   start("Dim backend", resolve(root, "scripts/run.sh"), [], {
     env: { ...process.env, DIM_BIND_ADDRESS: "127.0.0.1" },
   });

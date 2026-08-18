@@ -331,15 +331,8 @@ impl TvMatcher {
             media,
         };
 
-        episode
-            .media
-            .insert_blind(&mut *tx)
-            .await
-            .inspect_err(|error| error!(?error, ?file, "Failed to insert media for episode."))
-            .map_err(Error::GetOrInsertMediaEpisode)?;
-
-        // NOTE: WE use to turn a episode into a movie here, not sure if necessary anymore.
-
+        // InsertableEpisode owns creation of its backing media row. Inserting it separately here
+        // leaves one orphan episode-shaped media row for every scanned file.
         let episode_id = episode
             .insert(&mut *tx)
             .await
@@ -367,15 +360,28 @@ impl TvMatcher {
         metadata: Vec<Metadata>,
     ) -> Result<Option<(MediaFile, (ExternalMedia, ExternalSeason, ExternalEpisode))>, super::Error>
     {
+        fn normalized_title(title: &str) -> String {
+            title
+                .chars()
+                .filter(|character| character.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
+        }
+
         for meta in metadata {
             match provider
                 .search(meta.name.as_ref(), meta.year.map(|x| x as _))
                 .await
             {
                 Ok(provided) => {
-                    let first = if let Some(x) = provided.first() {
-                        x.clone()
-                    } else {
+                    // A provider's first fuzzy result is not sufficient identity for a TV show:
+                    // searching an episode title such as "Pilot" previously selected an unrelated
+                    // series. Only continue with a title-equivalent show candidate.
+                    let expected_title = normalized_title(&meta.name);
+                    let Some(first) = provided
+                        .into_iter()
+                        .find(|candidate| normalized_title(&candidate.title) == expected_title)
+                    else {
                         continue;
                     };
 
@@ -446,22 +452,18 @@ impl MediaMatcher for TvMatcher {
             .into_query_show()
             .expect("Scanner needs a show provider");
 
-        let metadata_futs = work
-            .into_iter()
-            .map(|WorkUnit(file, metadata)| {
-                let provider_show = Arc::clone(&provider_show);
-                Self::lookup_metadata(provider_show, file, metadata)
-            })
-            .collect::<Vec<_>>();
-
-        let metadata = futures::future::join_all(metadata_futs).await;
-
-        for meta in metadata.into_iter() {
-            let meta = meta?;
-            if let Some((file, provided)) = meta {
-                self.match_to_result(tx, file, provided)
-                    .await
-                    .inspect_err(|error| error!(?error, "failed to match to result"))?;
+        // A TV lookup expands into show, season, and episode provider requests. Running an entire
+        // scan batch concurrently can overwhelm providers and commonly leaves only the first
+        // episode matched. Process files in stable scanner order instead.
+        for WorkUnit(file, metadata) in work {
+            match Self::lookup_metadata(Arc::clone(&provider_show), file, metadata).await {
+                Ok(Some((file, provided))) => {
+                    if let Err(error) = self.match_to_result(tx, file, provided).await {
+                        error!(?error, "Failed to persist TV episode match");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => error!(?error, "TV episode metadata lookup failed"),
             }
         }
 
@@ -477,27 +479,24 @@ impl MediaMatcher for TvMatcher {
         let provider_show: Arc<dyn ExternalQueryShow> = provider
             .into_query_show()
             .expect("Scanner needs a show provider");
-        let metadata_futs = work
-            .into_iter()
-            .map(|WorkUnit(file, metadata)| {
-                let provider_show = Arc::clone(&provider_show);
-                Self::lookup_metadata(provider_show, file, metadata)
-            })
-            .collect::<Vec<_>>();
-        let metadata = futures::future::join_all(metadata_futs)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, super::Error>>()?;
-
-        let mut lock = conn.writer().lock_owned().await;
-        let mut tx = dim_database::write_tx(&mut lock).await?;
-        for meta in metadata.into_iter().flatten() {
-            let (file, provided) = meta;
-            self.match_to_result(&mut tx, file, provided)
-                .await
-                .inspect_err(|error| error!(?error, "failed to match to result"))?;
+        for WorkUnit(file, metadata) in work {
+            let provided =
+                match Self::lookup_metadata(Arc::clone(&provider_show), file, metadata).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        error!(?error, "TV episode metadata lookup failed");
+                        continue;
+                    }
+                };
+            let mut lock = conn.writer().lock_owned().await;
+            let mut tx = dim_database::write_tx(&mut lock).await?;
+            if let Err(error) = self.match_to_result(&mut tx, provided.0, provided.1).await {
+                error!(?error, "Failed to persist TV episode match");
+                continue;
+            }
+            tx.commit().await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 

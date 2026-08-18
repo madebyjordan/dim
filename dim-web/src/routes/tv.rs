@@ -88,7 +88,8 @@ pub async fn get_season_episodes(
         FROM episode
         INNER JOIN _tblmedia on _tblmedia.id = episode.id
         LEFT JOIN assets ON assets.id = _tblmedia.backdrop
-        WHERE episode.seasonid = ?"#,
+        WHERE episode.seasonid = ?
+        ORDER BY episode.episode_ ASC"#,
         id
     ).fetch_all(&mut tx).await.unwrap_or_default();
 

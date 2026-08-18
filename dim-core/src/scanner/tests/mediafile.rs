@@ -117,7 +117,8 @@ async fn test_construct_mediafile() {
         super::super::insert_mediafiles(&mut conn, library, vec![tempdir.path().to_path_buf()])
             .await
             .expect("Rescanning existing files should not fail.");
-    assert!(rescan_work.is_empty());
+    assert_eq!(rescan_work.len(), files.len());
+    assert!(rescan_work.iter().all(|unit| unit.0.media_id.is_none()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -147,10 +148,13 @@ async fn rescan_keeps_metadata_aligned_after_existing_files_are_filtered() {
             .await
             .unwrap();
 
-    assert_eq!(work.len(), 1);
-    assert_eq!(work[0].0.target_file, files[1].to_string_lossy());
-    assert_eq!(work[0].1[0].name, "New Arrival");
-    assert_eq!(work[0].1[0].year, Some(2024));
+    assert_eq!(work.len(), 2);
+    assert_eq!(work[0].0.target_file, files[0].to_string_lossy());
+    assert_eq!(work[0].1[0].name, "Already Here");
+    assert_eq!(work[0].1[0].year, Some(1999));
+    assert_eq!(work[1].0.target_file, files[1].to_string_lossy());
+    assert_eq!(work[1].1[0].name, "New Arrival");
+    assert_eq!(work[1].1[0].year, Some(2024));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -191,12 +195,14 @@ async fn durable_rescan_of_existing_file_releases_writer_for_item_update() {
             Some(scan_id),
             None,
             super::super::ScanScope::Full,
+            false,
         ),
     )
     .await
     .expect("existing-file rescan deadlocked on the SQLite writer")
     .unwrap();
-    assert!(work.is_empty());
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].0.target_file, files[0].to_string_lossy());
 
     let item = sqlx::query_as::<_, (String, String, Option<String>)>(
         "SELECT stage, status, error_class FROM ingestion_item WHERE scan_id = ?",
@@ -205,14 +211,7 @@ async fn durable_rescan_of_existing_file_releases_writer_for_item_update() {
     .fetch_one(conn.read_ref())
     .await
     .unwrap();
-    assert_eq!(
-        item,
-        (
-            "commit".into(),
-            "skipped".into(),
-            Some("already_catalogued".into())
-        )
-    );
+    assert_eq!(item, ("commit".into(), "complete".into(), None));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -241,6 +240,7 @@ async fn durable_scan_counts_probe_failures() {
         Some(scan_id),
         None,
         super::super::ScanScope::Full,
+        false,
     )
     .await
     .unwrap();

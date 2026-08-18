@@ -44,6 +44,9 @@
   let libraries = $state<Array<Library>>([]);
   let activeLibraryId = $state<number | null>(null);
   let items = $state<Array<CatalogItem>>([]);
+  let libraryItems = $state<Array<CatalogItem>>([]);
+  let showParentItems = $state<Array<CatalogItem>>([]);
+  let openShow = $state<{ id: number; name: string } | null>(null);
   let selectedId = $state<number | null>(null);
   let selectedMedia = $state<Media | null>(null);
   let selectedFile = $state<MediaFile | null>(null);
@@ -96,7 +99,10 @@
         `library/${libraryId}/media`
       );
       if (activeLibraryId === libraryId && !searching) {
-        items = flattenLibraryMedia(groups);
+        libraryItems = flattenLibraryMedia(groups);
+        items = libraryItems;
+        showParentItems = [];
+        openShow = null;
       }
     } catch (cause) {
       if (activeLibraryId === libraryId && !searching) {
@@ -141,6 +147,8 @@
     if (!next) {
       activeLibraryId = null;
       items = [];
+      libraryItems = [];
+      showParentItems = [];
       catalogLoading = false;
       clearSelection();
       return;
@@ -164,6 +172,9 @@
     searching = false;
     activeLibraryId = library.id;
     items = [];
+    libraryItems = [];
+    showParentItems = [];
+    openShow = null;
     clearSelection();
     await loadLibraryMedia(library.id);
   }
@@ -288,13 +299,49 @@
     playbackError = null;
     detailLoading = true;
     try {
-      const [media, files] = await Promise.all([
-        session.api.get<Media>(`media/${item.id}`),
-        session.api.get<Array<MediaFile>>(`media/${item.id}/files`)
-      ]);
+      const media = await session.api.get<Media>(`media/${item.id}`);
       if (version !== selectionVersion) return;
       selectedMedia = media;
-      selectedFile = playableFile(media, files);
+      if (media.media_type === 'tv') {
+        const parentItems = items;
+        type SeasonSummary = { id: number; season_number: number };
+        type EpisodeSummary = {
+          id: number;
+          name: string;
+          thumbnail_url?: string | null;
+          episode: number;
+        };
+        const seasons = await session.api.get<Array<SeasonSummary>>(
+          `tv/${media.id}/season`
+        );
+        const episodeGroups = await Promise.all(
+          seasons.map(async (season) => ({
+            season: season.season_number,
+            episodes: await session.api.get<Array<EpisodeSummary>>(
+              `season/${season.id}/episodes`
+            )
+          }))
+        );
+        if (version !== selectionVersion) return;
+        items = episodeGroups.flatMap(({ season, episodes }) =>
+          episodes.map((episode) => ({
+            id: episode.id,
+            name: episode.name,
+            poster_path: episode.thumbnail_url,
+            season,
+            episode: episode.episode
+          }))
+        );
+        showParentItems = parentItems;
+        openShow = { id: media.id, name: media.name };
+        selectedFile = null;
+      } else {
+        const files = await session.api.get<Array<MediaFile>>(
+          `media/${item.id}/files`
+        );
+        if (version !== selectionVersion) return;
+        selectedFile = playableFile(media, files);
+      }
       detailLoading = false;
       if (selectedFile) void preparePlayback(selectedFile, version);
     } catch (cause) {
@@ -308,6 +355,13 @@
     }
   }
 
+  function closeShow() {
+    openShow = null;
+    items = showParentItems.length > 0 ? showParentItems : libraryItems;
+    showParentItems = [];
+    clearSelection();
+  }
+
   async function search(query: string) {
     const version = ++searchVersion;
     const normalized = query.trim();
@@ -319,6 +373,8 @@
     }
     searching = true;
     catalogLoading = true;
+    openShow = null;
+    showParentItems = [];
     clearSelection();
     try {
       const results = await session.api.get<Array<SearchResult>>('search', {
@@ -523,15 +579,26 @@
     {/key}
   {/if}
 
-  {#if items.length > 0}
+  {#if items.length > 0 || openShow}
     <div class="browse">
-      <MediaCarousel
-        {items}
-        {selectedId}
-        playable={selectedFile !== null}
-        onselect={(item) => void selectItem(item)}
-        onplay={launchPlayback}
-      />
+      {#if openShow}
+        <button class="back-to-library" type="button" onclick={closeShow}>
+          <span aria-hidden="true">←</span>
+          All shows
+        </button>
+        <h2 class="rail-title">{openShow.name} episodes</h2>
+      {/if}
+      {#if items.length > 0}
+        <MediaCarousel
+          {items}
+          {selectedId}
+          playable={selectedFile !== null}
+          onselect={(item) => void selectItem(item)}
+          onplay={launchPlayback}
+        />
+      {:else}
+        <p class="empty-show">No episodes have been indexed for this show.</p>
+      {/if}
     </div>
   {/if}
 
@@ -655,6 +722,31 @@
     position: absolute;
     inset: auto 0 0;
     z-index: 5;
+  }
+  .back-to-library {
+    margin-left: var(--layout-gutter);
+    padding: 0;
+    border: 0;
+    color: var(--color-fg-muted);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+  }
+  .back-to-library:hover,
+  .back-to-library:focus-visible {
+    color: var(--color-fg);
+  }
+  .rail-title,
+  .empty-show {
+    margin: 8px var(--layout-gutter) 0;
+  }
+  .rail-title {
+    font-size: var(--text-lg);
+    font-weight: 600;
+  }
+  .empty-show {
+    padding-bottom: var(--space-6);
+    color: var(--color-fg-muted);
   }
   .error {
     position: fixed;

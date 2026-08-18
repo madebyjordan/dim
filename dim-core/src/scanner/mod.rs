@@ -490,7 +490,16 @@ pub async fn insert_mediafiles(
     library_id: i64,
     dirs: Vec<impl AsRef<Path> + Send + 'static>,
 ) -> Result<Vec<WorkUnit>, Error> {
-    insert_mediafiles_for_scan(conn, library_id, dirs, None, None, ScanScope::Incremental).await
+    insert_mediafiles_for_scan(
+        conn,
+        library_id,
+        dirs,
+        None,
+        None,
+        ScanScope::Incremental,
+        false,
+    )
+    .await
 }
 
 async fn update_item(
@@ -533,6 +542,8 @@ async fn handle_assessment(
     scan_id: Option<i64>,
     root_id: Option<i64>,
     insertables: &mut Vec<(InsertableMediaFile, Vec<Metadata>)>,
+    existing_work: &mut Vec<WorkUnit>,
+    reprocess_existing: bool,
     (path, result, metadata): (
         PathBuf,
         Result<InsertableMediaFile, CreatorError>,
@@ -542,6 +553,10 @@ async fn handle_assessment(
     match result {
         Ok(insertable) => insertables.push((insertable, metadata)),
         Err(CreatorError::FileExists) => {
+            let existing = {
+                let mut tx = conn.read().begin().await?;
+                MediaFile::get_by_file(&mut tx, path.to_string_lossy().as_ref()).await?
+            };
             {
                 let mut lock = conn.writer().lock_owned().await;
                 let mut tx = dim_database::write_tx(&mut lock).await?;
@@ -551,6 +566,13 @@ async fn handle_assessment(
                     .execute(&mut tx)
                     .await?;
                 tx.commit().await?;
+            }
+            // Discovery and probing are intentionally skipped for catalogue rows, but an earlier
+            // metadata failure may have left the row unattached. Feed those rows back through the
+            // matcher so a rescan can recover every file instead of permanently skipping it.
+            if existing.media_id.is_none() || reprocess_existing {
+                existing_work.push(WorkUnit(existing, metadata));
+                return Ok(());
             }
             if let Some(scan_id) = scan_id {
                 update_item(
@@ -677,12 +699,14 @@ async fn insert_mediafiles_for_scan(
     scan_id: Option<i64>,
     root_id: Option<i64>,
     scope: ScanScope,
+    reprocess_existing: bool,
 ) -> Result<Vec<WorkUnit>, Error> {
     let (mut discovered, mut discovery_worker) = spawn_checked_discovery(dirs, scope);
     let mut discovery_stats = None;
     let mut instance = MediafileCreator::new(conn.clone(), library_id).await;
     let mut assessments = FuturesUnordered::new();
     let mut insertables = Vec::new();
+    let mut existing_work = Vec::new();
     let mut max_in_flight = 0;
 
     loop {
@@ -791,6 +815,8 @@ async fn insert_mediafiles_for_scan(
                 scan_id,
                 root_id,
                 &mut insertables,
+                &mut existing_work,
+                reprocess_existing,
                 outcome,
             )
             .await?;
@@ -812,6 +838,8 @@ async fn insert_mediafiles_for_scan(
             scan_id,
             root_id,
             &mut insertables,
+            &mut existing_work,
+            reprocess_existing,
             outcome,
         )
         .await?;
@@ -842,7 +870,7 @@ async fn insert_mediafiles_for_scan(
         .map(|(file, metadata)| (file.target_file, metadata))
         .collect::<HashMap<_, _>>();
 
-    let work = mediafiles
+    let mut work = mediafiles
         .into_iter()
         .map(|mfile| {
             let metadata = metadata_by_path
@@ -851,6 +879,8 @@ async fn insert_mediafiles_for_scan(
             WorkUnit(mfile, metadata)
         })
         .collect::<Vec<_>>();
+    work.append(&mut existing_work);
+    work.sort_by(|left, right| left.0.target_file.cmp(&right.0.target_file));
 
     if let Some(scan_id) = scan_id {
         let mut lock = conn.writer().lock_owned().await;
@@ -877,6 +907,109 @@ async fn insert_mediafiles_for_scan(
         tx.commit().await?;
     }
     Ok(work)
+}
+
+fn tv_metadata_candidates(
+    path: &Path,
+    roots: &[RootOutcome],
+    parsed: &[Metadata],
+) -> Vec<Metadata> {
+    let path = normalize_absolute(path).unwrap_or_else(|| path.to_path_buf());
+    let root = roots
+        .iter()
+        .filter_map(|root| root.normalized.as_deref())
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    let Some(root) = root else {
+        return parsed.to_vec();
+    };
+    let Some(show_directory) = path
+        .strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .map(|component| component.as_os_str())
+    else {
+        return parsed.to_vec();
+    };
+    let Some(folder_metadata) = parse_filename(Path::new(show_directory)) else {
+        return parsed.to_vec();
+    };
+
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let folder_name = show_directory.to_string_lossy();
+    let mut name_parts = folder_name.split_whitespace().collect::<Vec<_>>();
+    if name_parts.last().is_some_and(|part| {
+        part.strip_prefix('S')
+            .or_else(|| part.strip_prefix('s'))
+            .is_some_and(|season| !season.is_empty() && season.chars().all(|c| c.is_ascii_digit()))
+    }) {
+        name_parts.pop();
+    }
+    let normalized_folder_name = name_parts.join(" ");
+    if !normalized_folder_name.is_empty() {
+        for episode in parsed {
+            let candidate = Metadata {
+                name: normalized_folder_name.clone(),
+                year: folder_metadata
+                    .first()
+                    .and_then(|folder| folder.year)
+                    .or(episode.year),
+                season: episode.season,
+                episode: episode.episode,
+            };
+            if candidate.episode.is_some() && seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    for folder in folder_metadata {
+        for episode in parsed {
+            let candidate = Metadata {
+                name: folder.name.clone(),
+                year: folder.year.or(episode.year),
+                season: episode.season.or(folder.season),
+                episode: episode.episode,
+            };
+            if candidate.episode.is_some() && seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    for candidate in parsed {
+        if seen.insert(candidate.clone()) {
+            candidates.push(candidate.clone());
+        }
+    }
+    candidates
+}
+
+#[cfg(test)]
+mod tv_metadata_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn uses_show_folder_identity_with_episode_numbers_from_filename() {
+        let root = PathBuf::from("/media/shows");
+        let roots = vec![RootOutcome {
+            root: root.clone(),
+            normalized: Some(root),
+            authority: Some(RootAuthority::Authoritative),
+        }];
+        let parsed = parse_filename(Path::new("S01E02 - Cat's in the Bag....mkv")).unwrap();
+        let candidates = tv_metadata_candidates(
+            Path::new("/media/shows/Breaking Bad S01/S01E02 - Cat's in the Bag....mkv"),
+            &roots,
+            &parsed,
+        );
+
+        assert_eq!(candidates[0].name, "Breaking Bad");
+        assert_eq!(candidates[0].season, Some(1));
+        assert_eq!(candidates[0].episode, Some(2));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.name.contains("Cat")));
+    }
 }
 
 async fn reconcile_library(
@@ -1225,6 +1358,7 @@ async fn run_scan_custom(
             Some(scan_id),
             Some(root_id),
             scope,
+            matches!(scope, ScanScope::Full) && media_type == MediaType::Tv,
         )
         .await
         {
@@ -1273,6 +1407,12 @@ async fn run_scan_custom(
         }
     }
     let workunits_size = workunits.len();
+
+    if media_type == MediaType::Tv {
+        for work in &mut workunits {
+            work.1 = tv_metadata_candidates(Path::new(&work.0.target_file), &roots, &work.1);
+        }
+    }
 
     info!(
         library_id,

@@ -83,6 +83,16 @@
           onkeydown={(event) => handleKey(event, index)}
         >
           <LazyPoster src={imageUrl(item.poster_path)} alt={item.name} />
+          {#if item.episode !== undefined}
+            <span class="episode-label">
+              <strong
+                >S{String(item.season ?? 0).padStart(2, '0')} E{String(
+                  item.episode
+                ).padStart(2, '0')}</strong
+              >
+              <span>{item.name}</span>
+            </span>
+          {/if}
         </button>
         {#if selectedId === item.id && playable}
           <button
@@ -184,6 +194,26 @@
   .select:focus-visible {
     outline: 3px solid var(--color-fg);
     outline-offset: -6px;
+  }
+  .episode-label {
+    position: absolute;
+    inset: auto 0 0;
+    display: grid;
+    gap: 3px;
+    padding: 42px 14px 14px;
+    color: var(--color-fg);
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.92));
+    text-align: left;
+  }
+  .episode-label strong {
+    font-size: var(--text-xs);
+    letter-spacing: 0.05em;
+  }
+  .episode-label span {
+    overflow: hidden;
+    font-size: var(--text-sm);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .play {
     position: absolute;
