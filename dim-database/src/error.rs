@@ -13,3 +13,15 @@ impl From<sqlx::error::Error> for DatabaseError {
         Self::DatabaseError(e.into())
     }
 }
+
+impl DatabaseError {
+    pub fn is_unique_violation(&self) -> bool {
+        match self {
+            Self::DatabaseError(error) => error
+                .as_database_error()
+                .and_then(|error| error.code())
+                // SQLite's extended result codes for UNIQUE and PRIMARY KEY constraints.
+                .is_some_and(|code| matches!(code.as_ref(), "2067" | "1555")),
+        }
+    }
+}

@@ -213,6 +213,43 @@ async fn owner_can_browse_create_and_complete_an_initial_scan() {
     let id = created["id"].as_i64().unwrap();
     assert_eq!(created["scan_status"], "scanning");
 
+    // Retrying an identical create (for example after a lost response) returns the durable
+    // library instead of failing on the unique name/path constraints.
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/v1/library",
+            Some(&owner_token),
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["id"], id);
+
+    let other = test.root.join("Other media");
+    std::fs::create_dir_all(&other).unwrap();
+    let conflicting_body = serde_json::json!({
+        "name": "Family Movies",
+        "locations": [other.to_string_lossy()],
+        "media_type": "movie"
+    })
+    .to_string();
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/v1/library",
+            Some(&owner_token),
+            &conflicting_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
     let mut scan_started = false;
     let mut scan_stopped = false;
     while !scan_stopped {

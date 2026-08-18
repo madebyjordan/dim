@@ -183,6 +183,7 @@ enum CreateLibraryError {
     LocationNotDirectory,
     PermissionDenied,
     InvalidMediaType,
+    Conflict,
     Internal,
 }
 
@@ -224,6 +225,10 @@ impl IntoResponse for CreateLibraryError {
                 StatusCode::BAD_REQUEST,
                 "Choose either Movies or Shows for this library.",
             ),
+            Self::Conflict => (
+                StatusCode::CONFLICT,
+                "A library already uses that name or folder.",
+            ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Dim could not create the library.",
@@ -238,6 +243,7 @@ impl IntoResponse for CreateLibraryError {
             Self::LocationNotDirectory => "library_location_not_directory",
             Self::PermissionDenied => "library_location_forbidden",
             Self::InvalidMediaType => "invalid_media_type",
+            Self::Conflict => "library_conflict",
             Self::Internal => "internal_error",
         };
         crate::error::api_error(status, code, message)
@@ -351,11 +357,43 @@ pub async fn library_post(
         }
     };
 
+    // A client may retry after losing the response to a successful create. Treat the exact same
+    // library as idempotent instead of trapping the user behind the unique name/path constraints.
+    match Library::get_by_name(&mut tx, &new_library.name).await {
+        Ok(Some(existing)) => {
+            let mut existing_locations = existing.locations;
+            let mut requested_locations = new_library.locations.clone();
+            existing_locations.sort();
+            requested_locations.sort();
+            if !existing.hidden
+                && existing.media_type == new_library.media_type
+                && existing_locations == requested_locations
+            {
+                return Json(serde_json::json!({
+                    "id": existing.id,
+                    "scan_status": "scanning"
+                }))
+                .into_response();
+            }
+            return CreateLibraryError::Conflict.into_response();
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(?err, "Error checking for an existing library");
+            return CreateLibraryError::Internal.into_response();
+        }
+    }
+
     let id = match new_library.insert(&mut tx).await {
         Ok(id) => id,
         Err(err) => {
             tracing::error!(?err, "Error inserting library");
-            return CreateLibraryError::Internal.into_response();
+            return if err.is_unique_violation() {
+                CreateLibraryError::Conflict
+            } else {
+                CreateLibraryError::Internal
+            }
+            .into_response();
         }
     };
 
@@ -370,10 +408,13 @@ pub async fn library_post(
 
     let provider = metadata_provider(new_library.media_type);
 
-    if let Err(error) = spawn_library_scan(&state, id, Arc::clone(&provider)).await {
-        tracing::error!(?error, library_id = id, "Library scanner was not started");
-        return CreateLibraryError::Internal.into_response();
-    }
+    let scan_status =
+        if let Err(error) = spawn_library_scan(&state, id, Arc::clone(&provider)).await {
+            tracing::error!(?error, library_id = id, "Library scanner was not started");
+            "failed"
+        } else {
+            "scanning"
+        };
 
     let library = Library {
         id,
@@ -389,10 +430,11 @@ pub async fn library_post(
             library_id = id,
             "Filesystem watcher was not started"
         );
-        return CreateLibraryError::Internal.into_response();
     }
 
-    Json(serde_json::json!({ "id": id, "scan_status": "scanning" })).into_response()
+    // The durable library is the contract of this endpoint. Background worker startup is
+    // recoverable (manual scan/restart), so it must not turn a committed create into a false 500.
+    Json(serde_json::json!({ "id": id, "scan_status": scan_status })).into_response()
 }
 
 pub async fn library_patch(

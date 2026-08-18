@@ -151,6 +151,33 @@ impl Library {
         })
     }
 
+    /// Finds a library by its unique display name, including its indexed locations.
+    pub async fn get_by_name(
+        conn: &mut crate::Transaction<'_>,
+        name: &str,
+    ) -> Result<Option<Self>, DatabaseError> {
+        let row = sqlx::query_as::<_, (i64, String, MediaType, bool, bool)>(
+            "SELECT id, name, media_type, hidden, auto_scan FROM library WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&mut *conn)
+        .await?;
+
+        let Some((id, name, media_type, hidden, auto_scan)) = row else {
+            return Ok(None);
+        };
+        let locations = Self::get_locations(conn, id).await?;
+
+        Ok(Some(Self {
+            id,
+            name,
+            locations,
+            media_type,
+            hidden,
+            auto_scan,
+        }))
+    }
+
     pub async fn set_auto_scan(
         conn: &mut crate::Transaction<'_>,
         id: i64,
