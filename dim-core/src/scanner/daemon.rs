@@ -189,17 +189,39 @@ impl FsWatcher {
             }
         }
         batch.creates.extend(batch.rename_to.into_values());
+        let mut needs_reconciliation = false;
         for (from, to) in batch.renames.drain() {
             batch.creates.remove(&to);
             batch.removes.remove(&from);
-            self.handle_rename(&from, &to).await;
+            if to.exists() {
+                self.handle_rename(&from, &to).await;
+            } else {
+                // Editors and download clients commonly implement replacement as a rename whose
+                // destination has already moved again by the time the coalescing window closes.
+                // Treat its final filesystem state as authoritative instead of scanning a ghost.
+                needs_reconciliation |= self.mark_missing(&from).await;
+            }
         }
-        for path in batch.removes {
-            self.mark_missing(&path).await;
+
+        // notify's event kind describes an intermediate operation, not necessarily the path's
+        // state after an atomic save or a rapid remove/create pair. Resolve both sets against the
+        // filesystem after coalescing: an existing path is ingested, while a vanished catalogued
+        // path requests one full reconciliation so stale cards and TV parents are cleaned up.
+        let paths = batch
+            .creates
+            .into_iter()
+            .chain(batch.removes)
+            .collect::<HashSet<_>>();
+        for path in paths {
+            if path.exists() {
+                self.handle_create(path).await;
+            } else {
+                needs_reconciliation |= self.mark_missing(&path).await;
+            }
         }
-        // A directory event is reconciled as a subtree by the normal scanner.
-        for path in batch.creates {
-            self.handle_create(path).await;
+
+        if needs_reconciliation {
+            self.reconcile(locations).await;
         }
     }
 
@@ -229,12 +251,12 @@ impl FsWatcher {
         }
     }
 
-    async fn mark_missing(&mut self, path: &Path) {
+    async fn mark_missing(&mut self, path: &Path) -> bool {
         let Some(path) = path.to_str() else {
-            return;
+            return false;
         };
         let mut lock = self.conn.writer().lock_owned().await;
-        match dim_database::write_tx(&mut lock).await {
+        let changed = match dim_database::write_tx(&mut lock).await {
             Ok(mut tx) => {
                 let update = sqlx::query("UPDATE mediafile SET missing_since = COALESCE(missing_since, CURRENT_TIMESTAMP) WHERE library_id = ? AND (target_file = ? OR target_file LIKE ?)")
                     .bind(self.library_id)
@@ -242,14 +264,27 @@ impl FsWatcher {
                     .bind(format!("{path}/%"))
                     .execute(&mut tx)
                     .await;
-                if let Err(error) = update {
-                    error!(?error, ?path, "Failed to persist missing media state");
-                } else if let Err(error) = tx.commit().await {
-                    error!(?error, ?path, "Failed to commit missing media state");
+                match update {
+                    Err(error) => {
+                        error!(?error, ?path, "Failed to persist missing media state");
+                        false
+                    }
+                    Ok(result) => {
+                        if let Err(error) = tx.commit().await {
+                            error!(?error, ?path, "Failed to commit missing media state");
+                            false
+                        } else {
+                            result.rows_affected() > 0
+                        }
+                    }
                 }
             }
-            Err(error) => error!(?error, "Failed to open missing-media transaction"),
+            Err(error) => {
+                error!(?error, "Failed to open missing-media transaction");
+                false
+            }
         };
+        changed
     }
 
     async fn handle_rename(&mut self, from: &Path, to: &Path) {
