@@ -14,10 +14,14 @@ use crate::core::EventTx;
 
 use async_trait::async_trait;
 
+use dim_database::episode::InsertableEpisode;
 use dim_database::library::Library;
 use dim_database::library::MediaType;
+use dim_database::media::InsertableMedia;
 use dim_database::mediafile::InsertableMediaFile;
 use dim_database::mediafile::MediaFile;
+use dim_database::mediafile::UpdateMediaFile;
+use dim_database::season::InsertableSeason;
 
 use dim_extern_api::filename::Anitomy;
 use dim_extern_api::filename::CombinedExtractor;
@@ -453,6 +457,7 @@ pub fn parse_filenames(
     metadata
 }
 
+#[derive(Clone)]
 pub struct WorkUnit(pub MediaFile, pub Vec<Metadata>);
 
 /// Trait that must be implemented by a media matcher. Matchers are responsible for fetching their
@@ -570,7 +575,10 @@ async fn handle_assessment(
             // Discovery and probing are intentionally skipped for catalogue rows, but an earlier
             // metadata failure may have left the row unattached. Feed those rows back through the
             // matcher so a rescan can recover every file instead of permanently skipping it.
-            if existing.media_id.is_none() || reprocess_existing {
+            if existing.media_id.is_none()
+                || (reprocess_existing
+                    && existing.match_provenance.as_deref() == Some("local_filename"))
+            {
                 existing_work.push(WorkUnit(existing, metadata));
                 return Ok(());
             }
@@ -634,6 +642,97 @@ async fn handle_assessment(
             );
         }
     }
+    Ok(())
+}
+
+async fn attach_local_catalog(
+    tx: &mut dim_database::Transaction<'_>,
+    media_type: MediaType,
+    work: &WorkUnit,
+) -> Result<(), Error> {
+    let WorkUnit(file, metadata) = work;
+    let primary = metadata.first();
+    let now = chrono::Utc::now().to_string();
+    let media_id = match media_type {
+        MediaType::Movie => {
+            InsertableMedia {
+                library_id: file.library_id,
+                name: primary
+                    .map(|metadata| metadata.name.clone())
+                    .unwrap_or_else(|| file.raw_name.clone()),
+                year: primary.and_then(|metadata| metadata.year).or(file.raw_year),
+                added: now,
+                media_type: MediaType::Movie,
+                ..Default::default()
+            }
+            .lazy_insert(tx)
+            .await?
+        }
+        MediaType::Tv => {
+            let show_name = primary
+                .map(|metadata| metadata.name.clone())
+                .unwrap_or_else(|| file.raw_name.clone());
+            let show_id = InsertableMedia {
+                library_id: file.library_id,
+                name: show_name,
+                year: primary.and_then(|metadata| metadata.year).or(file.raw_year),
+                added: now.clone(),
+                media_type: MediaType::Tv,
+                ..Default::default()
+            }
+            .lazy_insert(tx)
+            .await?;
+            let season_number = primary
+                .and_then(|metadata| metadata.season)
+                .or(file.season)
+                .unwrap_or(0);
+            let season_id = InsertableSeason {
+                season_number,
+                added: now.clone(),
+                poster: None,
+            }
+            .insert(tx, show_id)
+            .await?;
+            let parsed_episode = primary
+                .and_then(|metadata| metadata.episode)
+                .or(file.episode);
+            let episode_number = match parsed_episode {
+                Some(episode) => episode,
+                None => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COALESCE(MAX(episode_), 0) + 1 FROM episode WHERE seasonid = ?",
+                    )
+                    .bind(season_id)
+                    .fetch_one(&mut **tx)
+                    .await?
+                }
+            };
+            InsertableEpisode {
+                media: InsertableMedia {
+                    library_id: file.library_id,
+                    name: file.raw_name.clone(),
+                    added: now,
+                    media_type: MediaType::Episode,
+                    ..Default::default()
+                },
+                seasonid: season_id,
+                episode: episode_number,
+            }
+            .insert(tx)
+            .await?
+        }
+        MediaType::Episode => unreachable!("libraries cannot be episode-typed"),
+    };
+
+    UpdateMediaFile {
+        media_id: Some(media_id),
+        metadata_provider: Some("local".into()),
+        match_provenance: Some("local_filename".into()),
+        match_confidence: Some(0.0),
+        ..Default::default()
+    }
+    .update(tx, file.id)
+    .await?;
     Ok(())
 }
 
@@ -988,6 +1087,55 @@ fn tv_metadata_candidates(
 mod tv_metadata_candidate_tests {
     use super::*;
 
+    async fn local_work(
+        media_type: MediaType,
+        name: &str,
+        season: Option<i64>,
+        episode: Option<i64>,
+    ) -> (dim_database::DbConnection, i64) {
+        let conn = dim_database::get_conn_memory().await.unwrap();
+        let mut lock = conn.writer().lock_owned().await;
+        let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+        let library_id = dim_database::library::InsertableLibrary {
+            name: format!("{media_type} library"),
+            locations: vec!["/media".into()],
+            media_type,
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let file_id = InsertableMediaFile {
+            library_id,
+            target_file: format!("/media/{name}.mkv"),
+            raw_name: name.into(),
+            season,
+            episode,
+            ..Default::default()
+        }
+        .insert(&mut tx)
+        .await
+        .unwrap();
+        let file = MediaFile::get_one(&mut tx, file_id).await.unwrap();
+        attach_local_catalog(
+            &mut tx,
+            media_type,
+            &WorkUnit(
+                file,
+                vec![Metadata {
+                    name: name.into(),
+                    year: None,
+                    season,
+                    episode,
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        drop(lock);
+        (conn, file_id)
+    }
+
     #[test]
     fn uses_show_folder_identity_with_episode_numbers_from_filename() {
         let root = PathBuf::from("/media/shows");
@@ -1009,6 +1157,31 @@ mod tv_metadata_candidate_tests {
         assert!(candidates
             .iter()
             .any(|candidate| candidate.name.contains("Cat")));
+    }
+
+    #[tokio::test]
+    async fn unmatched_movie_gets_a_playable_local_card() {
+        let (conn, file_id) = local_work(MediaType::Movie, "Family recording", None, None).await;
+        let mut tx = conn.read().begin().await.unwrap();
+        let file = MediaFile::get_one(&mut tx, file_id).await.unwrap();
+        let media = dim_database::media::Media::get(&mut tx, file.media_id.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(media.name, "Family recording");
+        assert_eq!(file.metadata_provider.as_deref(), Some("local"));
+        assert_eq!(file.match_provenance.as_deref(), Some("local_filename"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_tv_file_gets_a_local_episode_hierarchy() {
+        let (conn, file_id) = local_work(MediaType::Tv, "Unknown Show", Some(2), Some(4)).await;
+        let mut tx = conn.read().begin().await.unwrap();
+        let file = MediaFile::get_one(&mut tx, file_id).await.unwrap();
+        let episode = dim_database::episode::Episode::get_by_id(&mut tx, file.media_id.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(episode.episode, 4);
+        assert_eq!(episode.get_season_number(&mut tx).await.unwrap(), 2);
     }
 }
 
@@ -1358,7 +1531,7 @@ async fn run_scan_custom(
             Some(scan_id),
             Some(root_id),
             scope,
-            matches!(scope, ScanScope::Full) && media_type == MediaType::Tv,
+            matches!(scope, ScanScope::Full),
         )
         .await
         {
@@ -1435,6 +1608,7 @@ async fn run_scan_custom(
     // and match objects.
     heartbeat.stage("matching").await?;
     for unit in chunk_iter.into_iter() {
+        let fallback_units = unit.clone();
         let identities = unit
             .iter()
             .map(|work| (work.0.id, work.0.target_file.clone()))
@@ -1474,6 +1648,23 @@ async fn run_scan_custom(
                 Some(class)
             }
         };
+
+        // External metadata is enrichment, not admission. Any successfully probed file which
+        // remains unattached receives a local catalog identity and can be upgraded on a later scan.
+        {
+            let mut fallback_lock = conn.writer().lock_owned().await;
+            let mut fallback_tx = dim_database::write_tx(&mut fallback_lock).await?;
+            for work in &fallback_units {
+                if MediaFile::get_one(&mut fallback_tx, work.0.id)
+                    .await?
+                    .media_id
+                    .is_none()
+                {
+                    attach_local_catalog(&mut fallback_tx, media_type, work).await?;
+                }
+            }
+            fallback_tx.commit().await?;
+        }
 
         let matched = {
             let mut read_tx = conn.read().begin().await?;
