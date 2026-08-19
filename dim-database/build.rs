@@ -17,6 +17,14 @@ fn target_dir() -> PathBuf {
     }
 }
 
+fn database_url(path: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!("sqlite:{}", path.to_string_lossy().replace('\\', "/"))
+    } else {
+        format!("sqlite://{}", path.display())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Both values affect the absolute database path exported to SQLx. Tracking them prevents
@@ -27,10 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let target_dir = target_dir();
     fs::create_dir_all(&target_dir)?;
     let db_file = target_dir.join("dim_dev.db");
-    println!(
-        "cargo:rustc-env=DATABASE_URL=sqlite://{}",
-        db_file.display()
-    );
+    println!("cargo:rustc-env=DATABASE_URL={}", database_url(&db_file));
     println!(
         "cargo:warning=Generating {:?} from latest migrations.",
         db_file

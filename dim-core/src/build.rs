@@ -14,12 +14,17 @@ fn target_dir() -> PathBuf {
     }
 }
 
+fn database_url(path: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!("sqlite:{}", path.to_string_lossy().replace('\\', "/"))
+    } else {
+        format!("sqlite://{}", path.display())
+    }
+}
+
 fn main() {
     let db_file = target_dir().join("dim_dev.db");
-    println!(
-        "cargo:rustc-env=DATABASE_URL=sqlite://{}",
-        db_file.display()
-    );
+    println!("cargo:rustc-env=DATABASE_URL={}", database_url(&db_file));
 
     println!("cargo:rerun-if-changed=build.rs");
 }

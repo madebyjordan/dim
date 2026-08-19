@@ -73,6 +73,7 @@ fn path_io_error(operation: &str, path: &Path, source: io::Error) -> io::Error {
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
     let existed = path.exists();
     fs::create_dir_all(path)?;
     #[cfg(unix)]

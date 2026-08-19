@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -7,6 +8,8 @@ const source = resolve(root, "api-contract/openapi.json");
 const project = "eclipse";
 const target = resolve(root, project, "src/lib/api/generated.ts");
 const contract = JSON.parse(await readFile(source, "utf8"));
+const projectRequire = createRequire(resolve(root, project, "package.json"));
+const prettierCli = projectRequire.resolve("prettier/bin/prettier.cjs");
 
 function type(schema) {
   if (schema.$ref) return schema.$ref.split("/").at(-1);
@@ -33,14 +36,15 @@ const operations = Object.entries(contract.paths).flatMap(([path, item]) =>
   Object.entries(item).filter(([method]) => ["get", "post", "put", "patch", "delete"].includes(method)).map(([, operation]) => `  ${operation.operationId}: ${JSON.stringify(path)};`)
 ).join("\n");
 const unformatted = `// Generated from api-contract/openapi.json. Do not edit.\n\n${schemas}\n\nexport interface ApiOperations {\n${operations}\n}\n`;
-const output = execFileSync(resolve(root, project, "node_modules/.bin/prettier"), ["--stdin-filepath", target], {
+const output = execFileSync(process.execPath, [prettierCli, "--stdin-filepath", target], {
+  cwd: resolve(root, project),
   input: unformatted,
   encoding: "utf8",
 });
 
 if (process.argv.includes("--check")) {
   const current = await readFile(target, "utf8").catch(() => "");
-  if (current !== output) {
+  if (current.replaceAll("\r\n", "\n") !== output.replaceAll("\r\n", "\n")) {
     console.error(
       `Generated API types are stale. Run the contract:generate script in ${project}.`
     );

@@ -7,7 +7,7 @@ DIM_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$DIM_ROOT_DIR"
 
 echo "Running installer and release command tests..."
-node --test ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs ./scripts/release.test.mjs
+node --test ./scripts/generate-api-contract.test.mjs ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/rust-dependencies.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs ./scripts/release.test.mjs
 
 echo "Running Eclipse frontend tests..."
 corepack pnpm --dir eclipse test

@@ -16,6 +16,14 @@ fn target_dir() -> PathBuf {
     }
 }
 
+fn database_url(path: &Path) -> String {
+    if cfg!(windows) {
+        format!("sqlite:{}", path.to_string_lossy().replace('\\', "/"))
+    } else {
+        format!("sqlite://{}", path.display())
+    }
+}
+
 fn git_value(args: &[&str], fallback: &str) -> String {
     Command::new("git")
         .args(args)
@@ -35,10 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
 
     let db_file = target_dir().join("dim_dev.db");
-    println!(
-        "cargo:rustc-env=DATABASE_URL=sqlite://{}",
-        db_file.display()
-    );
+    println!("cargo:rustc-env=DATABASE_URL={}", database_url(&db_file));
 
     println!(
         "cargo:rustc-env=GIT_TAG={}",

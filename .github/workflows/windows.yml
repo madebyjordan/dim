@@ -9,6 +9,7 @@ on:
       - "install.cmd"
       - "install.sh"
       - "scripts/**"
+      - "api-contract/**"
       - "eclipse/**"
       - "dim*/**"
       - "vendor/nightfall/**"
@@ -26,6 +27,7 @@ on:
       - "install.cmd"
       - "install.sh"
       - "scripts/**"
+      - "api-contract/**"
       - "eclipse/**"
       - "dim*/**"
       - "vendor/nightfall/**"
@@ -79,7 +81,7 @@ jobs:
             throw "Corepack did not resolve repository-pinned pnpm 11.9.0."
           }
       - name: Test clean Corepack, native launcher, and toolchain detection
-        run: node --test ./scripts/package-manager.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-toolchain.test.mjs
+        run: node --test ./scripts/package-manager.test.mjs ./scripts/rust-dependencies.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-toolchain.test.mjs
       - name: Exercise native launcher from CMD
         shell: cmd
         run: install.cmd --demo --platform windows --yes --no-start
@@ -89,6 +91,16 @@ jobs:
       - name: Run the native Windows installer
         shell: pwsh
         run: .\install.cmd --platform windows --yes --no-start
+      - name: Verify pinned Windows Rust release build
+        run: |
+          rustc --version --verbose
+          cargo build --release --locked
+      - name: Test Windows-style Prettier resolution
+        run: node --test ./scripts/generate-api-contract.test.mjs
+      - name: Exercise API contract check and production frontend build
+        run: |
+          node ./scripts/generate-api-contract.mjs --check
+          corepack pnpm --dir eclipse build
       - name: Start Eclipse and verify readiness
         run: |
           set -euo pipefail

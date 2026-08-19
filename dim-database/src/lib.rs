@@ -84,6 +84,7 @@ async fn open_file_pool(path: &str) -> sqlx::Result<DbConnection> {
 /// over the legacy process-global accessor.
 pub async fn open_at(path: impl AsRef<std::path::Path>) -> sqlx::Result<DbConnection> {
     let path_ref = path.as_ref();
+    #[cfg(unix)]
     let existed = path_ref.exists();
     let path = path_ref.to_string_lossy();
     let pool = open_file_pool(&path).await?;
