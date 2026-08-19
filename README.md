@@ -7,27 +7,28 @@ Eclipse is a self-media manager based on Dim. Eclipse builds on Dim's foundation
 
 ## Running from source
 
-Dim's supported source-development path is macOS or Linux. The repository pins Rust in
+Dim's supported source-development path is macOS, Linux, or native Windows through Git Bash. The repository pins Rust in
 `rust-toolchain.toml`, Node.js in `.nvmrc`, and pnpm in the root and Eclipse package manifests.
 
 ### Guided setup
 
-On macOS or Linux, launch the interactive installer from the repository root:
+Launch the interactive installer from the repository root:
 
 ```sh
 ./install.sh
 ```
 
-The first prompt asks you to choose macOS, Linux, or Windows. The macOS and Linux paths check the
-required platform, Node, Rust, media, and native build tooling; offer focused recovery for anything
-missing; run the existing locked release bootstrap; and can start Eclipse and open
+The first prompt asks you to choose macOS, Linux, or Windows. Each platform path checks the
+required platform, Node, Rust, media, and native build tooling; offers focused recovery for anything
+missing; runs the existing locked release bootstrap; and can start Eclipse and open
 [http://localhost:8000](http://localhost:8000). Existing configuration and FFmpeg/FFprobe entries
 are never replaced. Linux can automatically install documented native requirements on Debian and
-Ubuntu through `apt-get`; other distributions receive exact missing-package guidance. Windows is a
-visible choice but is not yet implemented in the guided installer.
+Ubuntu through `apt-get`; other distributions receive exact missing-package guidance. On Windows,
+run the command from Git Bash rather than WSL. The installer uses WinGet for supported dependency
+recovery and may prompt for administrator approval when Visual Studio Build Tools are installed.
 
-For automation, the same entrypoint accepts `--platform macos`, `--platform linux`, `--yes`, and
-`--no-start`. These options do not change the normal interactive flow.
+For automation, the same entrypoint accepts `--platform macos`, `--platform linux`, `--platform
+windows`, `--yes`, and `--no-start`. These options do not change the normal interactive flow.
 
 To preview and test the complete interactive experience without inspecting the system, installing
 dependencies, building Eclipse, starting processes, writing files, or opening a browser, use:
@@ -63,6 +64,23 @@ sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libssl-dev sqlite3 ffmpeg
 ```
 
+On Windows, install Git for Windows first and open Git Bash in the repository. The wizard can use
+WinGet (provided by Microsoft App Installer) to recover supported packages with these identifiers:
+
+```text
+Git.Git
+OpenJS.NodeJS.LTS (24.19.0)
+Rustlang.Rustup
+Gyan.FFmpeg
+SQLite.SQLite
+Microsoft.VisualStudio.2022.BuildTools
+```
+
+The Visual Studio package is installed with the `Microsoft.VisualStudio.Workload.VCTools`
+workload and recommended components. A newly installed package may require Git Bash to be reopened
+before its updated `PATH` is visible. WSL is a separate Linux environment and is not used by the
+native Windows installer.
+
 Enable the repository-pinned pnpm command once after installing Node.js:
 
 ```sh
@@ -91,7 +109,10 @@ pnpm build --release
 pnpm dev --release
 ```
 
-The bootstrap script installs the locked frontend dependencies, builds the embedded web UI, links the system FFmpeg tools under `utils/`, and builds the Rust workspace. It never overwrites existing FFmpeg binaries in `utils/`.
+The bootstrap script installs the locked frontend dependencies, builds the embedded web UI, places
+the system FFmpeg tools under `utils/`, and builds the Rust workspace. Unix systems use links;
+Windows uses `.exe` copies because creating symbolic links can require elevated privileges or
+Developer Mode. It never overwrites existing FFmpeg binaries in `utils/`.
 
 ### Test
 

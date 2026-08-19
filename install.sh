@@ -244,7 +244,9 @@ media_tool_is_supported() {
 check_existing_media_tools() {
     local path
     for path in "$ECLIPSE_ROOT/utils/ffmpeg" "$ECLIPSE_ROOT/utils/ffprobe" \
-        "$ECLIPSE_ROOT/target/release/utils/ffmpeg" "$ECLIPSE_ROOT/target/release/utils/ffprobe"; do
+        "$ECLIPSE_ROOT/utils/ffmpeg.exe" "$ECLIPSE_ROOT/utils/ffprobe.exe" \
+        "$ECLIPSE_ROOT/target/release/utils/ffmpeg" "$ECLIPSE_ROOT/target/release/utils/ffprobe" \
+        "$ECLIPSE_ROOT/target/release/utils/ffmpeg.exe" "$ECLIPSE_ROOT/target/release/utils/ffprobe.exe"; do
         if [[ -e "$path" || -L "$path" ]]; then
             if [[ ! -x "$path" ]]; then
                 failure "$path already exists but is not executable. Eclipse will not replace it."
@@ -535,6 +537,161 @@ check_linux_requirements() {
     run_step "System requirements ready" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
 }
 
+windows_build_tools_available() {
+    command_available powershell.exe || return 1
+    powershell.exe -NoProfile -NonInteractive -Command '
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (-not (Test-Path $vswhere)) { exit 1 }
+        $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath
+        if ($installation) { exit 0 }
+        exit 1
+    ' >/dev/null 2>&1
+}
+
+refresh_windows_path() {
+    [[ "$ECLIPSE_DEMO" == false ]] || return 0
+    local windows_paths=(
+        "${CARGO_HOME:-$HOME/.cargo}/bin"
+        "/c/Program Files/nodejs"
+        "/c/Program Files/Git/cmd"
+    )
+    if command_available cygpath; then
+        if [[ -n "${LOCALAPPDATA:-}" ]]; then
+            windows_paths+=("$(cygpath -u "$LOCALAPPDATA")/Microsoft/WinGet/Links")
+        fi
+    fi
+    local path
+    for path in "${windows_paths[@]}"; do
+        [[ -d "$path" ]] && export PATH="$path:$PATH"
+    done
+    return 0
+}
+
+collect_windows_requirements() {
+    ECLIPSE_MISSING=()
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        if [[ "$ECLIPSE_DEMO_REQUIREMENTS_RESOLVED" == false ]]; then
+            ECLIPSE_MISSING=(ffmpeg buildtools)
+        fi
+        return 0
+    fi
+    command_available git || ECLIPSE_MISSING+=(git)
+    node_is_supported || ECLIPSE_MISSING+=(node)
+    command_available corepack || ECLIPSE_MISSING+=(corepack)
+    if ! command_available rustup || ! command_available cargo || ! command_available rustc; then ECLIPSE_MISSING+=(rustup); fi
+    if ! media_tool_is_supported ffmpeg || ! media_tool_is_supported ffprobe; then ECLIPSE_MISSING+=(ffmpeg); fi
+    command_available sqlite3 || ECLIPSE_MISSING+=(sqlite)
+    windows_build_tools_available || ECLIPSE_MISSING+=(buildtools)
+    command_available curl || ECLIPSE_MISSING+=(curl)
+}
+
+print_windows_requirement_failure() {
+    local item=$1
+    case "$item" in
+        git) printf '  • Git for Windows — WinGet package: Git.Git\n' ;;
+        node)
+            if command_available node; then
+                printf '  • Node.js 24.19.0 or newer in the 24.x line — found %s; WinGet package: OpenJS.NodeJS.LTS\n' "$(node --version 2>/dev/null || printf unknown)"
+            else
+                printf '  • Node.js 24.19.0 or newer in the 24.x line — WinGet package: OpenJS.NodeJS.LTS\n'
+            fi
+            ;;
+        corepack) printf '  • Corepack — reinstall supported Node.js, or install Corepack and run: corepack enable pnpm\n' ;;
+        rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — WinGet package: Rustlang.Rustup\n' ;;
+        ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — WinGet package: Gyan.FFmpeg\n' ;;
+        sqlite) printf '  • SQLite tools — WinGet package: SQLite.SQLite\n' ;;
+        buildtools) printf '  • Visual Studio 2022 C++ Build Tools with the VCTools workload and Windows SDK — WinGet package: Microsoft.VisualStudio.2022.BuildTools\n' ;;
+        curl) printf '  • curl — included with current Windows releases; restore it or add curl.exe to PATH\n' ;;
+    esac
+}
+
+winget_install_packages() {
+    local package
+    for package in "$@"; do
+        case "$package" in
+            OpenJS.NodeJS.LTS)
+                winget install --id "$package" --exact --version 24.19.0 --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+                ;;
+            Microsoft.VisualStudio.2022.BuildTools)
+                winget install --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --override "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+                ;;
+            *)
+                winget install --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+                ;;
+        esac
+    done
+}
+
+install_winget_requirements() {
+    local packages=()
+    local item
+    local package
+    for item in "${ECLIPSE_MISSING[@]}"; do
+        package=""
+        case "$item" in
+            git) package=Git.Git ;;
+            node) package=OpenJS.NodeJS.LTS ;;
+            rustup) package=Rustlang.Rustup ;;
+            ffmpeg) package=Gyan.FFmpeg ;;
+            sqlite) package=SQLite.SQLite ;;
+            buildtools) package=Microsoft.VisualStudio.2022.BuildTools ;;
+        esac
+        [[ -n "$package" ]] || continue
+        [[ " ${packages[*]:-} " == *" $package "* ]] || packages+=("$package")
+    done
+
+    [[ -n "${packages[*]:-}" ]] || return 0
+    if [[ "$ECLIPSE_DEMO" == false ]] && ! command_available winget; then
+        return 1
+    fi
+    confirm "Install missing Windows packages (${packages[*]})?" || return 1
+    if [[ "$ECLIPSE_DEMO" == false ]]; then
+        notice "Windows may request administrator approval for system packages"
+    fi
+    run_step "Installed Windows requirements" winget_install_packages "${packages[@]}" || return 1
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=true
+    else
+        refresh_windows_path
+    fi
+}
+
+resolve_windows_requirements() {
+    local recoverable=false
+    local item
+    for item in "${ECLIPSE_MISSING[@]}"; do
+        case "$item" in git|node|rustup|ffmpeg|sqlite|buildtools) recoverable=true ;; esac
+    done
+
+    if [[ "$ECLIPSE_DEMO" == false && "$recoverable" == true ]] && ! command_available winget; then
+        printf '\n'
+        failure "Automatic Windows recovery requires WinGet."
+        printf 'Install or update Microsoft App Installer, then run this Git Bash command again:\n  %s\n\nMissing requirements:\n' "$ECLIPSE_ROOT/install.sh"
+        for item in "${ECLIPSE_MISSING[@]}"; do print_windows_requirement_failure "$item"; done
+        return 1
+    fi
+
+    install_winget_requirements || true
+    collect_windows_requirements
+    if [[ ${#ECLIPSE_MISSING[@]} -gt 0 ]]; then
+        printf '\n'
+        failure "Some requirements still need attention:"
+        for item in "${ECLIPSE_MISSING[@]}"; do print_windows_requirement_failure "$item"; done
+        printf '\nWinGet installations can require a new terminal before PATH changes are visible. Reopen Git Bash, then run:\n  %s\n' "$ECLIPSE_ROOT/install.sh"
+        return 1
+    fi
+}
+
+check_windows_requirements() {
+    printf '%sChecking requirements%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+    collect_windows_requirements
+    if [[ ${#ECLIPSE_MISSING[@]} -gt 0 ]]; then
+        warning "Found ${#ECLIPSE_MISSING[@]} missing or unsupported requirement(s)."
+        resolve_windows_requirements || return 1
+    fi
+    run_step "System requirements ready" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
+}
+
 wait_for_eclipse() {
     local pid=$1
     local attempts=0
@@ -620,6 +777,9 @@ open_browser() {
         linux)
             command_available xdg-open && xdg-open "$url"
             ;;
+        windows)
+            command_available cmd.exe && MSYS2_ARG_CONV_EXCL='*' cmd.exe /c start "" "$url"
+            ;;
         *) return 1 ;;
     esac
 }
@@ -687,9 +847,27 @@ install_platform_linux() {
 }
 
 install_platform_windows() {
+    if [[ "$ECLIPSE_DEMO" == false ]]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) ;;
+            *)
+                failure "The native Windows installer must be run from Git Bash on Windows. WSL is not required or supported for this path."
+                return 1
+                ;;
+        esac
+    fi
+
     notice "Windows selected"
-    warning "Windows installation is not supported by this first installer release."
-    printf 'Use macOS for the guided setup today. No changes were made.\n'
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        notice "Demo mode — all checks and actions are simulated"
+    fi
+    printf '\n'
+    refresh_windows_path
+    if [[ "$ECLIPSE_DEMO" == false ]]; then
+        check_existing_media_tools
+    fi
+    check_windows_requirements
+    install_and_offer_start
 }
 
 printf '\n%sEclipse Setup%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"

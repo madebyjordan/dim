@@ -97,13 +97,114 @@ function run(item, args) {
   });
 }
 
-test("Windows support state is explicit and does not bootstrap", () => {
+function prepareWindows(item) {
+  executable(resolve(item.bin, "uname"), '#!/usr/bin/env bash\necho MINGW64_NT-10.0\n');
+  writeFileSync(resolve(item.repository, "buildtools.ready"), "ready\n");
+  executable(
+    resolve(item.bin, "powershell.exe"),
+    '#!/usr/bin/env bash\n[[ -f "$INSTALL_FIXTURE/buildtools.ready" || "${WINDOWS_BUILD_TOOLS_READY:-}" == "1" ]]\n',
+  );
+}
+
+test("Windows setup validates requirements and reuses the release bootstrap", () => {
   const item = fixture();
   try {
-    const result = run(item, ["--platform", "windows"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Windows installation is not supported/);
+    prepareWindows(item);
+    const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Windows selected/);
+    assert.match(result.stdout, /System requirements ready/);
+    assert.match(result.stdout, /Eclipse installed/);
+    assert.match(result.stdout, /Existing configuration preserved/);
+    assert.equal(readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"), "--release\n");
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("Windows rejects non-native shells without suggesting WSL", () => {
+  const item = fixture();
+  try {
+    const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /run from Git Bash on Windows/);
+    assert.match(result.stderr, /WSL is not required or supported/);
     assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("Windows recovers supported requirements through exact WinGet packages", () => {
+  const item = fixture();
+  try {
+    prepareWindows(item);
+    rmSync(resolve(item.repository, "buildtools.ready"));
+    executable(
+      resolve(item.bin, "winget"),
+      `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$INSTALL_FIXTURE/winget.args"
+case " $* " in
+  *" Gyan.FFmpeg "*)
+    printf '#!/usr/bin/env bash\necho "ffmpeg version 8.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
+    cp "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
+    chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
+    ;;
+  *" SQLite.SQLite "*)
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$INSTALL_FIXTURE_BIN/sqlite3"
+    chmod +x "$INSTALL_FIXTURE_BIN/sqlite3"
+    ;;
+  *" OpenJS.NodeJS.LTS "*)
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$INSTALL_FIXTURE_BIN/node"
+    chmod +x "$INSTALL_FIXTURE_BIN/node"
+    ;;
+  *" Microsoft.VisualStudio.2022.BuildTools "*) touch "$INSTALL_FIXTURE/buildtools.ready" ;;
+esac
+`,
+    );
+    rmSync(resolve(item.bin, "ffmpeg"));
+    rmSync(resolve(item.bin, "ffprobe"));
+    rmSync(resolve(item.bin, "node"));
+
+    const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Install missing Windows packages/);
+    assert.match(result.stdout, /Installed Windows requirements/);
+    const winget = readFileSync(resolve(item.repository, "winget.args"), "utf8");
+    assert.match(winget, /--id Gyan\.FFmpeg --exact/);
+    assert.match(winget, /--id OpenJS\.NodeJS\.LTS --exact --version 24\.19\.0/);
+    assert.match(winget, /--id Microsoft\.VisualStudio\.2022\.BuildTools --exact/);
+    assert.match(winget, /Microsoft\.VisualStudio\.Workload\.VCTools/);
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("Windows starts Eclipse, waits for readiness, and uses the native browser command", () => {
+  const item = fixture();
+  try {
+    prepareWindows(item);
+    executable(
+      resolve(item.repository, "scripts/run.sh"),
+      '#!/usr/bin/env bash\ntouch "$INSTALL_FIXTURE/ready"\nexec /bin/sleep 300\n',
+    );
+    executable(
+      resolve(item.bin, "curl"),
+      '#!/usr/bin/env bash\n[[ -f "$INSTALL_FIXTURE/ready" ]]\n',
+    );
+    executable(
+      resolve(item.bin, "cmd.exe"),
+      '#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "$INSTALL_FIXTURE/cmd.args"\n',
+    );
+    const result = run(item, ["--platform", "windows", "--yes"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Eclipse started/);
+    assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8123/);
+    assert.match(readFileSync(resolve(item.repository, "cmd.args"), "utf8"), /\/c start  http:\/\/localhost:8123/);
+    const pid = Number(
+      readFileSync(resolve(item.repository, "target/release/eclipse.pid"), "utf8"),
+    );
+    process.kill(pid, "SIGTERM");
   } finally {
     item.cleanup();
   }
@@ -366,6 +467,33 @@ test("Linux demo exercises apt recovery and the shared launch flow without actio
   }
 });
 
+test("Windows demo exercises WinGet recovery and launch without Windows actions", () => {
+  const item = fixture();
+  try {
+    for (const command of ["winget", "powershell.exe", "cmd.exe"]) {
+      executable(
+        resolve(item.bin, command),
+        `#!/usr/bin/env bash\ntouch "$INSTALL_FIXTURE/${command}.invoked"\nexit 99\n`,
+      );
+    }
+    const result = run(item, ["--demo", "--platform", "windows", "--yes"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Windows selected/);
+    assert.match(result.stdout, /Found 2 missing or unsupported requirement/);
+    assert.match(result.stdout, /Install missing Windows packages \(Gyan\.FFmpeg Microsoft\.VisualStudio\.2022\.BuildTools\)/);
+    assert.match(result.stdout, /System requirements ready/);
+    assert.match(result.stdout, /Eclipse installed/);
+    assert.match(result.stdout, /▶ Start Eclipse\n  Exit/);
+    assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8000/);
+    for (const marker of ["winget.invoked", "powershell.exe.invoked", "cmd.exe.invoked"]) {
+      assert.equal(existsSync(resolve(item.repository, marker)), false, marker);
+    }
+    assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
+  } finally {
+    item.cleanup();
+  }
+});
+
 test("the default entrypoint begins with the platform selector", () => {
   const source = readFileSync(resolve(root, "install.sh"), "utf8");
   const setup = source.lastIndexOf("printf '\\n%sEclipse Setup%s");
@@ -377,6 +505,8 @@ test("the default entrypoint begins with the platform selector", () => {
   assert.match(source, /select_menu "Which platform are you installing on\?" false "macOS" "Linux" "Windows"/);
   assert.match(source, /select_menu "" true "Start Eclipse" "Exit"/);
   assert.match(source, /linux\)\s+command_available xdg-open && xdg-open/);
+  assert.match(source, /windows\)\s+command_available cmd\.exe && MSYS2_ARG_CONV_EXCL='\*' cmd\.exe \/c start/);
+  assert.match(source, /sqlite\) package=SQLite\.SQLite/);
   assert.match(source, /▶/);
   assert.match(source, /printf '▶ %s\\n' "\$\{options\[\$index\]\}"/);
   assert.doesNotMatch(source, /printf '%s▶/);

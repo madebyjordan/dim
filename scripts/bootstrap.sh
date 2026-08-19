@@ -6,6 +6,11 @@ DIM_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ECLIPSE_RELEASE_BUILD=false
 DIM_SKIP_UI=false
 DIM_SKIP_RUST=false
+DIM_WINDOWS=false
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) DIM_WINDOWS=true ;;
+esac
 
 usage() {
     echo "Usage: ./scripts/bootstrap.sh [--release] [--skip-ui] [--skip-rust]"
@@ -79,13 +84,23 @@ link_media_tool() {
             exit 1
         fi
         echo "Using existing $destination"
+    elif [[ "$DIM_WINDOWS" == true ]]; then
+        cp "$source_path" "$destination"
+        chmod +x "$destination"
     else
         ln -s "$source_path" "$destination"
     fi
 }
 
-link_media_tool ffmpeg "utils/ffmpeg"
-link_media_tool ffprobe "utils/ffprobe"
+DIM_MEDIA_SUFFIX=""
+DIM_BINARY_SUFFIX=""
+if [[ "$DIM_WINDOWS" == true ]]; then
+    DIM_MEDIA_SUFFIX=".exe"
+    DIM_BINARY_SUFFIX=".exe"
+fi
+
+link_media_tool ffmpeg "utils/ffmpeg$DIM_MEDIA_SUFFIX"
+link_media_tool ffprobe "utils/ffprobe$DIM_MEDIA_SUFFIX"
 
 if [[ "$DIM_SKIP_UI" == false ]]; then
     echo "Installing locked Eclipse dependencies..."
@@ -101,11 +116,11 @@ if [[ "$DIM_SKIP_RUST" == false ]]; then
     export CARGO_TARGET_DIR="$DIM_CARGO_TARGET_DIR"
 
     DIM_CARGO_ARGS=(build --locked)
-    DIM_BINARY_PATH="$CARGO_TARGET_DIR/debug/dim"
+    DIM_BINARY_PATH="$CARGO_TARGET_DIR/debug/dim$DIM_BINARY_SUFFIX"
     DIM_RUN_SUFFIX=""
     if [[ "$ECLIPSE_RELEASE_BUILD" == true ]]; then
         DIM_CARGO_ARGS+=(--release)
-        DIM_BINARY_PATH="$CARGO_TARGET_DIR/release/dim"
+        DIM_BINARY_PATH="$CARGO_TARGET_DIR/release/dim$DIM_BINARY_SUFFIX"
         DIM_RUN_SUFFIX=" --release"
     fi
 
@@ -114,8 +129,8 @@ if [[ "$DIM_SKIP_RUST" == false ]]; then
 
     if [[ "$ECLIPSE_RELEASE_BUILD" == true ]]; then
         mkdir -p "$CARGO_TARGET_DIR/release/utils"
-        link_media_tool ffmpeg "$CARGO_TARGET_DIR/release/utils/ffmpeg"
-        link_media_tool ffprobe "$CARGO_TARGET_DIR/release/utils/ffprobe"
+        link_media_tool ffmpeg "$CARGO_TARGET_DIR/release/utils/ffmpeg$DIM_MEDIA_SUFFIX"
+        link_media_tool ffprobe "$CARGO_TARGET_DIR/release/utils/ffprobe$DIM_MEDIA_SUFFIX"
     fi
 
     echo "Dim is ready at $DIM_BINARY_PATH"

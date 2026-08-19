@@ -5,6 +5,11 @@ set -euo pipefail
 DIM_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DIM_PROFILE=debug
 DIM_RUNTIME_DIR="$DIM_ROOT_DIR"
+DIM_BINARY_SUFFIX=""
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) DIM_BINARY_SUFFIX=".exe" ;;
+esac
 
 if [[ "${1:-}" == "--release" ]]; then
     DIM_PROFILE=release
@@ -16,7 +21,7 @@ if [[ "$DIM_CARGO_TARGET_DIR" != /* ]]; then
     DIM_CARGO_TARGET_DIR="$DIM_ROOT_DIR/$DIM_CARGO_TARGET_DIR"
 fi
 
-DIM_BINARY="$DIM_CARGO_TARGET_DIR/$DIM_PROFILE/dim"
+DIM_BINARY="$DIM_CARGO_TARGET_DIR/$DIM_PROFILE/dim$DIM_BINARY_SUFFIX"
 if [[ "$DIM_PROFILE" == release ]]; then
     DIM_RUNTIME_DIR="$DIM_CARGO_TARGET_DIR/release"
 fi

@@ -12,13 +12,13 @@ use crate::utils::ffpath;
 
 lazy_static::lazy_static! {
     pub static ref STREAMING_SESSION: Arc<RwLock<HashMap<String, HashMap<String, String>>>> = Arc::new(RwLock::new(HashMap::new()));
-    pub static ref FFMPEG_BIN: &'static str = Box::leak(ffpath("utils/ffmpeg").into_boxed_str());
+    pub static ref FFMPEG_BIN: &'static str = Box::leak(ffpath(if cfg!(windows) { "utils/ffmpeg.exe" } else { "utils/ffmpeg" }).into_boxed_str());
     pub static ref FFPROBE_BIN: &'static str = {
         cfg_if! {
             if #[cfg(test)] {
                 "ffprobe"
             } else {
-                Box::leak(ffpath("utils/ffprobe").into_boxed_str())
+                Box::leak(ffpath(if cfg!(windows) { "utils/ffprobe.exe" } else { "utils/ffprobe" }).into_boxed_str())
             }
         }
     };
