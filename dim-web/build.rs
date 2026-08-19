@@ -29,6 +29,11 @@ fn git_value(args: &[&str], fallback: &str) -> String {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Both values affect the absolute database path exported to SQLx. Tracking them prevents
+    // Cargo from reusing stale build-script output when a checkout or target directory moves.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+
     let db_file = target_dir().join("dim_dev.db");
     println!(
         "cargo:rustc-env=DATABASE_URL=sqlite://{}",

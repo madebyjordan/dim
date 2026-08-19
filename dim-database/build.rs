@@ -19,6 +19,11 @@ fn target_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Both values affect the absolute database path exported to SQLx. Tracking them prevents
+    // Cargo from reusing stale build-script output when a checkout or target directory moves.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+
     let target_dir = target_dir();
     fs::create_dir_all(&target_dir)?;
     let db_file = target_dir.join("dim_dev.db");
