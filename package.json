@@ -6,7 +6,7 @@
     "build": "./scripts/bootstrap.sh",
     "dev": "node ./scripts/dev.mjs",
     "test": "./scripts/test.sh",
-    "test:installer": "node --test ./scripts/install.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs",
+    "test:installer": "node --test ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs",
     "release:initial": "node ./scripts/release.mjs initial",
     "release:patch": "node ./scripts/release.mjs patch",
     "release:minor": "node ./scripts/release.mjs minor",

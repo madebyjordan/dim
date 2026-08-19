@@ -56,15 +56,30 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-      - name: Enable Corepack
-        run: corepack enable
       - name: Install Windows media and SQLite tools
         shell: pwsh
         run: choco install ffmpeg sqlite -y --no-progress
-      - name: Test native launcher and toolchain detection
-        run: node --test ./scripts/windows-launcher.test.mjs ./scripts/windows-toolchain.test.mjs
+      - name: Mask any globally installed pnpm command
+        shell: pwsh
+        run: |
+          $mask = Join-Path $env:RUNNER_TEMP "eclipse-no-global-pnpm"
+          New-Item -ItemType Directory -Force $mask | Out-Null
+          "@echo off`r`necho Direct pnpm invocation is disabled in Windows installer CI. 1>&2`r`nexit /b 86" |
+            Set-Content -Encoding Ascii (Join-Path $mask "pnpm.cmd")
+          $mask | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Verify Corepack is the only usable pnpm entrypoint
+        shell: pwsh
+        run: |
+          pnpm --version
+          if ($LASTEXITCODE -ne 86) {
+            throw "The direct pnpm sentinel was not used."
+          }
+          $version = corepack pnpm --version
+          if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne "11.9.0") {
+            throw "Corepack did not resolve repository-pinned pnpm 11.9.0."
+          }
+      - name: Test clean Corepack, native launcher, and toolchain detection
+        run: node --test ./scripts/package-manager.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-toolchain.test.mjs
       - name: Exercise native launcher from CMD
         shell: cmd
         run: install.cmd --demo --platform windows --yes --no-start

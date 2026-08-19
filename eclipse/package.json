@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite dev",
-    "build": "pnpm contract:check && vite build",
+    "build": "corepack pnpm contract:check && vite build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "contract:generate": "node ../scripts/generate-api-contract.mjs",
