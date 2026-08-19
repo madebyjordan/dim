@@ -10,6 +10,24 @@ Eclipse is a self-media manager based on Dim. Eclipse builds on Dim's foundation
 Dim's supported source-development path is macOS or Linux. The repository pins Rust in
 `rust-toolchain.toml`, Node.js in `.nvmrc`, and pnpm in the root and Eclipse package manifests.
 
+### Guided setup
+
+On macOS, launch the interactive installer from the repository root:
+
+```sh
+./install.sh
+```
+
+The first prompt asks you to choose macOS, Linux, or Windows. The macOS path checks the required
+Apple, Homebrew, Node, Rust, media, and native build tooling; offers focused recovery for anything
+missing; runs the existing locked release bootstrap; and can start Eclipse and open
+[http://localhost:8000](http://localhost:8000). Existing configuration and FFmpeg/FFprobe entries
+are never replaced. Linux and Windows are visible choices but are not yet implemented in the
+guided installer.
+
+For automation, the same entrypoint accepts `--platform macos`, `--yes`, and `--no-start`. These
+options do not change the normal interactive flow.
+
 ### Prerequisites
 
 - Git
