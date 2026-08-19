@@ -6,6 +6,7 @@ on:
     branches: [master]
     paths:
       - ".github/workflows/windows.yml"
+      - "install.cmd"
       - "install.sh"
       - "scripts/**"
       - "eclipse/**"
@@ -22,6 +23,7 @@ on:
     branches: [master]
     paths:
       - ".github/workflows/windows.yml"
+      - "install.cmd"
       - "install.sh"
       - "scripts/**"
       - "eclipse/**"
@@ -61,10 +63,17 @@ jobs:
       - name: Install Windows media and SQLite tools
         shell: pwsh
         run: choco install ffmpeg sqlite -y --no-progress
-      - name: Test installer and Windows script boundaries
-        run: corepack pnpm test:installer
+      - name: Test native launcher and toolchain detection
+        run: node --test ./scripts/windows-launcher.test.mjs ./scripts/windows-toolchain.test.mjs
+      - name: Exercise native launcher from CMD
+        shell: cmd
+        run: install.cmd --demo --platform windows --yes --no-start
+      - name: Exercise native launcher from PowerShell
+        shell: pwsh
+        run: .\install.cmd --demo --platform windows --yes --no-start
       - name: Run the native Windows installer
-        run: ./install.sh --platform windows --yes --no-start
+        shell: pwsh
+        run: .\install.cmd --platform windows --yes --no-start
       - name: Start Eclipse and verify readiness
         run: |
           set -euo pipefail

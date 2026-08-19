@@ -17,6 +17,8 @@ ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=false
 ECLIPSE_MENU_SELECTION=0
 ECLIPSE_LOG=""
 ECLIPSE_STEP_PID=""
+ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL=""
+ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="toolchain-inconclusive"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     ECLIPSE_BOLD=$'\033[1m'
@@ -39,6 +41,7 @@ fi
 usage() {
     cat <<'EOF'
 Usage: ./install.sh [--demo] [--platform macos|linux|windows] [--yes] [--no-start]
+Windows CMD or PowerShell: install.cmd [--demo] [--platform windows] [--yes] [--no-start]
 
 Without --platform, Eclipse Setup starts with an interactive platform selector.
 Demo mode runs the same flow with deterministic fake checks and no system changes.
@@ -79,13 +82,21 @@ notice() { printf '%s›%s %s\n' "$ECLIPSE_BLUE" "$ECLIPSE_RESET" "$*"; }
 warning() { printf '%s!%s %s\n' "$ECLIPSE_YELLOW" "$ECLIPSE_RESET" "$*"; }
 failure() { printf '%s✗%s %s\n' "$ECLIPSE_RED" "$ECLIPSE_RESET" "$*" >&2; }
 
+setup_command() {
+    if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+        printf 'install.cmd'
+    else
+        printf '%s/install.sh' "$ECLIPSE_ROOT"
+    fi
+}
+
 cancel_install() {
     printf '\n' >&2
     if [[ -n "$ECLIPSE_STEP_PID" ]] && kill -0 "$ECLIPSE_STEP_PID" 2>/dev/null; then
         kill "$ECLIPSE_STEP_PID" 2>/dev/null || true
         wait "$ECLIPSE_STEP_PID" 2>/dev/null || true
     fi
-    failure "Setup cancelled. Run $ECLIPSE_ROOT/install.sh whenever you are ready to continue."
+    failure "Setup cancelled. Run $(setup_command) whenever you are ready to continue."
     exit 130
 }
 
@@ -250,7 +261,7 @@ check_existing_media_tools() {
         if [[ -e "$path" || -L "$path" ]]; then
             if [[ ! -x "$path" ]]; then
                 failure "$path already exists but is not executable. Eclipse will not replace it."
-                printf 'Repair or remove that specific file, then run %s again.\n' "$ECLIPSE_ROOT/install.sh" >&2
+                printf 'Repair or remove that specific file, then run %s again.\n' "$(setup_command)" >&2
                 return 1
             fi
         fi
@@ -537,15 +548,37 @@ check_linux_requirements() {
     run_step "System requirements ready" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
 }
 
-windows_build_tools_available() {
-    command_available powershell.exe || return 1
-    powershell.exe -NoProfile -NonInteractive -Command '
-        $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-        if (-not (Test-Path $vswhere)) { exit 1 }
-        $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath
-        if ($installation) { exit 0 }
-        exit 1
-    ' >/dev/null 2>&1
+detect_windows_toolchain() {
+    local detector="$ECLIPSE_ROOT/scripts/windows-toolchain.ps1"
+    local result
+    local status
+    if ! command_available powershell.exe; then
+        ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL="PowerShell is unavailable, so the MSVC compiler and Windows SDK could not be checked"
+        ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="toolchain-inconclusive"
+        return 0
+    fi
+    if command_available cygpath; then
+        detector=$(cygpath -w "$detector")
+    fi
+    if ! result=$(MSYS2_ARG_CONV_EXCL='*' powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$detector" 2>/dev/null); then
+        ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL="The Windows toolchain detector could not run"
+        ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="toolchain-inconclusive"
+        return 0
+    fi
+    result=${result//$'\r'/}
+    status=${result%%|*}
+    if [[ "$result" == *"|"* ]]; then
+        ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL=${result#*|}
+    else
+        ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL="The Windows toolchain detector returned an unexpected result"
+    fi
+    case "$status" in
+        ready) ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="ready" ;;
+        missing-build-tools) ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="buildtools" ;;
+        missing-vctools) ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="vctools" ;;
+        missing-sdk) ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="windowssdk" ;;
+        *) ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="toolchain-inconclusive" ;;
+    esac
 }
 
 refresh_windows_path() {
@@ -581,7 +614,8 @@ collect_windows_requirements() {
     if ! command_available rustup || ! command_available cargo || ! command_available rustc; then ECLIPSE_MISSING+=(rustup); fi
     if ! media_tool_is_supported ffmpeg || ! media_tool_is_supported ffprobe; then ECLIPSE_MISSING+=(ffmpeg); fi
     command_available sqlite3 || ECLIPSE_MISSING+=(sqlite)
-    windows_build_tools_available || ECLIPSE_MISSING+=(buildtools)
+    detect_windows_toolchain
+    [[ "$ECLIPSE_WINDOWS_TOOLCHAIN_STATUS" == ready ]] || ECLIPSE_MISSING+=("$ECLIPSE_WINDOWS_TOOLCHAIN_STATUS")
     command_available curl || ECLIPSE_MISSING+=(curl)
 }
 
@@ -600,7 +634,10 @@ print_windows_requirement_failure() {
         rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — WinGet package: Rustlang.Rustup\n' ;;
         ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — WinGet package: Gyan.FFmpeg\n' ;;
         sqlite) printf '  • SQLite tools — WinGet package: SQLite.SQLite\n' ;;
-        buildtools) printf '  • Visual Studio 2022 C++ Build Tools with the VCTools workload and Windows SDK — WinGet package: Microsoft.VisualStudio.2022.BuildTools\n' ;;
+        buildtools) printf '  • Visual Studio 2022 C++ Build Tools, MSVC and Windows SDK were not found — WinGet package: Microsoft.VisualStudio.2022.BuildTools\n' ;;
+        vctools) printf '  • Visual Studio is installed, but the MSVC x64 compiler/VCTools component is missing. In Visual Studio Installer, choose Modify and add Desktop development with C++.\n' ;;
+        windowssdk) printf '  • MSVC is installed, but a usable Windows SDK is missing. In Visual Studio Installer, choose Modify and add a current Windows SDK.\n' ;;
+        toolchain-inconclusive) printf '  • Visual Studio detection was inconclusive — %s. Diagnose with: powershell -NoProfile -File .\\scripts\\windows-toolchain.ps1\n' "$ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL" ;;
         curl) printf '  • curl — included with current Windows releases; restore it or add curl.exe to PATH\n' ;;
     esac
 }
@@ -666,7 +703,7 @@ resolve_windows_requirements() {
     if [[ "$ECLIPSE_DEMO" == false && "$recoverable" == true ]] && ! command_available winget; then
         printf '\n'
         failure "Automatic Windows recovery requires WinGet."
-        printf 'Install or update Microsoft App Installer, then run this Git Bash command again:\n  %s\n\nMissing requirements:\n' "$ECLIPSE_ROOT/install.sh"
+        printf 'Install or update Microsoft App Installer, then run this command again:\n  install.cmd\n\nMissing requirements:\n'
         for item in "${ECLIPSE_MISSING[@]}"; do print_windows_requirement_failure "$item"; done
         return 1
     fi
@@ -677,7 +714,7 @@ resolve_windows_requirements() {
         printf '\n'
         failure "Some requirements still need attention:"
         for item in "${ECLIPSE_MISSING[@]}"; do print_windows_requirement_failure "$item"; done
-        printf '\nWinGet installations can require a new terminal before PATH changes are visible. Reopen Git Bash, then run:\n  %s\n' "$ECLIPSE_ROOT/install.sh"
+        printf '\nWinGet installations can require a new terminal before PATH changes are visible. Open a new CMD or PowerShell window, then run:\n  install.cmd\n'
         return 1
     fi
 }
@@ -802,7 +839,11 @@ install_and_offer_start() {
     if [[ $ECLIPSE_MENU_SELECTION -eq 0 ]]; then
         start_eclipse
     else
-        printf 'Eclipse was not started. Start it later with:\n  %s --release\n' "$ECLIPSE_ROOT/scripts/run.sh"
+        if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+            printf 'Eclipse was not started. Start it later from CMD or PowerShell with:\n  install.cmd --platform windows --yes\n'
+        else
+            printf 'Eclipse was not started. Start it later with:\n  %s --release\n' "$ECLIPSE_ROOT/scripts/run.sh"
+        fi
     fi
 }
 
@@ -851,7 +892,7 @@ install_platform_windows() {
         case "$(uname -s)" in
             MINGW*|MSYS*|CYGWIN*) ;;
             *)
-                failure "The native Windows installer must be run from Git Bash on Windows. WSL is not required or supported for this path."
+                failure "Launch the Windows installer with install.cmd from CMD or PowerShell, or run install.sh from Git Bash. WSL is not required or supported."
                 return 1
                 ;;
         esac

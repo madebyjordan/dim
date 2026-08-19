@@ -44,7 +44,7 @@ function fixture() {
   executable(resolve(bin, "rustc"));
   executable(resolve(bin, "cc"));
   executable(resolve(bin, "c++"));
-  executable(resolve(bin, "uname"), '#!/usr/bin/env bash\necho Darwin\n');
+  executable(resolve(bin, "uname"), "#!/usr/bin/env bash\necho Darwin\n");
   executable(
     resolve(bin, "rustup"),
     '#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "$INSTALL_FIXTURE/rustup.args"\n',
@@ -98,11 +98,22 @@ function run(item, args) {
 }
 
 function prepareWindows(item) {
-  executable(resolve(item.bin, "uname"), '#!/usr/bin/env bash\necho MINGW64_NT-10.0\n');
+  executable(
+    resolve(item.bin, "uname"),
+    "#!/usr/bin/env bash\necho MINGW64_NT-10.0\n",
+  );
   writeFileSync(resolve(item.repository, "buildtools.ready"), "ready\n");
   executable(
     resolve(item.bin, "powershell.exe"),
-    '#!/usr/bin/env bash\n[[ -f "$INSTALL_FIXTURE/buildtools.ready" || "${WINDOWS_BUILD_TOOLS_READY:-}" == "1" ]]\n',
+    `#!/usr/bin/env bash
+if [[ -n "\${WINDOWS_TOOLCHAIN_RESULT:-}" ]]; then
+  printf '%s\\n' "$WINDOWS_TOOLCHAIN_RESULT"
+elif [[ -f "$INSTALL_FIXTURE/buildtools.ready" ]]; then
+  echo 'ready|MSVC compiler and Windows SDK detected'
+else
+  echo 'missing-build-tools|No Visual Studio installation or MSVC compiler was found'
+fi
+`,
   );
 }
 
@@ -116,7 +127,10 @@ test("Windows setup validates requirements and reuses the release bootstrap", ()
     assert.match(result.stdout, /System requirements ready/);
     assert.match(result.stdout, /Eclipse installed/);
     assert.match(result.stdout, /Existing configuration preserved/);
-    assert.equal(readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"), "--release\n");
+    assert.equal(
+      readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"),
+      "--release\n",
+    );
   } finally {
     item.cleanup();
   }
@@ -127,7 +141,7 @@ test("Windows rejects non-native shells without suggesting WSL", () => {
   try {
     const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /run from Git Bash on Windows/);
+    assert.match(result.stderr, /install\.cmd from CMD or PowerShell/);
     assert.match(result.stderr, /WSL is not required or supported/);
     assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
   } finally {
@@ -170,10 +184,19 @@ esac
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Install missing Windows packages/);
     assert.match(result.stdout, /Installed Windows requirements/);
-    const winget = readFileSync(resolve(item.repository, "winget.args"), "utf8");
+    const winget = readFileSync(
+      resolve(item.repository, "winget.args"),
+      "utf8",
+    );
     assert.match(winget, /--id Gyan\.FFmpeg --exact/);
-    assert.match(winget, /--id OpenJS\.NodeJS\.LTS --exact --version 24\.19\.0/);
-    assert.match(winget, /--id Microsoft\.VisualStudio\.2022\.BuildTools --exact/);
+    assert.match(
+      winget,
+      /--id OpenJS\.NodeJS\.LTS --exact --version 24\.19\.0/,
+    );
+    assert.match(
+      winget,
+      /--id Microsoft\.VisualStudio\.2022\.BuildTools --exact/,
+    );
     assert.match(winget, /Microsoft\.VisualStudio\.Workload\.VCTools/);
   } finally {
     item.cleanup();
@@ -200,9 +223,15 @@ test("Windows starts Eclipse, waits for readiness, and uses the native browser c
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Eclipse started/);
     assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8123/);
-    assert.match(readFileSync(resolve(item.repository, "cmd.args"), "utf8"), /\/c start  http:\/\/localhost:8123/);
+    assert.match(
+      readFileSync(resolve(item.repository, "cmd.args"), "utf8"),
+      /\/c start  http:\/\/localhost:8123/,
+    );
     const pid = Number(
-      readFileSync(resolve(item.repository, "target/release/eclipse.pid"), "utf8"),
+      readFileSync(
+        resolve(item.repository, "target/release/eclipse.pid"),
+        "utf8",
+      ),
     );
     process.kill(pid, "SIGTERM");
   } finally {
@@ -210,17 +239,85 @@ test("Windows starts Eclipse, waits for readiness, and uses the native browser c
   }
 });
 
+test("Windows accepts a capable toolchain without invoking recovery", () => {
+  const item = fixture();
+  try {
+    prepareWindows(item);
+    executable(
+      resolve(item.bin, "winget"),
+      '#!/usr/bin/env bash\ntouch "$INSTALL_FIXTURE/winget.invoked"\nexit 99\n',
+    );
+    const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(existsSync(resolve(item.repository, "winget.invoked")), false);
+  } finally {
+    item.cleanup();
+  }
+});
+
+for (const [status, expected] of [
+  [
+    "missing-vctools|Visual Studio detected, but the MSVC x64 compiler and VCTools component were not found",
+    /Desktop development with C\+\+/,
+  ],
+  [
+    "missing-sdk|MSVC compiler detected, but no usable Windows SDK headers and x64 libraries were found",
+    /current Windows SDK/,
+  ],
+  [
+    "inconclusive|Visual Studio components were registered, but the MSVC compiler could not be verified",
+    /detection was inconclusive/,
+  ],
+]) {
+  test(`Windows reports ${status.split("|")[0]} without automatic Visual Studio recovery`, () => {
+    const item = fixture();
+    try {
+      prepareWindows(item);
+      executable(
+        resolve(item.bin, "winget"),
+        '#!/usr/bin/env bash\ntouch "$INSTALL_FIXTURE/winget.invoked"\nexit 99\n',
+      );
+      const result = spawnSync(
+        "/bin/bash",
+        ["./install.sh", "--platform", "windows", "--yes", "--no-start"],
+        {
+          cwd: item.repository,
+          env: {
+            ...process.env,
+            ...item.env,
+            WINDOWS_TOOLCHAIN_RESULT: status,
+          },
+          encoding: "utf8",
+        },
+      );
+      assert.notEqual(result.status, 0);
+      assert.match(result.stdout, expected);
+      assert.match(result.stdout, /install\.cmd/);
+      assert.doesNotMatch(result.stdout, /\/c\/Users|Reopen Git Bash/);
+      assert.equal(
+        existsSync(resolve(item.repository, "winget.invoked")),
+        false,
+      );
+    } finally {
+      item.cleanup();
+    }
+  });
+}
+
 test("Linux setup validates requirements and reuses the release bootstrap", () => {
   const item = fixture();
   try {
-    executable(resolve(item.bin, "uname"), '#!/usr/bin/env bash\necho Linux\n');
+    executable(resolve(item.bin, "uname"), "#!/usr/bin/env bash\necho Linux\n");
     const result = run(item, ["--platform", "linux", "--yes", "--no-start"]);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Linux selected/);
     assert.match(result.stdout, /System requirements ready/);
     assert.match(result.stdout, /Eclipse installed/);
     assert.match(result.stdout, /Existing configuration preserved/);
-    assert.equal(readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"), "--release\n");
+    assert.equal(
+      readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"),
+      "--release\n",
+    );
     assert.match(
       readFileSync(resolve(item.repository, "rustup.args"), "utf8"),
       /toolchain install 1\.93\.1.*--profile minimal/,
@@ -233,7 +330,7 @@ test("Linux setup validates requirements and reuses the release bootstrap", () =
 test("Linux recovers documented native packages with apt-get", () => {
   const item = fixture();
   try {
-    executable(resolve(item.bin, "uname"), '#!/usr/bin/env bash\necho Linux\n');
+    executable(resolve(item.bin, "uname"), "#!/usr/bin/env bash\necho Linux\n");
     executable(
       resolve(item.bin, "sudo"),
       '#!/usr/bin/env bash\nif [[ "${1:-}" == "-v" ]]; then exit 0; fi\nif [[ "${1:-}" == "-n" ]]; then shift; fi\nexec "$@"\n',
@@ -256,7 +353,10 @@ fi
 
     const result = run(item, ["--platform", "linux", "--yes", "--no-start"]);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stdout, /Install missing Debian\/Ubuntu packages \(ffmpeg pkg-config libssl-dev\)/);
+    assert.match(
+      result.stdout,
+      /Install missing Debian\/Ubuntu packages \(ffmpeg pkg-config libssl-dev\)/,
+    );
     assert.match(result.stdout, /Installed Linux requirements/);
     const apt = readFileSync(resolve(item.repository, "apt.args"), "utf8");
     assert.match(apt, /^update$/m);
@@ -269,7 +369,7 @@ fi
 test("Linux gives distribution-specific guidance when apt-get is unavailable", () => {
   const item = fixture();
   try {
-    executable(resolve(item.bin, "uname"), '#!/usr/bin/env bash\necho Linux\n');
+    executable(resolve(item.bin, "uname"), "#!/usr/bin/env bash\necho Linux\n");
     rmSync(resolve(item.bin, "ffmpeg"));
     rmSync(resolve(item.bin, "ffprobe"));
     rmSync(resolve(item.bin, "pkg-config"));
@@ -286,13 +386,19 @@ test("Linux gives distribution-specific guidance when apt-get is unavailable", (
 test("Linux reports a lone unsupported Node version without invoking apt-get", () => {
   const item = fixture();
   try {
-    executable(resolve(item.bin, "uname"), '#!/usr/bin/env bash\necho Linux\n');
-    executable(resolve(item.bin, "node"), '#!/usr/bin/env bash\necho v22.0.0\nexit 1\n');
+    executable(resolve(item.bin, "uname"), "#!/usr/bin/env bash\necho Linux\n");
+    executable(
+      resolve(item.bin, "node"),
+      "#!/usr/bin/env bash\necho v22.0.0\nexit 1\n",
+    );
     const result = run(item, ["--platform", "linux", "--yes", "--no-start"]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Some requirements still need attention/);
     assert.match(result.stdout, /Node\.js 24\.19\.0 or newer/);
-    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /unbound variable/);
+    assert.doesNotMatch(
+      `${result.stdout}\n${result.stderr}`,
+      /unbound variable/,
+    );
   } finally {
     item.cleanup();
   }
@@ -301,11 +407,17 @@ test("Linux reports a lone unsupported Node version without invoking apt-get", (
 test("macOS setup reuses the release bootstrap and preserves user-owned files", () => {
   const item = fixture();
   try {
-    const config = resolve(item.repository, "target/release/config/config.toml");
+    const config = resolve(
+      item.repository,
+      "target/release/config/config.toml",
+    );
     const ffmpeg = resolve(item.repository, "utils/ffmpeg");
     const result = run(item, ["--platform", "macos", "--yes", "--no-start"]);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.equal(readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"), "--release\n");
+    assert.equal(
+      readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"),
+      "--release\n",
+    );
     assert.match(
       readFileSync(resolve(item.repository, "rustup.args"), "utf8"),
       /toolchain install 1\.93\.1.*--profile minimal/,
@@ -325,7 +437,10 @@ test("macOS setup reuses the release bootstrap and preserves user-owned files", 
     assert.match(result.stdout, /Eclipse is ready\./);
     assert.match(result.stdout, /scripts\/run\.sh --release/);
     assert.match(result.stdout, /Eclipse was not started/);
-    assert.equal(existsSync(resolve(item.repository, "target/release/eclipse.pid")), false);
+    assert.equal(
+      existsSync(resolve(item.repository, "target/release/eclipse.pid")),
+      false,
+    );
   } finally {
     item.cleanup();
   }
@@ -371,7 +486,10 @@ test("successful startup waits for readiness and opens the configured URL", () =
       "http://localhost:8123\n",
     );
     const pid = Number(
-      readFileSync(resolve(item.repository, "target/release/eclipse.pid"), "utf8"),
+      readFileSync(
+        resolve(item.repository, "target/release/eclipse.pid"),
+        "utf8",
+      ),
     );
     process.kill(pid, "SIGTERM");
   } finally {
@@ -399,16 +517,25 @@ test("missing Homebrew requirements give a concrete recovery path", () => {
 test("demo mode exercises the complete flow without performing actions", () => {
   const item = fixture();
   try {
-    const config = resolve(item.repository, "target/release/config/config.toml");
+    const config = resolve(
+      item.repository,
+      "target/release/config/config.toml",
+    );
     const ffmpeg = resolve(item.repository, "utils/ffmpeg");
     const configBefore = readFileSync(config, "utf8");
     const ffmpegBefore = readFileSync(ffmpeg, "utf8");
     const result = run(item, ["--demo", "--platform", "macos", "--yes"]);
 
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stdout, /Demo mode — all checks and actions are simulated/);
+    assert.match(
+      result.stdout,
+      /Demo mode — all checks and actions are simulated/,
+    );
     assert.match(result.stdout, /Found 2 missing or unsupported requirement/);
-    assert.match(result.stdout, /Install missing Homebrew packages \(ffmpeg pkg-config\)/);
+    assert.match(
+      result.stdout,
+      /Install missing Homebrew packages \(ffmpeg pkg-config\)/,
+    );
     assert.match(result.stdout, /System requirements ready/);
     assert.doesNotMatch(
       result.stdout,
@@ -420,9 +547,18 @@ test("demo mode exercises the complete flow without performing actions", () => {
     assert.match(result.stdout, /▶ Start Eclipse\n  Exit/);
     assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8000/);
     assert.match(result.stdout, /Opened Eclipse/);
-    assert.ok(result.stdout.indexOf("✓ Eclipse installed") < result.stdout.indexOf("Eclipse is ready."));
-    assert.ok(result.stdout.indexOf("Eclipse is ready.") < result.stdout.indexOf("▶ Start Eclipse"));
-    assert.ok(result.stdout.indexOf("▶ Start Eclipse") < result.stdout.indexOf("Starting Eclipse"));
+    assert.ok(
+      result.stdout.indexOf("✓ Eclipse installed") <
+        result.stdout.indexOf("Eclipse is ready."),
+    );
+    assert.ok(
+      result.stdout.indexOf("Eclipse is ready.") <
+        result.stdout.indexOf("▶ Start Eclipse"),
+    );
+    assert.ok(
+      result.stdout.indexOf("▶ Start Eclipse") <
+        result.stdout.indexOf("Starting Eclipse"),
+    );
     assert.equal(readFileSync(config, "utf8"), configBefore);
     assert.equal(readFileSync(ffmpeg, "utf8"), ffmpegBefore);
     for (const path of [
@@ -454,13 +590,19 @@ test("Linux demo exercises apt recovery and the shared launch flow without actio
     const result = run(item, ["--demo", "--platform", "linux", "--yes"]);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Linux selected/);
-    assert.match(result.stdout, /Install missing Debian\/Ubuntu packages \(ffmpeg pkg-config\)/);
+    assert.match(
+      result.stdout,
+      /Install missing Debian\/Ubuntu packages \(ffmpeg pkg-config\)/,
+    );
     assert.match(result.stdout, /System requirements ready/);
     assert.match(result.stdout, /Eclipse installed/);
     assert.match(result.stdout, /▶ Start Eclipse\n  Exit/);
     assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8000/);
     assert.equal(existsSync(resolve(item.repository, "apt.invoked")), false);
-    assert.equal(existsSync(resolve(item.repository, "xdg-open.invoked")), false);
+    assert.equal(
+      existsSync(resolve(item.repository, "xdg-open.invoked")),
+      false,
+    );
     assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
   } finally {
     item.cleanup();
@@ -480,12 +622,19 @@ test("Windows demo exercises WinGet recovery and launch without Windows actions"
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Windows selected/);
     assert.match(result.stdout, /Found 2 missing or unsupported requirement/);
-    assert.match(result.stdout, /Install missing Windows packages \(Gyan\.FFmpeg Microsoft\.VisualStudio\.2022\.BuildTools\)/);
+    assert.match(
+      result.stdout,
+      /Install missing Windows packages \(Gyan\.FFmpeg Microsoft\.VisualStudio\.2022\.BuildTools\)/,
+    );
     assert.match(result.stdout, /System requirements ready/);
     assert.match(result.stdout, /Eclipse installed/);
     assert.match(result.stdout, /▶ Start Eclipse\n  Exit/);
     assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8000/);
-    for (const marker of ["winget.invoked", "powershell.exe.invoked", "cmd.exe.invoked"]) {
+    for (const marker of [
+      "winget.invoked",
+      "powershell.exe.invoked",
+      "cmd.exe.invoked",
+    ]) {
       assert.equal(existsSync(resolve(item.repository, marker)), false, marker);
     }
     assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
@@ -502,10 +651,16 @@ test("the default entrypoint begins with the platform selector", () => {
   assert.ok(setup >= 0);
   assert.ok(selector > setup);
   assert.ok(dispatch > selector);
-  assert.match(source, /select_menu "Which platform are you installing on\?" false "macOS" "Linux" "Windows"/);
+  assert.match(
+    source,
+    /select_menu "Which platform are you installing on\?" false "macOS" "Linux" "Windows"/,
+  );
   assert.match(source, /select_menu "" true "Start Eclipse" "Exit"/);
   assert.match(source, /linux\)\s+command_available xdg-open && xdg-open/);
-  assert.match(source, /windows\)\s+command_available cmd\.exe && MSYS2_ARG_CONV_EXCL='\*' cmd\.exe \/c start/);
+  assert.match(
+    source,
+    /windows\)\s+command_available cmd\.exe && MSYS2_ARG_CONV_EXCL='\*' cmd\.exe \/c start/,
+  );
   assert.match(source, /sqlite\) package=SQLite\.SQLite/);
   assert.match(source, /▶/);
   assert.match(source, /printf '▶ %s\\n' "\$\{options\[\$index\]\}"/);

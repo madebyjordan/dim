@@ -12,11 +12,20 @@ Dim's supported source-development path is macOS, Linux, or native Windows throu
 
 ### Guided setup
 
-Launch the interactive installer from the repository root:
+Launch the interactive installer from the repository root. On macOS or Linux:
 
 ```sh
 ./install.sh
 ```
+
+On Windows, use the native launcher from CMD or PowerShell:
+
+```bat
+install.cmd
+```
+
+The launcher finds Git Bash and hands off to the same shared installer. If Git for Windows is not
+installed, it asks before installing `Git.Git` with WinGet. WSL is not required.
 
 The first prompt asks you to choose macOS, Linux, or Windows. Each platform path checks the
 required platform, Node, Rust, media, and native build tooling; offers focused recovery for anything
@@ -24,8 +33,9 @@ missing; runs the existing locked release bootstrap; and can start Eclipse and o
 [http://localhost:8000](http://localhost:8000). Existing configuration and FFmpeg/FFprobe entries
 are never replaced. Linux can automatically install documented native requirements on Debian and
 Ubuntu through `apt-get`; other distributions receive exact missing-package guidance. On Windows,
-run the command from Git Bash rather than WSL. The installer uses WinGet for supported dependency
-recovery and may prompt for administrator approval when Visual Studio Build Tools are installed.
+the native launcher uses Git Bash internally rather than WSL. The installer uses WinGet for
+supported dependency recovery and may prompt for administrator approval when Visual Studio Build
+Tools are installed.
 
 For automation, the same entrypoint accepts `--platform macos`, `--platform linux`, `--platform
 windows`, `--yes`, and `--no-start`. These options do not change the normal interactive flow.
@@ -35,6 +45,12 @@ dependencies, building Eclipse, starting processes, writing files, or opening a 
 
 ```sh
 ./install.sh --demo
+```
+
+From CMD or PowerShell, the equivalent is:
+
+```bat
+install.cmd --demo
 ```
 
 Demo mode uses deterministic simulated results and includes the missing-requirement recovery path.
@@ -64,7 +80,7 @@ sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libssl-dev sqlite3 ffmpeg
 ```
 
-On Windows, install Git for Windows first and open Git Bash in the repository. The wizard can use
+On Windows, `install.cmd` can acquire Git for Windows before opening the wizard. The wizard can use
 WinGet (provided by Microsoft App Installer) to recover supported packages with these identifiers:
 
 ```text
@@ -77,9 +93,11 @@ Microsoft.VisualStudio.2022.BuildTools
 ```
 
 The Visual Studio package is installed with the `Microsoft.VisualStudio.Workload.VCTools`
-workload and recommended components. A newly installed package may require Git Bash to be reopened
-before its updated `PATH` is visible. WSL is a separate Linux environment and is not used by the
-native Windows installer.
+workload and recommended components. Detection accepts a usable MSVC x64 compiler and Windows SDK
+regardless of the Visual Studio edition or installation directory. Incomplete or inconclusive
+existing installations receive Visual Studio Installer guidance rather than being modified
+automatically. A newly installed package may require a new terminal before its updated `PATH` is
+visible. WSL is a separate Linux environment and is not used by the native Windows installer.
 
 Enable the repository-pinned pnpm command once after installing Node.js:
 
