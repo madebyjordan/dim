@@ -195,6 +195,39 @@ test("missing Homebrew requirements give a concrete recovery path", () => {
   }
 });
 
+test("demo mode exercises the complete flow without performing actions", () => {
+  const item = fixture();
+  try {
+    const config = resolve(item.repository, "target/release/config/config.toml");
+    const ffmpeg = resolve(item.repository, "utils/ffmpeg");
+    const configBefore = readFileSync(config, "utf8");
+    const ffmpegBefore = readFileSync(ffmpeg, "utf8");
+    const result = run(item, ["--demo", "--platform", "macos", "--yes"]);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Demo mode — all checks and actions are simulated/);
+    assert.match(result.stdout, /Found 2 missing or unsupported requirement/);
+    assert.match(result.stdout, /Install missing Homebrew packages \(ffmpeg pkg-config\)/);
+    assert.match(result.stdout, /Built Eclipse with locked dependencies/);
+    assert.match(result.stdout, /Eclipse is ready: http:\/\/localhost:8000/);
+    assert.match(result.stdout, /Opened Eclipse/);
+    assert.equal(readFileSync(config, "utf8"), configBefore);
+    assert.equal(readFileSync(ffmpeg, "utf8"), ffmpegBefore);
+    for (const path of [
+      "bootstrap.args",
+      "rustup.args",
+      "ready",
+      "opened.url",
+      "target/release/eclipse.pid",
+      "target/release/eclipse.log",
+    ]) {
+      assert.equal(existsSync(resolve(item.repository, path)), false, path);
+    }
+  } finally {
+    item.cleanup();
+  }
+});
+
 test("the default entrypoint begins with the platform selector", () => {
   const source = readFileSync(resolve(root, "install.sh"), "utf8");
   const setup = source.lastIndexOf("printf '\\n%sEclipse Setup%s");

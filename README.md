@@ -28,6 +28,15 @@ guided installer.
 For automation, the same entrypoint accepts `--platform macos`, `--yes`, and `--no-start`. These
 options do not change the normal interactive flow.
 
+To preview and test the complete interactive experience without inspecting the system, installing
+dependencies, building Eclipse, starting processes, writing files, or opening a browser, use:
+
+```sh
+./install.sh --demo
+```
+
+Demo mode uses deterministic simulated results and includes the missing-requirement recovery path.
+
 ### Prerequisites
 
 - Git

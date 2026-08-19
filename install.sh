@@ -12,6 +12,8 @@ ECLIPSE_URL=${ECLIPSE_URL:-http://localhost:8000}
 ECLIPSE_SELECTED_PLATFORM=""
 ECLIPSE_AUTO_CONFIRM=false
 ECLIPSE_START=true
+ECLIPSE_DEMO=false
+ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=false
 ECLIPSE_LOG=""
 ECLIPSE_STEP_PID=""
 
@@ -35,9 +37,10 @@ fi
 
 usage() {
     cat <<'EOF'
-Usage: ./install.sh [--platform macos|linux|windows] [--yes] [--no-start]
+Usage: ./install.sh [--demo] [--platform macos|linux|windows] [--yes] [--no-start]
 
 Without --platform, Eclipse Setup starts with an interactive platform selector.
+Demo mode runs the same flow with deterministic fake checks and no system changes.
 EOF
 }
 
@@ -50,6 +53,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --yes)
             ECLIPSE_AUTO_CONFIRM=true
+            ;;
+        --demo)
+            ECLIPSE_DEMO=true
             ;;
         --no-start)
             ECLIPSE_START=false
@@ -153,6 +159,20 @@ run_step() {
     local pid
     local frame=0
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        if [[ -t 1 ]]; then
+            while [[ $frame -lt 8 ]]; do
+                printf '\r%s%s%s %s' "$ECLIPSE_BLUE" "${frames[$frame]}" "$ECLIPSE_RESET" "$label"
+                sleep 0.08
+                frame=$((frame + 1))
+            done
+            printf '\r\033[2K'
+        fi
+        success "$label"
+        return 0
+    fi
+
     log=$(mktemp "${TMPDIR:-/tmp}/eclipse-install.XXXXXX")
     ECLIPSE_LOG=$log
 
@@ -236,6 +256,12 @@ print_requirement_failure() {
 
 collect_macos_requirements() {
     ECLIPSE_MISSING=()
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        if [[ "$ECLIPSE_DEMO_REQUIREMENTS_RESOLVED" == false ]]; then
+            ECLIPSE_MISSING=(ffmpeg pkgconfig)
+        fi
+        return 0
+    fi
     xcode-select -p >/dev/null 2>&1 || ECLIPSE_MISSING+=(xcode)
     command_available git || ECLIPSE_MISSING+=(git)
     node_is_supported || ECLIPSE_MISSING+=(node)
@@ -248,6 +274,7 @@ collect_macos_requirements() {
 }
 
 prepare_macos_path() {
+    [[ "$ECLIPSE_DEMO" == false ]] || return 0
     if [[ -d "${CARGO_HOME:-$HOME/.cargo}/bin" ]]; then
         export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
     fi
@@ -273,9 +300,15 @@ install_homebrew_requirements() {
         esac
     done
     if [[ ${#packages[@]} -gt 0 ]]; then
-        command_available brew || return 1
+        if [[ "$ECLIPSE_DEMO" == false ]]; then
+            command_available brew || return 1
+        fi
         confirm "Install missing Homebrew packages (${packages[*]})?" || return 1
         run_step "Installed Homebrew requirements" brew install "${packages[@]}" || return 1
+        if [[ "$ECLIPSE_DEMO" == true ]]; then
+            ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=true
+            return 0
+        fi
         if brew --prefix node@24 >/dev/null 2>&1; then
             export PATH="$(brew --prefix node@24)/bin:$PATH"
         fi
@@ -319,7 +352,7 @@ resolve_macos_requirements() {
         return 1
     fi
 
-    if [[ "$brew_needed" == true ]] && ! command_available brew; then
+    if [[ "$ECLIPSE_DEMO" == false && "$brew_needed" == true ]] && ! command_available brew; then
         printf '\n'
         failure "Homebrew is not installed, and macOS packages are missing."
         printf 'Install Homebrew from https://brew.sh, then run:\n  %s\n\nMissing requirements:\n' "$ECLIPSE_ROOT/install.sh"
@@ -367,7 +400,7 @@ wait_for_eclipse() {
 use_configured_local_url() {
     local config="$ECLIPSE_ROOT/target/release/config/config.toml"
     local port
-    [[ "$ECLIPSE_URL_OVERRIDDEN" == false && -f "$config" ]] || return 0
+    [[ "$ECLIPSE_DEMO" == false && "$ECLIPSE_URL_OVERRIDDEN" == false && -f "$config" ]] || return 0
     port=$(awk -F= '
         /^[[:space:]]*port[[:space:]]*=/ {
             value = $2
@@ -386,6 +419,16 @@ start_eclipse() {
     local runtime_dir="$ECLIPSE_ROOT/target/release"
     local log="$runtime_dir/eclipse.log"
     local pid
+
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        notice "Starting Eclipse in the background"
+        run_step "Eclipse is running" true
+        printf '\n%sEclipse is ready:%s %s%s%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" "$ECLIPSE_BLUE" "$ECLIPSE_URL" "$ECLIPSE_RESET"
+        if confirm "Open Eclipse in your default browser?"; then
+            run_step "Opened Eclipse" true
+        fi
+        return 0
+    fi
 
     if curl --fail --silent "$ECLIPSE_URL/health/ready" >/dev/null 2>&1; then
         success "Eclipse is already running"
@@ -417,17 +460,22 @@ start_eclipse() {
 }
 
 install_platform_macos() {
-    if [[ $(uname -s) != Darwin ]]; then
+    if [[ "$ECLIPSE_DEMO" == false && $(uname -s) != Darwin ]]; then
         failure "The macOS installer must be run on macOS. You selected macOS, but this system reports $(uname -s)."
         return 1
     fi
 
     notice "macOS selected"
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        notice "Demo mode — all checks and actions are simulated"
+    fi
     prepare_macos_path
-    check_existing_media_tools
+    if [[ "$ECLIPSE_DEMO" == false ]]; then
+        check_existing_media_tools
+    fi
     check_macos_requirements
     printf '\n%sInstalling Eclipse%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
-    if [[ -f "$ECLIPSE_ROOT/target/release/config/config.toml" ]]; then
+    if [[ "$ECLIPSE_DEMO" == true || -f "$ECLIPSE_ROOT/target/release/config/config.toml" ]]; then
         notice "Existing configuration found; it will be preserved"
     fi
     run_step "Built Eclipse with locked dependencies" "$ECLIPSE_ROOT/scripts/bootstrap.sh" --release
