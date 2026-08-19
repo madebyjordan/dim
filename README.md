@@ -12,21 +12,22 @@ Dim's supported source-development path is macOS or Linux. The repository pins R
 
 ### Guided setup
 
-On macOS, launch the interactive installer from the repository root:
+On macOS or Linux, launch the interactive installer from the repository root:
 
 ```sh
 ./install.sh
 ```
 
-The first prompt asks you to choose macOS, Linux, or Windows. The macOS path checks the required
-Apple, Homebrew, Node, Rust, media, and native build tooling; offers focused recovery for anything
-missing; runs the existing locked release bootstrap; and can start Eclipse and open
+The first prompt asks you to choose macOS, Linux, or Windows. The macOS and Linux paths check the
+required platform, Node, Rust, media, and native build tooling; offer focused recovery for anything
+missing; run the existing locked release bootstrap; and can start Eclipse and open
 [http://localhost:8000](http://localhost:8000). Existing configuration and FFmpeg/FFprobe entries
-are never replaced. Linux and Windows are visible choices but are not yet implemented in the
-guided installer.
+are never replaced. Linux can automatically install documented native requirements on Debian and
+Ubuntu through `apt-get`; other distributions receive exact missing-package guidance. Windows is a
+visible choice but is not yet implemented in the guided installer.
 
-For automation, the same entrypoint accepts `--platform macos`, `--yes`, and `--no-start`. These
-options do not change the normal interactive flow.
+For automation, the same entrypoint accepts `--platform macos`, `--platform linux`, `--yes`, and
+`--no-start`. These options do not change the normal interactive flow.
 
 To preview and test the complete interactive experience without inspecting the system, installing
 dependencies, building Eclipse, starting processes, writing files, or opening a browser, use:

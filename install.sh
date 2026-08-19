@@ -14,6 +14,7 @@ ECLIPSE_AUTO_CONFIRM=false
 ECLIPSE_START=true
 ECLIPSE_DEMO=false
 ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=false
+ECLIPSE_MENU_SELECTION=0
 ECLIPSE_LOG=""
 ECLIPSE_STEP_PID=""
 
@@ -102,28 +103,37 @@ confirm() {
     [[ -z "$reply" || "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" || "$reply" == "Yes" ]]
 }
 
-select_platform() {
+select_menu() {
+    local prompt=$1
+    local allow_auto=$2
+    shift 2
     local selected=0
     local key
     local escape
-    local options=("macOS" "Linux" "Windows")
+    local options=("$@")
 
-    if [[ ! -t 0 || ! -t 1 ]]; then
-        failure "Interactive setup needs a terminal. Re-run ./install.sh, or pass --platform explicitly."
-        exit 2
+    if [[ -n "$prompt" ]]; then
+        printf '%s%s%s\n\n' "$ECLIPSE_BOLD" "$prompt" "$ECLIPSE_RESET"
     fi
 
-    printf '%sWhich platform are you installing on?%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
     while true; do
         local index=0
         while [[ $index -lt ${#options[@]} ]]; do
             if [[ $index -eq $selected ]]; then
-                printf '%s❯ %s%s\n' "$ECLIPSE_BLUE" "${options[$index]}" "$ECLIPSE_RESET"
+                printf '▶ %s\n' "${options[$index]}"
             else
                 printf '  %s\n' "${options[$index]}"
             fi
             index=$((index + 1))
         done
+
+        if [[ "$allow_auto" == true && "$ECLIPSE_AUTO_CONFIRM" == true ]]; then
+            break
+        fi
+        if [[ ! -t 0 || ! -t 1 ]]; then
+            failure "Interactive setup needs a terminal. Re-run ./install.sh in a terminal."
+            exit 2
+        fi
 
         IFS= read -rsn1 key
         if [[ "$key" == $'\033' ]]; then
@@ -144,12 +154,18 @@ select_platform() {
         printf '\033[%sA' "${#options[@]}"
     done
 
-    case $selected in
+    ECLIPSE_MENU_SELECTION=$selected
+    printf '\n'
+}
+
+select_platform() {
+    select_menu "Which platform are you installing on?" false "macOS" "Linux" "Windows"
+
+    case $ECLIPSE_MENU_SELECTION in
         0) ECLIPSE_SELECTED_PLATFORM=macos ;;
         1) ECLIPSE_SELECTED_PLATFORM=linux ;;
         2) ECLIPSE_SELECTED_PLATFORM=windows ;;
     esac
-    printf '\n'
 }
 
 run_step() {
@@ -254,6 +270,28 @@ print_requirement_failure() {
     esac
 }
 
+print_linux_requirement_failure() {
+    local item=$1
+    case "$item" in
+        git) printf '  • Git — Debian/Ubuntu package: git\n' ;;
+        node)
+            if command_available node; then
+                printf '  • Node.js 24.19.0 or newer in the 24.x line — found %s; install a supported Node.js 24 release from https://nodejs.org\n' "$(node --version 2>/dev/null || printf unknown)"
+            else
+                printf '  • Node.js 24.19.0 or newer in the 24.x line — install a supported Node.js 24 release from https://nodejs.org\n'
+            fi
+            ;;
+        corepack) printf '  • Corepack — install it with supported Node.js, then run: corepack enable pnpm\n' ;;
+        rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — https://rustup.rs\n' ;;
+        ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — Debian/Ubuntu package: ffmpeg\n' ;;
+        sqlite) printf '  • SQLite tools — Debian/Ubuntu package: sqlite3\n' ;;
+        pkgconfig) printf '  • pkg-config — Debian/Ubuntu package: pkg-config\n' ;;
+        buildtools) printf '  • C/C++ build toolchain — Debian/Ubuntu package: build-essential\n' ;;
+        openssl) printf '  • OpenSSL development headers — Debian/Ubuntu package: libssl-dev\n' ;;
+        curl) printf '  • curl — Debian/Ubuntu package: curl\n' ;;
+    esac
+}
+
 collect_macos_requirements() {
     ECLIPSE_MISSING=()
     if [[ "$ECLIPSE_DEMO" == true ]]; then
@@ -299,7 +337,7 @@ install_homebrew_requirements() {
             pkgconfig) packages+=(pkg-config) ;;
         esac
     done
-    if [[ ${#packages[@]} -gt 0 ]]; then
+    if [[ -n "${packages[*]:-}" ]]; then
         if [[ "$ECLIPSE_DEMO" == false ]]; then
             command_available brew || return 1
         fi
@@ -379,8 +417,122 @@ check_macos_requirements() {
         warning "Found ${#ECLIPSE_MISSING[@]} missing or unsupported requirement(s)."
         resolve_macos_requirements || return 1
     fi
-    run_step "Prepared pinned Rust 1.93.1 toolchain" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
-    success "Git, Node 24, Corepack, Rust, FFmpeg/FFprobe, SQLite, pkg-config, and build tools are ready"
+    run_step "System requirements ready" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
+}
+
+collect_linux_requirements() {
+    ECLIPSE_MISSING=()
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        if [[ "$ECLIPSE_DEMO_REQUIREMENTS_RESOLVED" == false ]]; then
+            ECLIPSE_MISSING=(ffmpeg pkgconfig)
+        fi
+        return 0
+    fi
+    command_available git || ECLIPSE_MISSING+=(git)
+    node_is_supported || ECLIPSE_MISSING+=(node)
+    command_available corepack || ECLIPSE_MISSING+=(corepack)
+    if ! command_available rustup || ! command_available cargo || ! command_available rustc; then ECLIPSE_MISSING+=(rustup); fi
+    if ! media_tool_is_supported ffmpeg || ! media_tool_is_supported ffprobe; then ECLIPSE_MISSING+=(ffmpeg); fi
+    command_available sqlite3 || ECLIPSE_MISSING+=(sqlite)
+    command_available pkg-config || ECLIPSE_MISSING+=(pkgconfig)
+    if ! command_available cc || ! command_available c++; then ECLIPSE_MISSING+=(buildtools); fi
+    if ! command_available pkg-config || ! pkg-config --exists openssl >/dev/null 2>&1; then ECLIPSE_MISSING+=(openssl); fi
+    command_available curl || ECLIPSE_MISSING+=(curl)
+}
+
+apt_install() {
+    if [[ $EUID -eq 0 ]]; then
+        apt-get update
+        apt-get install -y "$@"
+    else
+        sudo -n apt-get update
+        sudo -n apt-get install -y "$@"
+    fi
+}
+
+install_apt_requirements() {
+    local packages=()
+    local item
+    local package
+    for item in "${ECLIPSE_MISSING[@]}"; do
+        package=""
+        case "$item" in
+            git) package=git ;;
+            ffmpeg) package=ffmpeg ;;
+            sqlite) package=sqlite3 ;;
+            pkgconfig) package=pkg-config ;;
+            buildtools) package=build-essential ;;
+            openssl) package=libssl-dev ;;
+            curl) package=curl ;;
+        esac
+        [[ -n "$package" ]] || continue
+        [[ " ${packages[*]:-} " == *" $package "* ]] || packages+=("$package")
+    done
+
+    [[ -n "${packages[*]:-}" ]] || return 0
+    if [[ "$ECLIPSE_DEMO" == false ]]; then
+        command_available apt-get || return 1
+        if [[ $EUID -ne 0 ]] && ! command_available sudo; then
+            return 1
+        fi
+    fi
+    confirm "Install missing Debian/Ubuntu packages (${packages[*]})?" || return 1
+    if [[ "$ECLIPSE_DEMO" == false && $EUID -ne 0 ]]; then
+        notice "Administrator access is required to install system packages"
+        if ! sudo -v; then
+            failure "Administrator access was not granted. No packages were installed."
+            return 1
+        fi
+    fi
+    run_step "Installed Linux requirements" apt_install "${packages[@]}" || return 1
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=true
+    fi
+}
+
+resolve_linux_requirements() {
+    local apt_needed=false
+    local item
+    for item in "${ECLIPSE_MISSING[@]}"; do
+        case "$item" in git|ffmpeg|sqlite|pkgconfig|buildtools|openssl|curl) apt_needed=true ;; esac
+    done
+
+    if [[ "$ECLIPSE_DEMO" == false && "$apt_needed" == true ]] && ! command_available apt-get; then
+        printf '\n'
+        failure "Automatic dependency recovery currently supports Debian and Ubuntu (apt-get)."
+        printf 'Install the equivalent packages for this distribution, then run:\n  %s\n\nMissing requirements:\n' "$ECLIPSE_ROOT/install.sh"
+        for item in "${ECLIPSE_MISSING[@]}"; do print_linux_requirement_failure "$item"; done
+        return 1
+    fi
+
+    if [[ "$ECLIPSE_DEMO" == false && "$apt_needed" == true && $EUID -ne 0 ]] && ! command_available sudo; then
+        printf '\n'
+        failure "Installing Debian/Ubuntu packages requires root access or sudo."
+        printf 'Install the packages below as root, then run:\n  %s\n\nMissing requirements:\n' "$ECLIPSE_ROOT/install.sh"
+        for item in "${ECLIPSE_MISSING[@]}"; do print_linux_requirement_failure "$item"; done
+        return 1
+    fi
+
+    install_apt_requirements || true
+    install_rustup || true
+    collect_linux_requirements
+    if [[ ${#ECLIPSE_MISSING[@]} -gt 0 ]]; then
+        printf '\n'
+        failure "Some requirements still need attention:"
+        for item in "${ECLIPSE_MISSING[@]}"; do print_linux_requirement_failure "$item"; done
+        printf '\nAfter resolving them, run:\n  %s\n' "$ECLIPSE_ROOT/install.sh"
+        return 1
+    fi
+}
+
+check_linux_requirements() {
+    printf '%sChecking requirements%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+    collect_linux_requirements
+    if [[ ${#ECLIPSE_MISSING[@]} -gt 0 ]]; then
+        warning "Found ${#ECLIPSE_MISSING[@]} missing or unsupported requirement(s)."
+        resolve_linux_requirements || return 1
+    fi
+    run_step "System requirements ready" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
 }
 
 wait_for_eclipse() {
@@ -415,47 +567,82 @@ use_configured_local_url() {
     fi
 }
 
-start_eclipse() {
+launch_eclipse_and_wait() {
     local runtime_dir="$ECLIPSE_ROOT/target/release"
     local log="$runtime_dir/eclipse.log"
     local pid
 
-    if [[ "$ECLIPSE_DEMO" == true ]]; then
-        notice "Starting Eclipse in the background"
-        run_step "Eclipse is running" true
-        printf '\n%sEclipse is ready:%s %s%s%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" "$ECLIPSE_BLUE" "$ECLIPSE_URL" "$ECLIPSE_RESET"
-        if confirm "Open Eclipse in your default browser?"; then
-            run_step "Opened Eclipse" true
-        fi
+    nohup "$ECLIPSE_ROOT/scripts/run.sh" --release >"$log" 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" > "$runtime_dir/eclipse.pid"
+    if wait_for_eclipse "$pid"; then
         return 0
     fi
 
-    if curl --fail --silent "$ECLIPSE_URL/health/ready" >/dev/null 2>&1; then
+    printf 'Eclipse did not become ready at %s.\n' "$ECLIPSE_URL" >&2
+    if [[ -s "$log" ]]; then
+        printf '\nRecent Eclipse output:\n' >&2
+        tail -n 30 "$log" >&2
+    fi
+    printf '\nRuntime log: %s\n' "$log" >&2
+    return 1
+}
+
+start_eclipse() {
+    printf '%sStarting Eclipse%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        run_step "Eclipse started" true
+    elif curl --fail --silent "$ECLIPSE_URL/health/ready" >/dev/null 2>&1; then
         success "Eclipse is already running"
     else
-        notice "Starting Eclipse in the background"
-        nohup "$ECLIPSE_ROOT/scripts/run.sh" --release >"$log" 2>&1 &
-        pid=$!
-        printf '%s\n' "$pid" > "$runtime_dir/eclipse.pid"
-        if ! wait_for_eclipse "$pid"; then
-            failure "Eclipse did not become ready at $ECLIPSE_URL."
-            if [[ -s "$log" ]]; then
-                printf '\n%sRecent Eclipse output:%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" >&2
-                tail -n 30 "$log" >&2
-            fi
-            printf '\nFix the reported problem, then run:\n  %s --release\n' "$ECLIPSE_ROOT/scripts/run.sh" >&2
-            return 1
-        fi
-        success "Eclipse is running"
+        run_step "Eclipse started" launch_eclipse_and_wait
     fi
 
     printf '\n%sEclipse is ready:%s %s%s%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" "$ECLIPSE_BLUE" "$ECLIPSE_URL" "$ECLIPSE_RESET"
     if confirm "Open Eclipse in your default browser?"; then
-        if open "$ECLIPSE_URL"; then
+        if [[ "$ECLIPSE_DEMO" == true ]]; then
+            run_step "Opened Eclipse" true
+        elif open_browser "$ECLIPSE_URL"; then
             success "Opened Eclipse"
         else
             warning "The browser could not be opened automatically. Open $ECLIPSE_URL yourself."
         fi
+    fi
+}
+
+open_browser() {
+    local url=$1
+    case "$ECLIPSE_SELECTED_PLATFORM" in
+        macos)
+            command_available open && open "$url"
+            ;;
+        linux)
+            command_available xdg-open && xdg-open "$url"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+install_and_offer_start() {
+    printf '\n%sInstalling Eclipse%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+    run_step "Eclipse installed" "$ECLIPSE_ROOT/scripts/bootstrap.sh" --release
+    if [[ "$ECLIPSE_DEMO" == true || -f "$ECLIPSE_ROOT/target/release/config/config.toml" ]]; then
+        success "Existing configuration preserved"
+    fi
+    use_configured_local_url
+
+    printf '\n%sEclipse is ready.%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+    if [[ "$ECLIPSE_START" == true ]]; then
+        select_menu "" true "Start Eclipse" "Exit"
+    else
+        ECLIPSE_MENU_SELECTION=1
+    fi
+
+    if [[ $ECLIPSE_MENU_SELECTION -eq 0 ]]; then
+        start_eclipse
+    else
+        printf 'Eclipse was not started. Start it later with:\n  %s --release\n' "$ECLIPSE_ROOT/scripts/run.sh"
     fi
 }
 
@@ -469,31 +656,34 @@ install_platform_macos() {
     if [[ "$ECLIPSE_DEMO" == true ]]; then
         notice "Demo mode — all checks and actions are simulated"
     fi
+    printf '\n'
     prepare_macos_path
     if [[ "$ECLIPSE_DEMO" == false ]]; then
         check_existing_media_tools
     fi
     check_macos_requirements
-    printf '\n%sInstalling Eclipse%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
-    if [[ "$ECLIPSE_DEMO" == true || -f "$ECLIPSE_ROOT/target/release/config/config.toml" ]]; then
-        notice "Existing configuration found; it will be preserved"
-    fi
-    run_step "Built Eclipse with locked dependencies" "$ECLIPSE_ROOT/scripts/bootstrap.sh" --release
-    success "Existing configuration and media-tool links were preserved"
-    use_configured_local_url
-
-    if [[ "$ECLIPSE_START" == true ]] && confirm "Start Eclipse now?"; then
-        start_eclipse
-    else
-        printf '\n%sSetup complete.%s Start Eclipse with:\n  %s --release\n\nThen open %s\n' \
-            "$ECLIPSE_BOLD" "$ECLIPSE_RESET" "$ECLIPSE_ROOT/scripts/run.sh" "$ECLIPSE_URL"
-    fi
+    install_and_offer_start
 }
 
 install_platform_linux() {
+    if [[ "$ECLIPSE_DEMO" == false && $(uname -s) != Linux ]]; then
+        failure "The Linux installer must be run on Linux. You selected Linux, but this system reports $(uname -s)."
+        return 1
+    fi
+
     notice "Linux selected"
-    warning "The interactive Linux installer is not available in this first release."
-    printf 'Linux source development remains supported with the existing documented workflow:\n  pnpm build --release\n  pnpm dev --release\n\nNo changes were made.\n'
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        notice "Demo mode — all checks and actions are simulated"
+    fi
+    printf '\n'
+    if [[ -d "${CARGO_HOME:-$HOME/.cargo}/bin" && "$ECLIPSE_DEMO" == false ]]; then
+        export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+    fi
+    if [[ "$ECLIPSE_DEMO" == false ]]; then
+        check_existing_media_tools
+    fi
+    check_linux_requirements
+    install_and_offer_start
 }
 
 install_platform_windows() {
