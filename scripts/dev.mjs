@@ -1,21 +1,34 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  backendProcess,
+  cargoCommand,
+  frontendProcess,
+} from "./dev-processes.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extraArgs = process.argv.slice(2);
 const release = extraArgs[0] === "--release";
-const backendArgs = release ? extraArgs : [];
+const backendArgs = release ? extraArgs.slice(1) : [];
 const children = new Map();
 let stopping = false;
 let exitCode = 0;
 
 function start(name, command, args, options = {}) {
-  const child = spawn(command, args, {
-    cwd: root,
-    stdio: "inherit",
-    ...options,
-  });
+  let child;
+  try {
+    child = spawn(command, args, {
+      cwd: root,
+      stdio: "inherit",
+      ...options,
+    });
+  } catch (error) {
+    console.error(`${name} failed to start: ${error.message}`);
+    exitCode = 1;
+    stop();
+    return null;
+  }
   children.set(name, child);
   child.once("error", (error) => {
     console.error(`${name} failed to start: ${error.message}`);
@@ -66,28 +79,43 @@ process.once("SIGTERM", () => {
 });
 
 if (release) {
-  start("Eclipse", resolve(root, "scripts/run.sh"), backendArgs, {
-    env: { ...process.env, ECLIPSE_BIND_ADDRESS: "0.0.0.0" },
-  });
+  const backend = backendProcess({ root, release, args: backendArgs });
+  start("Eclipse", backend.command, backend.args, backend.options);
 } else {
-  // run.sh intentionally executes a prepared artifact. Development must rebuild first or a
-  // restart can silently run stale Rust while Vite serves current UI code.
-  await runBeforeStart("Eclipse backend build", "cargo", [
+  // Development must rebuild first or a restart can silently run stale Rust while Vite serves
+  // current UI code. Native Windows cannot spawn run.sh, so launch the resulting binary itself.
+  await runBeforeStart("Eclipse backend build", cargoCommand(), [
     "build",
     "--locked",
     "-p",
     "dim",
   ]);
-  start("Eclipse backend", resolve(root, "scripts/run.sh"), [], {
-    env: { ...process.env, ECLIPSE_BIND_ADDRESS: "127.0.0.1" },
-  });
-  start("Eclipse dev server", "corepack", ["pnpm", "--dir", "eclipse", "dev"]);
+  const backend = backendProcess({ root });
+  const frontend = frontendProcess(root);
+  const backendChild = start(
+    "Eclipse backend",
+    backend.command,
+    backend.args,
+    backend.options,
+  );
+  if (backendChild) {
+    start(
+      "Eclipse dev server",
+      frontend.command,
+      frontend.args,
+      frontend.options,
+    );
+  }
 }
 
 await new Promise((resolveDone) => {
   let remaining = children.size;
+  if (remaining === 0) {
+    resolveDone();
+    return;
+  }
   for (const [name, child] of children) {
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       if (!stopping) {
         exitCode = code ?? 1;
         console.error(

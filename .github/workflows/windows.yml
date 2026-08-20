@@ -127,8 +127,8 @@ jobs:
           cargo build --release --locked
           test -f target/release/eclipse.exe
           test ! -f target/release/dim.exe
-      - name: Test Windows-style Prettier resolution
-        run: node --test ./scripts/generate-api-contract.test.mjs
+      - name: Test Windows-style development process and Prettier resolution
+        run: node --test ./scripts/dev-processes.test.mjs ./scripts/generate-api-contract.test.mjs
       - name: Exercise API contract check and production frontend build
         run: |
           node ./scripts/generate-api-contract.mjs --check
@@ -232,41 +232,66 @@ jobs:
             echo "Eclipse did not honor its runtime-local shutdown request." >&2
             exit 1
           fi
-      - name: Start development through the normal pnpm command
+      - name: Start, stop, and restart native development through pnpm dev
         shell: pwsh
         run: |
           $pnpm = (Get-Command pnpm -ErrorAction Stop).Source
-          $stdout = Join-Path $env:RUNNER_TEMP "pnpm-dev.stdout.log"
-          $stderr = Join-Path $env:RUNNER_TEMP "pnpm-dev.stderr.log"
-          $process = Start-Process -FilePath $pnpm -ArgumentList "dev", "--release" -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
-          $ready = $false
-          for ($attempt = 0; $attempt -lt 60; $attempt++) {
-            try {
-              Invoke-WebRequest -UseBasicParsing http://localhost:8000/health/ready | Out-Null
-              $ready = $true
-              break
-            } catch {
+          function Start-Development([int] $run) {
+            Remove-Item -Force eclipse.shutdown -ErrorAction SilentlyContinue
+            $stdout = Join-Path $env:RUNNER_TEMP "pnpm-dev-$run.stdout.log"
+            $stderr = Join-Path $env:RUNNER_TEMP "pnpm-dev-$run.stderr.log"
+            $process = Start-Process -FilePath $pnpm -ArgumentList "dev" -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+            $backendReady = $false
+            $frontendReady = $false
+            for ($attempt = 0; $attempt -lt 180; $attempt++) {
+              try {
+                Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health/ready | Out-Null
+                $backendReady = $true
+              } catch {}
+              try {
+                Invoke-WebRequest -UseBasicParsing http://127.0.0.1:5173/ | Out-Null
+                $frontendReady = $true
+              } catch {}
+              if ($backendReady -and $frontendReady) { break }
               if ($process.HasExited) {
                 Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
-                throw "pnpm dev exited before Eclipse became ready."
+                throw "pnpm dev run $run exited before both development services became ready."
               }
               Start-Sleep -Seconds 1
             }
+            if (-not $backendReady -or -not $frontendReady) {
+              Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
+              & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+              throw "pnpm dev run $run did not make both development services ready."
+            }
+            $combined = (Get-Content $stdout, $stderr -Raw -ErrorAction SilentlyContinue) -join "`n"
+            if ($combined -match "spawn EFTYPE|spawn ENOENT|pnpm.*not recognized|pnpm: command not found") {
+              & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+              throw "pnpm dev run $run encountered a process-resolution failure."
+            }
+            return @{ Process = $process; Stdout = $stdout; Stderr = $stderr }
           }
-          if (-not $ready) {
-            Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw "pnpm dev did not make Eclipse ready."
+
+          function Stop-Development($development, [int] $run) {
+            "shutdown" | Set-Content -Encoding Ascii eclipse.shutdown
+            if (-not $development.Process.WaitForExit(30000)) {
+              Get-Content $development.Stdout, $development.Stderr -ErrorAction SilentlyContinue
+              & taskkill.exe /PID $development.Process.Id /T /F 2>$null | Out-Null
+              throw "pnpm dev run $run did not clean up after the backend stopped."
+            }
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 8000,5173 -ErrorAction SilentlyContinue)
+              if ($listeners.Count -eq 0) { return }
+              Start-Sleep -Milliseconds 250
+            }
+            Get-NetTCPConnection -State Listen -LocalPort 8000,5173 -ErrorAction SilentlyContinue | Format-Table -AutoSize
+            throw "pnpm dev run $run left a backend or Vite listener running."
           }
-          "shutdown" | Set-Content -Encoding Ascii target/release/eclipse.shutdown
-          if (-not $process.WaitForExit(20000)) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            throw "pnpm dev did not exit after Eclipse shutdown."
-          }
-          $combined = (Get-Content $stdout, $stderr -Raw -ErrorAction SilentlyContinue) -join "`n"
-          if ($combined -match "pnpm.*not recognized|pnpm: command not found") {
-            throw "pnpm dev encountered a command-resolution failure."
-          }
+
+          $first = Start-Development 1
+          Stop-Development $first 1
+          $second = Start-Development 2
+          Stop-Development $second 2
       - name: Verify wrong-platform diagnostics
         run: |
           set -euo pipefail
@@ -282,5 +307,5 @@ jobs:
           name: eclipse-windows-log
           path: |
             eclipse-windows.log
-            ${{ runner.temp }}/pnpm-dev.*.log
+            ${{ runner.temp }}/pnpm-dev-*.log
           if-no-files-found: ignore
