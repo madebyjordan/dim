@@ -241,6 +241,14 @@ elif [[ "$command_text" == *"Stop-Process -Force"* ]]; then
   [[ -z "\${WINDOWS_LOCK_MARKER:-}" ]] || rm -f "$WINDOWS_LOCK_MARKER"
   [[ -z "\${WINDOWS_ECLIPSE_PID_FILE:-}" ]] || rm -f "$WINDOWS_ECLIPSE_PID_FILE"
   exit 0
+elif [[ "$command_text" == *"prepare-pnpm.ps1"* ]]; then
+  if [[ "\${WINDOWS_PNPM_PREPARE_FAIL:-}" == true ]]; then
+    echo 'The user-level Corepack pnpm shim could not be prepared.' >&2
+    exit 41
+  fi
+  touch "$INSTALL_FIXTURE/pnpm-prepared"
+  echo 'ready|11.9.0|fixture-pnpm.cmd|prepared'
+  exit 0
 elif [[ -n "\${WINDOWS_TOOLCHAIN_RESULT:-}" ]]; then
   printf '%s\\n' "$WINDOWS_TOOLCHAIN_RESULT"
 elif [[ -f "$INSTALL_FIXTURE/buildtools.ready" ]]; then
@@ -337,6 +345,7 @@ test("Windows setup validates requirements and reuses the release bootstrap", ()
     const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Windows selected/);
+    assert.match(result.stdout, /pnpm command ready in new terminals/);
     assert.match(result.stdout, /System requirements ready/);
     assert.match(result.stdout, /Eclipse installed/);
     assert.match(result.stdout, /Existing configuration preserved/);
@@ -344,6 +353,27 @@ test("Windows setup validates requirements and reuses the release bootstrap", ()
       readFileSync(resolve(item.repository, "bootstrap.args"), "utf8"),
       "--release\n",
     );
+    assert.equal(existsSync(resolve(item.repository, "pnpm-prepared")), true);
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("Windows setup does not report readiness when persistent pnpm preparation fails", () => {
+  const item = fixture();
+  try {
+    prepareWindows(item);
+    const result = run(item, ["--platform", "windows", "--yes", "--no-start"], {
+      WINDOWS_PNPM_PREPARE_FAIL: "true",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /pnpm command ready in new terminals failed/);
+    assert.match(
+      result.stderr,
+      /user-level Corepack pnpm shim could not be prepared/,
+    );
+    assert.doesNotMatch(result.stdout, /System requirements ready/);
+    assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
   } finally {
     item.cleanup();
   }
@@ -869,6 +899,7 @@ test("Windows demo exercises WinGet recovery and launch without Windows actions"
       assert.equal(existsSync(resolve(item.repository, marker)), false, marker);
     }
     assert.equal(existsSync(resolve(item.repository, "bootstrap.args")), false);
+    assert.equal(existsSync(resolve(item.repository, "pnpm-prepared")), false);
   } finally {
     item.cleanup();
   }
@@ -1346,6 +1377,10 @@ test(
         existsSync(resolve(item.repository, "bootstrap.args")),
         false,
       );
+      assert.equal(
+        existsSync(resolve(item.repository, "pnpm-prepared")),
+        false,
+      );
       assert.doesNotThrow(() => process.kill(processHandle.pid, 0));
     } finally {
       if (processHandle?.pid) {
@@ -1483,6 +1518,10 @@ test("all existing-install demo branches are mutation-free", () => {
       assert.equal(readFileSync(statePath, "utf8"), before);
       assert.equal(
         existsSync(resolve(item.repository, "bootstrap.args")),
+        false,
+      );
+      assert.equal(
+        existsSync(resolve(item.repository, "pnpm-prepared")),
         false,
       );
       assert.equal(

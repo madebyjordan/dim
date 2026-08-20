@@ -1388,6 +1388,17 @@ refresh_windows_path() {
     return 0
 }
 
+prepare_windows_pnpm_command() {
+    local script="$ECLIPSE_ROOT/scripts/prepare-pnpm.ps1"
+    local repository_root=$ECLIPSE_ROOT
+    if command_available cygpath; then
+        script=$(cygpath -w "$script")
+        repository_root=$(cygpath -w "$repository_root")
+    fi
+    MSYS2_ARG_CONV_EXCL='*' powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+        -File "$script" -RepositoryRoot "$repository_root"
+}
+
 collect_windows_requirements() {
     ECLIPSE_MISSING=()
     if [[ "$ECLIPSE_DEMO" == true ]]; then
@@ -1418,7 +1429,7 @@ print_windows_requirement_failure() {
                 printf '  • Node.js 24.19.0 or newer in the 24.x line — WinGet package: OpenJS.NodeJS.LTS\n'
             fi
             ;;
-        corepack) printf '  • Corepack — reinstall supported Node.js, or install Corepack and run: corepack enable pnpm\n' ;;
+        corepack) printf '  • Corepack — reinstall supported Node.js; the installer prepares the pnpm command once Corepack is available\n' ;;
         rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — WinGet package: Rustlang.Rustup\n' ;;
         ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — WinGet package: Gyan.FFmpeg\n' ;;
         sqlite) printf '  • SQLite tools — WinGet package: SQLite.SQLite\n' ;;
@@ -1514,6 +1525,7 @@ check_windows_requirements() {
         warning "Found ${#ECLIPSE_MISSING[@]} missing or unsupported requirement(s)."
         resolve_windows_requirements || return 1
     fi
+    run_step "pnpm command ready in new terminals" prepare_windows_pnpm_command
     run_step "System requirements ready" rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
 }
 

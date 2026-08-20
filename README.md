@@ -105,7 +105,9 @@ existing installations receive Visual Studio Installer guidance rather than bein
 automatically. A newly installed package may require a new terminal before its updated `PATH` is
 visible. WSL is a separate Linux environment and is not used by the native Windows installer.
 
-Enable the repository-pinned pnpm command once after installing Node.js:
+The Windows CLI installer enables a user-level Corepack shim automatically, so `pnpm` is available
+from newly opened CMD, PowerShell, and Git Bash sessions without elevation. For a manual source setup
+that does not use the installer, enable the repository-pinned pnpm command after installing Node.js:
 
 ```sh
 corepack enable pnpm

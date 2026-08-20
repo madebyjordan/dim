@@ -81,7 +81,7 @@ jobs:
             throw "Corepack did not resolve repository-pinned pnpm 11.9.0."
           }
       - name: Test installer lifecycle, clean Corepack, native scripts, and toolchain detection
-        run: node --test ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/rust-dependencies.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs
+        run: node --test ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/prepare-pnpm.test.mjs ./scripts/rust-dependencies.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs
       - name: Exercise native launcher from CMD
         shell: cmd
         run: install.cmd --demo --platform windows --yes --no-start
@@ -96,6 +96,31 @@ jobs:
       - name: Run the native Windows installer
         shell: pwsh
         run: .\install.cmd --platform windows --yes --no-start
+      - name: Verify persistent pnpm from fresh Windows shells
+        shell: pwsh
+        run: |
+          $shim = Join-Path $env:LOCALAPPDATA "Eclipse\bin"
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          if (-not (($userPath -split ";") -contains $shim)) {
+            throw "The installer did not persist the user-level Corepack shim directory."
+          }
+          $gitBash = (Get-Command bash.exe -ErrorAction Stop).Source
+          $env:Path = [Environment]::ExpandEnvironmentVariables("$machinePath;$userPath")
+
+          $cmdVersion = (cmd.exe /d /c "pnpm --version").Trim()
+          if ($LASTEXITCODE -ne 0 -or $cmdVersion -ne "11.9.0") {
+            throw "Fresh CMD resolved unexpected pnpm version '$cmdVersion'."
+          }
+          $powershellVersion = (powershell.exe -NoProfile -NonInteractive -Command "pnpm --version").Trim()
+          if ($LASTEXITCODE -ne 0 -or $powershellVersion -ne "11.9.0") {
+            throw "Fresh PowerShell resolved unexpected pnpm version '$powershellVersion'."
+          }
+          $bashVersion = (& $gitBash -lc 'cd "$(cygpath -u "$GITHUB_WORKSPACE")" && pnpm --version').Trim()
+          if ($LASTEXITCODE -ne 0 -or $bashVersion -ne "11.9.0") {
+            throw "Fresh Git Bash resolved unexpected pnpm version '$bashVersion'."
+          }
+          $shim | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Verify pinned Windows Rust release build
         run: |
           rustc --version --verbose
@@ -207,6 +232,41 @@ jobs:
             echo "Eclipse did not honor its runtime-local shutdown request." >&2
             exit 1
           fi
+      - name: Start development through the normal pnpm command
+        shell: pwsh
+        run: |
+          $pnpm = (Get-Command pnpm -ErrorAction Stop).Source
+          $stdout = Join-Path $env:RUNNER_TEMP "pnpm-dev.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "pnpm-dev.stderr.log"
+          $process = Start-Process -FilePath $pnpm -ArgumentList "dev", "--release" -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+          $ready = $false
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            try {
+              Invoke-WebRequest -UseBasicParsing http://localhost:8000/health/ready | Out-Null
+              $ready = $true
+              break
+            } catch {
+              if ($process.HasExited) {
+                Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
+                throw "pnpm dev exited before Eclipse became ready."
+              }
+              Start-Sleep -Seconds 1
+            }
+          }
+          if (-not $ready) {
+            Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "pnpm dev did not make Eclipse ready."
+          }
+          "shutdown" | Set-Content -Encoding Ascii target/release/eclipse.shutdown
+          if (-not $process.WaitForExit(20000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "pnpm dev did not exit after Eclipse shutdown."
+          }
+          $combined = (Get-Content $stdout, $stderr -Raw -ErrorAction SilentlyContinue) -join "`n"
+          if ($combined -match "pnpm.*not recognized|pnpm: command not found") {
+            throw "pnpm dev encountered a command-resolution failure."
+          }
       - name: Verify wrong-platform diagnostics
         run: |
           set -euo pipefail
@@ -220,5 +280,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eclipse-windows-log
-          path: eclipse-windows.log
+          path: |
+            eclipse-windows.log
+            ${{ runner.temp }}/pnpm-dev.*.log
           if-no-files-found: ignore
