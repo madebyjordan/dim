@@ -194,6 +194,40 @@ export function validateMediaTool(
   return { ok: true, detail: "", major };
 }
 
+export function validateMediaToolPair(
+  ffmpeg,
+  ffprobe,
+  { env = process.env } = {},
+) {
+  const ffmpegValidation = validateMediaTool(ffmpeg, {
+    command: "ffmpeg",
+    env,
+  });
+  if (!ffmpegValidation.ok) {
+    return {
+      ok: false,
+      detail: `ffmpeg is invalid: ${ffmpegValidation.detail}`,
+    };
+  }
+  const ffprobeValidation = validateMediaTool(ffprobe, {
+    command: "ffprobe",
+    env,
+  });
+  if (!ffprobeValidation.ok) {
+    return {
+      ok: false,
+      detail: `ffprobe is invalid: ${ffprobeValidation.detail}`,
+    };
+  }
+  if (ffmpegValidation.major !== ffprobeValidation.major) {
+    return {
+      ok: false,
+      detail: `ffmpeg major version ${ffmpegValidation.major} does not match ffprobe major version ${ffprobeValidation.major}`,
+    };
+  }
+  return { ok: true, detail: "", major: ffmpegValidation.major };
+}
+
 function windowsMediaToolCandidates(source) {
   const candidates = [];
   const shimFile = source.replace(/\.exe$/i, ".shim");
@@ -217,9 +251,13 @@ function windowsMediaToolCandidates(source) {
   return [...new Set(candidates.map((candidate) => resolve(candidate)))];
 }
 
-function provisionWindowsMediaTool(source, destination, { command, env }) {
+function provisionWindowsMediaTool(
+  source,
+  destination,
+  { command, env, force = false },
+) {
   const existing = validateMediaTool(destination, { command, env });
-  if (existing.ok) {
+  if (existing.ok && !force) {
     console.log(`Using existing ${destination}`);
     return destination;
   }
@@ -236,7 +274,11 @@ function provisionWindowsMediaTool(source, destination, { command, env }) {
   }
 
   if (exists(destination)) {
-    console.warn(`Repairing invalid ${destination}: ${existing.detail}`);
+    console.warn(
+      existing.ok
+        ? `Replacing ${destination} to keep the FFmpeg/FFprobe pair consistent`
+        : `Repairing invalid ${destination}: ${existing.detail}`,
+    );
   }
   mkdirSync(dirname(destination), { recursive: true });
   const failures = [];
@@ -288,14 +330,18 @@ function ensureMediaTool(
   source,
   destination,
   platform,
-  { command, env = process.env },
+  { command, env = process.env, force = false },
 ) {
   if (platform === "win32") {
-    return provisionWindowsMediaTool(source, destination, { command, env });
+    return provisionWindowsMediaTool(source, destination, {
+      command,
+      env,
+      force,
+    });
   }
 
   const existing = validateMediaTool(destination, { command, env });
-  if (existing.ok) {
+  if (existing.ok && !force) {
     console.log(`Using existing ${destination}`);
     return destination;
   }
@@ -308,7 +354,11 @@ function ensureMediaTool(
     );
   }
   if (exists(destination)) {
-    console.warn(`Repairing invalid ${destination}: ${existing.detail}`);
+    console.warn(
+      existing.ok
+        ? `Replacing ${destination} to keep the FFmpeg/FFprobe pair consistent`
+        : `Repairing invalid ${destination}: ${existing.detail}`,
+    );
     rmSync(destination, { force: true });
   }
   mkdirSync(dirname(destination), { recursive: true });
@@ -320,6 +370,67 @@ function ensureMediaTool(
     );
   }
   return destination;
+}
+
+function ensureMediaToolPair(
+  sources,
+  destinations,
+  platform,
+  { env = process.env } = {},
+) {
+  const existing = validateMediaToolPair(
+    destinations.ffmpeg,
+    destinations.ffprobe,
+    { env },
+  );
+  if (existing.ok) {
+    console.log(`Using existing ${destinations.ffmpeg}`);
+    console.log(`Using existing ${destinations.ffprobe}`);
+    return destinations;
+  }
+
+  const discovered = {
+    ffmpeg:
+      sources.ffmpeg ?? findExecutable("ffmpeg", { env, platform }),
+    ffprobe:
+      sources.ffprobe ?? findExecutable("ffprobe", { env, platform }),
+  };
+  const candidate = validateMediaToolPair(
+    discovered.ffmpeg,
+    discovered.ffprobe,
+    { env },
+  );
+  if (!candidate.ok) {
+    throw new Error(
+      `No supported FFmpeg/FFprobe pair was found: ${candidate.detail}`,
+    );
+  }
+
+  if (exists(destinations.ffmpeg) || exists(destinations.ffprobe)) {
+    console.warn(`Repairing FFmpeg/FFprobe toolchain: ${existing.detail}`);
+  }
+  ensureMediaTool(discovered.ffmpeg, destinations.ffmpeg, platform, {
+    command: "ffmpeg",
+    env,
+    force: true,
+  });
+  ensureMediaTool(discovered.ffprobe, destinations.ffprobe, platform, {
+    command: "ffprobe",
+    env,
+    force: true,
+  });
+
+  const installed = validateMediaToolPair(
+    destinations.ffmpeg,
+    destinations.ffprobe,
+    { env },
+  );
+  if (!installed.ok) {
+    throw new Error(
+      `Provisioned FFmpeg/FFprobe pair failed final validation: ${installed.detail}`,
+    );
+  }
+  return destinations;
 }
 
 export async function build({
@@ -364,17 +475,14 @@ export async function build({
   }
 
   mkdirSync(resolve(root, "utils"), { recursive: true });
-  const ffmpeg = ensureMediaTool(
-    undefined,
-    resolve(root, `utils/ffmpeg${mediaSuffix}`),
+  const mediaTools = ensureMediaToolPair(
+    {},
+    {
+      ffmpeg: resolve(root, `utils/ffmpeg${mediaSuffix}`),
+      ffprobe: resolve(root, `utils/ffprobe${mediaSuffix}`),
+    },
     platform,
-    { command: "ffmpeg", env },
-  );
-  const ffprobe = ensureMediaTool(
-    undefined,
-    resolve(root, `utils/ffprobe${mediaSuffix}`),
-    platform,
-    { command: "ffprobe", env },
+    { env },
   );
 
   if (!options.skipUi) {
@@ -411,17 +519,14 @@ export async function build({
 
     writeStage(options.stageFile, "Preparing runtime");
     if (options.release) {
-      ensureMediaTool(
-        ffmpeg,
-        resolve(targetDir, `release/utils/ffmpeg${mediaSuffix}`),
+      ensureMediaToolPair(
+        mediaTools,
+        {
+          ffmpeg: resolve(targetDir, `release/utils/ffmpeg${mediaSuffix}`),
+          ffprobe: resolve(targetDir, `release/utils/ffprobe${mediaSuffix}`),
+        },
         platform,
-        { command: "ffmpeg", env },
-      );
-      ensureMediaTool(
-        ffprobe,
-        resolve(targetDir, `release/utils/ffprobe${mediaSuffix}`),
-        platform,
-        { command: "ffprobe", env },
+        { env },
       );
     }
 

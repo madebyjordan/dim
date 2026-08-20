@@ -404,7 +404,7 @@ printf '%s\n' "$*" >> "$INSTALL_FIXTURE/winget.args"
 case " $* " in
   *" Gyan.FFmpeg "*)
     printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
-    cp "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
+    printf '#!/usr/bin/env bash\necho "ffprobe version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffprobe"
     chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
     ;;
   *" SQLite.SQLite "*)
@@ -446,6 +446,39 @@ esac
       /--id Microsoft\.VisualStudio\.2022\.BuildTools --exact/,
     );
     assert.match(winget, /Microsoft\.VisualStudio\.Workload\.VCTools/);
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("Windows upgrades an unsupported FFmpeg pair instead of reusing it", () => {
+  const item = fixture();
+  try {
+    prepareWindows(item);
+    executable(
+      resolve(item.bin, "ffmpeg"),
+      '#!/usr/bin/env bash\necho "ffmpeg version 8.1 fixture"\n',
+    );
+    executable(
+      resolve(item.bin, "ffprobe"),
+      '#!/usr/bin/env bash\necho "ffprobe version 8.1 fixture"\n',
+    );
+    executable(
+      resolve(item.bin, "winget"),
+      `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$INSTALL_FIXTURE/winget.args"
+if [[ " $* " == *" upgrade "* && " $* " == *" Gyan.FFmpeg "* ]]; then
+  printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
+  printf '#!/usr/bin/env bash\necho "ffprobe version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffprobe"
+  chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
+fi
+`,
+    );
+
+    const result = run(item, ["--platform", "windows", "--yes", "--no-start"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const winget = readFileSync(resolve(item.repository, "winget.args"), "utf8");
+    assert.match(winget, /upgrade --id Gyan\.FFmpeg --exact/);
   } finally {
     item.cleanup();
   }
@@ -580,11 +613,19 @@ test("Linux recovers documented native packages with apt-get", () => {
       `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$INSTALL_FIXTURE/apt.args"
 if [[ " $* " == *" install "* ]]; then
-  printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
-  cp "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$INSTALL_FIXTURE_BIN/pkg-config"
-  chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe" "$INSTALL_FIXTURE_BIN/pkg-config"
+  chmod +x "$INSTALL_FIXTURE_BIN/pkg-config"
 fi
+`,
+    );
+    executable(
+      resolve(item.repository, "scripts/install-ffmpeg9-linux.sh"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$1"
+printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$1/ffmpeg"
+printf '#!/usr/bin/env bash\necho "ffprobe version 9.0 fixture"\n' > "$1/ffprobe"
+chmod +x "$1/ffmpeg" "$1/ffprobe"
 `,
     );
     rmSync(resolve(item.bin, "ffmpeg"));
@@ -595,12 +636,14 @@ fi
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(
       result.stdout,
-      /Install missing Debian\/Ubuntu packages \(ffmpeg pkg-config libssl-dev\)/,
+      /Install missing Debian\/Ubuntu packages \(pkg-config libssl-dev\)/,
     );
     assert.match(result.stdout, /Installed Linux requirements/);
+    assert.match(result.stdout, /Installed Eclipse FFmpeg 9 toolchain/);
     const apt = readFileSync(resolve(item.repository, "apt.args"), "utf8");
     assert.match(apt, /^update$/m);
-    assert.match(apt, /install -y ffmpeg pkg-config libssl-dev/);
+    assert.match(apt, /install -y pkg-config libssl-dev/);
+    assert.doesNotMatch(apt, /install -y .*ffmpeg/);
   } finally {
     item.cleanup();
   }
@@ -616,7 +659,7 @@ test("Linux gives distribution-specific guidance when apt-get is unavailable", (
     const result = run(item, ["--platform", "linux", "--yes", "--no-start"]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /supports Debian and Ubuntu/);
-    assert.match(result.stdout, /Debian\/Ubuntu package: ffmpeg/);
+    assert.match(result.stdout, /pinned, checksum-verified toolchain/);
     assert.match(result.stdout, /Debian\/Ubuntu package: libssl-dev/);
   } finally {
     item.cleanup();
@@ -690,7 +733,7 @@ test("macOS setup reuses the release bootstrap and preserves user-owned files", 
 });
 
 test(
-  "an invalid existing media tool is reported and never replaced",
+  "an invalid existing media tool does not block repair during the build",
   {
     skip: process.platform === "win32",
   },
@@ -699,11 +742,9 @@ test(
     try {
       const ffprobe = resolve(item.repository, "utils/ffprobe");
       chmodSync(ffprobe, 0o644);
-      const before = readFileSync(ffprobe, "utf8");
       const result = run(item, ["--platform", "macos", "--yes", "--no-start"]);
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /already exists but is not executable/);
-      assert.equal(readFileSync(ffprobe, "utf8"), before);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.doesNotMatch(result.stderr, /already exists but is not executable/);
     } finally {
       item.cleanup();
     }
@@ -760,6 +801,85 @@ test("missing Homebrew requirements give a concrete recovery path", () => {
     assert.match(result.stdout, /install\.sh/);
   } finally {
     item.cleanup();
+  }
+});
+
+test("macOS handles an empty Homebrew package list under set -u", () => {
+  const item = fixture();
+  try {
+    for (const command of ["rustup", "cargo", "rustc"]) {
+      rmSync(resolve(item.bin, command));
+    }
+    executable(resolve(item.bin, "curl"), "#!/usr/bin/env bash\nexit 1\n");
+    const result = run(item, ["--platform", "macos", "--yes", "--no-start"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Some requirements still need attention/);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /unbound variable/);
+  } finally {
+    item.cleanup();
+  }
+});
+
+test("macOS upgrades unsupported or mismatched Homebrew media tools for reinstall and clean flows", () => {
+  for (const action of ["reinstall", "clean"]) {
+    const item = fixture();
+    try {
+      executable(
+        resolve(item.bin, "ffmpeg"),
+        '#!/usr/bin/env bash\necho "ffmpeg version 8.1 fixture"\n',
+      );
+      executable(
+        resolve(item.bin, "ffprobe"),
+        action === "reinstall"
+          ? '#!/usr/bin/env bash\necho "ffprobe version 8.1 fixture"\n'
+          : '#!/usr/bin/env bash\necho "ffprobe version 10.0 fixture"\n',
+      );
+      executable(
+        resolve(item.bin, "brew"),
+        `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$INSTALL_FIXTURE/brew.args"
+case " $* " in
+  *" list --versions ffmpeg "*) echo 'ffmpeg 8.1.2';;
+  *" upgrade ffmpeg "*)
+    printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
+    printf '#!/usr/bin/env bash\necho "ffprobe version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffprobe"
+    chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
+    ;;
+  *" --prefix "*) echo "$INSTALL_FIXTURE/homebrew-prefix";;
+esac
+`,
+      );
+
+      const result = run(item, [
+        "--platform",
+        "macos",
+        "--yes",
+        "--no-start",
+        "--existing-action",
+        action,
+      ]);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, /Installed Homebrew requirements/);
+      assert.match(
+        readFileSync(resolve(item.repository, "brew.args"), "utf8"),
+        /upgrade ffmpeg/,
+      );
+      if (action === "reinstall") {
+        assert.equal(
+          existsSync(resolve(item.repository, "target/release/config/dim.db")),
+          true,
+        );
+        assert.match(result.stdout, /Existing configuration preserved/);
+      } else {
+        assert.equal(
+          existsSync(resolve(item.repository, "target/release/config/dim.db")),
+          false,
+        );
+        assert.match(result.stdout, /Managed Eclipse data reset/);
+      }
+    } finally {
+      item.cleanup();
+    }
   }
 });
 
@@ -853,8 +973,9 @@ test("Linux demo exercises apt recovery and the shared launch flow without actio
     assert.match(result.stdout, /Linux selected/);
     assert.match(
       result.stdout,
-      /Install missing Debian\/Ubuntu packages \(ffmpeg pkg-config\)/,
+      /Install missing Debian\/Ubuntu packages \(pkg-config\)/,
     );
+    assert.match(result.stdout, /Install Eclipse's pinned FFmpeg 9 toolchain/);
     assert.match(result.stdout, /System requirements ready/);
     assert.match(result.stdout, /Eclipse installed/);
     assert.match(result.stdout, /▶ Start Eclipse\n  Exit/);

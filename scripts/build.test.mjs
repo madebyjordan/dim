@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readlinkSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -14,7 +15,12 @@ import { tmpdir } from "node:os";
 import { delimiter, resolve } from "node:path";
 import test from "node:test";
 
-import { build, parseBuildArgs, validateMediaTool } from "./build.mjs";
+import {
+  build,
+  parseBuildArgs,
+  validateMediaTool,
+  validateMediaToolPair,
+} from "./build.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -196,7 +202,7 @@ test(
 );
 
 test(
-  "macOS and Linux retain executable discovery and symlink behavior",
+  "macOS and Linux reuse valid pairs and replace stale or mismatched utils tools",
   { skip: process.platform === "win32" },
   async () => {
     const directory = mkdtempSync(
@@ -231,6 +237,54 @@ test(
         lstatSync(resolve(repository, "utils/ffprobe")).isSymbolicLink(),
         true,
       );
+
+      const ffmpeg = resolve(repository, "utils/ffmpeg");
+      const ffprobe = resolve(repository, "utils/ffprobe");
+      const originalFfmpegTarget = readlinkSync(ffmpeg);
+      await build({
+        root: repository,
+        args: ["--skip-ui", "--skip-rust"],
+        env: { ...process.env, PATH: bin },
+        platform: process.platform,
+      });
+      assert.equal(readlinkSync(ffmpeg), originalFfmpegTarget);
+
+      rmSync(ffmpeg);
+      writeFileSync(ffmpeg, "#!/bin/sh\necho 'ffmpeg version 8.1 stale'\n");
+      chmodSync(ffmpeg, 0o644);
+      rmSync(ffprobe);
+      writeFileSync(ffprobe, "#!/bin/sh\necho 'ffprobe version 10.0 stale'\n");
+      chmodSync(ffprobe, 0o755);
+      await build({
+        root: repository,
+        args: ["--skip-ui", "--skip-rust"],
+        env: { ...process.env, PATH: bin },
+        platform: process.platform,
+      });
+      assert.equal(lstatSync(ffmpeg).isSymbolicLink(), true);
+      assert.equal(lstatSync(ffprobe).isSymbolicLink(), true);
+      assert.equal(validateMediaToolPair(ffmpeg, ffprobe).ok, true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "media tool pair validation rejects mismatched supported major versions",
+  { skip: process.platform === "win32" },
+  () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "eclipse-pair-test-"));
+    try {
+      const ffmpeg = resolve(directory, "ffmpeg");
+      const ffprobe = resolve(directory, "ffprobe");
+      writeFileSync(ffmpeg, "#!/bin/sh\necho 'ffmpeg version 9.0 fixture'\n");
+      writeFileSync(ffprobe, "#!/bin/sh\necho 'ffprobe version 10.0 fixture'\n");
+      chmodSync(ffmpeg, 0o755);
+      chmodSync(ffprobe, 0o755);
+      const validation = validateMediaToolPair(ffmpeg, ffprobe);
+      assert.equal(validation.ok, false);
+      assert.match(validation.detail, /does not match/);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

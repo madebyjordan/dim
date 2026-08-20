@@ -31,6 +31,11 @@ ECLIPSE_LIFECYCLE_DIAGNOSTICS_SHOWN=false
 ECLIPSE_SHUTDOWN_ATTEMPTED=false
 ECLIPSE_RUNTIME_DIR="$ECLIPSE_ROOT/target/release"
 ECLIPSE_BINARY_SUFFIX=""
+ECLIPSE_MEDIA_STATUS="unknown"
+ECLIPSE_FFMPEG_STATUS="unknown"
+ECLIPSE_FFPROBE_STATUS="unknown"
+ECLIPSE_FFMPEG_MAJOR=""
+ECLIPSE_FFPROBE_MAJOR=""
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     ECLIPSE_BOLD=$'\033[1m'
@@ -653,7 +658,7 @@ run_installation() {
         fi
         label=$current_stage
         if [[ "$current_stage" == "Building Eclipse backend" ]]; then
-            label="$current_stage… $(format_elapsed "$((SECONDS - started))")"
+            label="${current_stage}… $(format_elapsed "$((SECONDS - started))")"
         fi
         if [[ -t 1 ]]; then
             printf '\r%s%s%s %s' "$ECLIPSE_BLUE" "${frames[$frame]}" "$ECLIPSE_RESET" "${label:-Preparing installation}"
@@ -1032,28 +1037,69 @@ node_is_supported() {
     ' >/dev/null 2>&1
 }
 
-media_tool_is_supported() {
+classify_media_tool() {
     local tool=$1
-    command_available "$tool" && "$tool" -version 2>/dev/null | head -n 1 | awk '
-        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) { found = 1; split($i, version, "."); exit(version[1] >= 9 ? 0 : 1) } }
-        END { if (!found) exit 1 }
-    '
+    local version_line
+    local major=""
+    if ! command_available "$tool"; then
+        printf 'missing|'
+        return 0
+    fi
+    if ! version_line=$("$tool" -version 2>/dev/null | head -n 1); then
+        printf 'invalid|'
+        return 0
+    fi
+    if [[ "$version_line" =~ ^${tool}[[:space:]]version[[:space:]]n?([0-9]+)([.[:space:]]|$) ]]; then
+        major=${BASH_REMATCH[1]}
+    else
+        printf 'invalid|'
+        return 0
+    fi
+    if (( major < 9 )); then
+        printf 'unsupported|%s' "$major"
+    else
+        printf 'valid|%s' "$major"
+    fi
 }
 
-check_existing_media_tools() {
-    local path
-    for path in "$ECLIPSE_ROOT/utils/ffmpeg" "$ECLIPSE_ROOT/utils/ffprobe" \
-        "$ECLIPSE_ROOT/utils/ffmpeg.exe" "$ECLIPSE_ROOT/utils/ffprobe.exe" \
-        "$ECLIPSE_ROOT/target/release/utils/ffmpeg" "$ECLIPSE_ROOT/target/release/utils/ffprobe" \
-        "$ECLIPSE_ROOT/target/release/utils/ffmpeg.exe" "$ECLIPSE_ROOT/target/release/utils/ffprobe.exe"; do
-        if [[ -e "$path" || -L "$path" ]]; then
-            if [[ ! -x "$path" ]]; then
-                failure "$path already exists but is not executable. Eclipse will not replace it."
-                printf 'Repair or remove that specific file, then run %s again.\n' "$(setup_command)" >&2
-                return 1
-            fi
+classify_media_toolchain() {
+    local ffmpeg_result
+    local ffprobe_result
+    ffmpeg_result=$(classify_media_tool ffmpeg)
+    ffprobe_result=$(classify_media_tool ffprobe)
+    ECLIPSE_FFMPEG_STATUS=${ffmpeg_result%%|*}
+    ECLIPSE_FFMPEG_MAJOR=${ffmpeg_result#*|}
+    ECLIPSE_FFPROBE_STATUS=${ffprobe_result%%|*}
+    ECLIPSE_FFPROBE_MAJOR=${ffprobe_result#*|}
+
+    if [[ "$ECLIPSE_FFMPEG_STATUS" == valid && "$ECLIPSE_FFPROBE_STATUS" == valid ]]; then
+        if [[ "$ECLIPSE_FFMPEG_MAJOR" == "$ECLIPSE_FFPROBE_MAJOR" ]]; then
+            ECLIPSE_MEDIA_STATUS=valid
+        else
+            ECLIPSE_MEDIA_STATUS=mismatched
         fi
+    elif [[ "$ECLIPSE_FFMPEG_STATUS" == missing || "$ECLIPSE_FFPROBE_STATUS" == missing ]]; then
+        ECLIPSE_MEDIA_STATUS=missing
+    elif [[ "$ECLIPSE_FFMPEG_STATUS" == unsupported || "$ECLIPSE_FFPROBE_STATUS" == unsupported ]]; then
+        ECLIPSE_MEDIA_STATUS=unsupported
+    else
+        ECLIPSE_MEDIA_STATUS=invalid
+    fi
+}
+
+media_toolchain_is_supported() {
+    classify_media_toolchain
+    [[ "$ECLIPSE_MEDIA_STATUS" == valid ]]
+}
+
+package_list_contains() {
+    local needle=$1
+    shift
+    local package
+    for package in "$@"; do
+        [[ "$package" == "$needle" ]] && return 0
     done
+    return 1
 }
 
 print_requirement_failure() {
@@ -1084,7 +1130,7 @@ print_linux_requirement_failure() {
             ;;
         corepack) printf '  • Corepack — install it with supported Node.js, then run: corepack enable pnpm\n' ;;
         rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — https://rustup.rs\n' ;;
-        ffmpeg) printf '  • FFmpeg and FFprobe 9.0 or newer — Debian/Ubuntu package: ffmpeg (the configured repository must provide major version 9+)\n' ;;
+        ffmpeg) printf '  • FFmpeg and FFprobe 9.0 or newer — Eclipse pinned, checksum-verified toolchain\n' ;;
         sqlite) printf '  • SQLite tools — Debian/Ubuntu package: sqlite3\n' ;;
         pkgconfig) printf '  • pkg-config — Debian/Ubuntu package: pkg-config\n' ;;
         buildtools) printf '  • C/C++ build toolchain — Debian/Ubuntu package: build-essential\n' ;;
@@ -1106,7 +1152,7 @@ collect_macos_requirements() {
     node_is_supported || ECLIPSE_MISSING+=(node)
     command_available corepack || ECLIPSE_MISSING+=(corepack)
     if ! command_available rustup || ! command_available cargo || ! command_available rustc; then ECLIPSE_MISSING+=(rustup); fi
-    if ! media_tool_is_supported ffmpeg || ! media_tool_is_supported ffprobe; then ECLIPSE_MISSING+=(ffmpeg); fi
+    media_toolchain_is_supported || ECLIPSE_MISSING+=(ffmpeg)
     command_available sqlite3 || ECLIPSE_MISSING+=(sqlite)
     command_available pkg-config || ECLIPSE_MISSING+=(pkgconfig)
     command_available curl || ECLIPSE_MISSING+=(curl)
@@ -1124,7 +1170,21 @@ prepare_macos_path() {
         if brew --prefix sqlite >/dev/null 2>&1; then
             export PATH="$(brew --prefix sqlite)/bin:$PATH"
         fi
+        if brew --prefix ffmpeg >/dev/null 2>&1; then
+            export PATH="$(brew --prefix ffmpeg)/bin:$PATH"
+        fi
     fi
+}
+
+brew_install_or_upgrade_packages() {
+    local package
+    for package in "$@"; do
+        if [[ "$package" == ffmpeg ]] && brew list --versions ffmpeg >/dev/null 2>&1; then
+            brew upgrade ffmpeg
+        else
+            brew install "$package"
+        fi
+    done
 }
 
 install_homebrew_requirements() {
@@ -1132,18 +1192,26 @@ install_homebrew_requirements() {
     local item
     for item in "${ECLIPSE_MISSING[@]}"; do
         case "$item" in
-            node|corepack) [[ " ${packages[*]} " == *" node@24 "* ]] || packages+=(node@24) ;;
-            ffmpeg) packages+=(ffmpeg) ;;
-            sqlite) packages+=(sqlite) ;;
-            pkgconfig) packages+=(pkg-config) ;;
+            node|corepack)
+                if [[ ${#packages[@]} -eq 0 ]] || ! package_list_contains node@24 "${packages[@]}"; then packages+=(node@24); fi
+                ;;
+            ffmpeg)
+                if [[ ${#packages[@]} -eq 0 ]] || ! package_list_contains ffmpeg "${packages[@]}"; then packages+=(ffmpeg); fi
+                ;;
+            sqlite)
+                if [[ ${#packages[@]} -eq 0 ]] || ! package_list_contains sqlite "${packages[@]}"; then packages+=(sqlite); fi
+                ;;
+            pkgconfig)
+                if [[ ${#packages[@]} -eq 0 ]] || ! package_list_contains pkg-config "${packages[@]}"; then packages+=(pkg-config); fi
+                ;;
         esac
     done
-    if [[ -n "${packages[*]:-}" ]]; then
+    if [[ ${#packages[@]} -gt 0 ]]; then
         if [[ "$ECLIPSE_DEMO" == false ]]; then
             command_available brew || return 1
         fi
         confirm "Install missing Homebrew packages (${packages[*]})?" || return 1
-        run_step "Installed Homebrew requirements" brew install "${packages[@]}" || return 1
+        run_step "Installed Homebrew requirements" brew_install_or_upgrade_packages "${packages[@]}" || return 1
         if [[ "$ECLIPSE_DEMO" == true ]]; then
             ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=true
             return 0
@@ -1153,6 +1221,9 @@ install_homebrew_requirements() {
         fi
         if brew --prefix sqlite >/dev/null 2>&1; then
             export PATH="$(brew --prefix sqlite)/bin:$PATH"
+        fi
+        if brew --prefix ffmpeg >/dev/null 2>&1; then
+            export PATH="$(brew --prefix ffmpeg)/bin:$PATH"
         fi
     fi
 }
@@ -1233,7 +1304,7 @@ collect_linux_requirements() {
     node_is_supported || ECLIPSE_MISSING+=(node)
     command_available corepack || ECLIPSE_MISSING+=(corepack)
     if ! command_available rustup || ! command_available cargo || ! command_available rustc; then ECLIPSE_MISSING+=(rustup); fi
-    if ! media_tool_is_supported ffmpeg || ! media_tool_is_supported ffprobe; then ECLIPSE_MISSING+=(ffmpeg); fi
+    media_toolchain_is_supported || ECLIPSE_MISSING+=(ffmpeg)
     command_available sqlite3 || ECLIPSE_MISSING+=(sqlite)
     command_available pkg-config || ECLIPSE_MISSING+=(pkgconfig)
     if ! command_available cc || ! command_available c++; then ECLIPSE_MISSING+=(buildtools); fi
@@ -1259,7 +1330,6 @@ install_apt_requirements() {
         package=""
         case "$item" in
             git) package=git ;;
-            ffmpeg) package=ffmpeg ;;
             sqlite) package=sqlite3 ;;
             pkgconfig) package=pkg-config ;;
             buildtools) package=build-essential ;;
@@ -1267,10 +1337,12 @@ install_apt_requirements() {
             curl) package=curl ;;
         esac
         [[ -n "$package" ]] || continue
-        [[ " ${packages[*]:-} " == *" $package "* ]] || packages+=("$package")
+        if [[ ${#packages[@]} -eq 0 ]] || ! package_list_contains "$package" "${packages[@]}"; then
+            packages+=("$package")
+        fi
     done
 
-    [[ -n "${packages[*]:-}" ]] || return 0
+    [[ ${#packages[@]} -gt 0 ]] || return 0
     if [[ "$ECLIPSE_DEMO" == false ]]; then
         command_available apt-get || return 1
         if [[ $EUID -ne 0 ]] && ! command_available sudo; then
@@ -1287,7 +1359,27 @@ install_apt_requirements() {
     fi
     run_step "Installed Linux requirements" apt_install "${packages[@]}" || return 1
     if [[ "$ECLIPSE_DEMO" == true ]]; then
+        return 0
+    fi
+}
+
+linux_media_repair_needed() {
+    local item
+    for item in "${ECLIPSE_MISSING[@]}"; do
+        [[ "$item" == ffmpeg ]] && return 0
+    done
+    return 1
+}
+
+install_linux_media_tools() {
+    linux_media_repair_needed || return 0
+    confirm "Install Eclipse's pinned FFmpeg 9 toolchain?" || return 1
+    run_step "Installed Eclipse FFmpeg 9 toolchain" \
+        bash "$ECLIPSE_ROOT/scripts/install-ffmpeg9-linux.sh" "$ECLIPSE_ROOT/utils" || return 1
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
         ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=true
+    else
+        export PATH="$ECLIPSE_ROOT/utils:$PATH"
     fi
 }
 
@@ -1295,7 +1387,7 @@ resolve_linux_requirements() {
     local apt_needed=false
     local item
     for item in "${ECLIPSE_MISSING[@]}"; do
-        case "$item" in git|ffmpeg|sqlite|pkgconfig|buildtools|openssl|curl) apt_needed=true ;; esac
+        case "$item" in git|sqlite|pkgconfig|buildtools|openssl|curl) apt_needed=true ;; esac
     done
 
     if [[ "$ECLIPSE_DEMO" == false && "$apt_needed" == true ]] && ! command_available apt-get; then
@@ -1315,6 +1407,7 @@ resolve_linux_requirements() {
     fi
 
     install_apt_requirements || true
+    install_linux_media_tools || true
     install_rustup || true
     collect_linux_requirements
     if [[ ${#ECLIPSE_MISSING[@]} -gt 0 ]]; then
@@ -1411,7 +1504,7 @@ collect_windows_requirements() {
     node_is_supported || ECLIPSE_MISSING+=(node)
     command_available corepack || ECLIPSE_MISSING+=(corepack)
     if ! command_available rustup || ! command_available cargo || ! command_available rustc; then ECLIPSE_MISSING+=(rustup); fi
-    if ! media_tool_is_supported ffmpeg || ! media_tool_is_supported ffprobe; then ECLIPSE_MISSING+=(ffmpeg); fi
+    media_toolchain_is_supported || ECLIPSE_MISSING+=(ffmpeg)
     command_available sqlite3 || ECLIPSE_MISSING+=(sqlite)
     detect_windows_toolchain
     [[ "$ECLIPSE_WINDOWS_TOOLCHAIN_STATUS" == ready ]] || ECLIPSE_MISSING+=("$ECLIPSE_WINDOWS_TOOLCHAIN_STATUS")
@@ -1451,6 +1544,14 @@ winget_install_packages() {
             Microsoft.VisualStudio.2022.BuildTools)
                 winget install --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --override "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
                 ;;
+            Gyan.FFmpeg)
+                if [[ "$ECLIPSE_MEDIA_STATUS" == missing ]]; then
+                    winget install --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+                else
+                    winget upgrade --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity || \
+                        winget install --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+                fi
+                ;;
             *)
                 winget install --id "$package" --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
                 ;;
@@ -1473,10 +1574,12 @@ install_winget_requirements() {
             buildtools) package=Microsoft.VisualStudio.2022.BuildTools ;;
         esac
         [[ -n "$package" ]] || continue
-        [[ " ${packages[*]:-} " == *" $package "* ]] || packages+=("$package")
+        if [[ ${#packages[@]} -eq 0 ]] || ! package_list_contains "$package" "${packages[@]}"; then
+            packages+=("$package")
+        fi
     done
 
-    [[ -n "${packages[*]:-}" ]] || return 0
+    [[ ${#packages[@]} -gt 0 ]] || return 0
     if [[ "$ECLIPSE_DEMO" == false ]] && ! command_available winget; then
         return 1
     fi
@@ -1667,9 +1770,6 @@ install_platform_macos() {
     printf '\n'
     prepare_installation_lifecycle
     prepare_macos_path
-    if [[ "$ECLIPSE_DEMO" == false ]]; then
-        check_existing_media_tools
-    fi
     check_macos_requirements
     install_and_offer_start
 }
@@ -1688,9 +1788,6 @@ install_platform_linux() {
     prepare_installation_lifecycle
     if [[ -d "${CARGO_HOME:-$HOME/.cargo}/bin" && "$ECLIPSE_DEMO" == false ]]; then
         export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
-    fi
-    if [[ "$ECLIPSE_DEMO" == false ]]; then
-        check_existing_media_tools
     fi
     check_linux_requirements
     install_and_offer_start
@@ -1714,9 +1811,6 @@ install_platform_windows() {
     printf '\n'
     prepare_installation_lifecycle
     refresh_windows_path
-    if [[ "$ECLIPSE_DEMO" == false ]]; then
-        check_existing_media_tools
-    fi
     check_windows_requirements
     install_and_offer_start
 }

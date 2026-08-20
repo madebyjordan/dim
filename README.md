@@ -64,14 +64,14 @@ brew install ffmpeg sqlite pkg-config
 
 # Debian or Ubuntu
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libssl-dev sqlite3 ffmpeg
+sudo apt-get install -y build-essential pkg-config libssl-dev sqlite3
 ```
 
-Eclipse requires the installed `ffmpeg` and `ffprobe` commands to report major version 9 or
-newer. Homebrew's current `ffmpeg`/`ffmpeg@9` formula satisfies that baseline. On Linux, use a
-distribution repository that provides FFmpeg 9; the installer fails with a version diagnostic
-instead of accepting an older distro package. Release and container builds use a pinned,
-checksum-verified FFmpeg 9.0.1 static toolchain for x86_64 and arm64.
+Eclipse requires `ffmpeg` and `ffprobe` to report the same major version, version 9 or newer.
+The installer upgrades Homebrew's `ffmpeg` formula on macOS, uses Eclipse's pinned,
+checksum-verified FFmpeg 9.0.1 static toolchain on Linux x86_64 and arm64, and repairs the
+standalone WinGet-provisioned pair on Windows. Existing valid tools are reused; stale tools in
+`utils` are replaced during the build.
 
 On Windows, the installer uses WinGet where appropriate and configures a user-level pnpm shim for
 new PowerShell, CMD, and Git Bash sessions. **Visual Studio Build Tools must include the MSVC x64 compiler and a Windows SDK**.
