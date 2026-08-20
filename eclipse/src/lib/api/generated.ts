@@ -249,6 +249,39 @@ export type PlaybackPlan = {
 
 export type RemotePlaybackResource = { kind: 'airplay'; url: string };
 
+export type RemotePlaybackState =
+  | 'prepared'
+  | 'handoff_requested'
+  | 'wireless_route_reported'
+  | 'media_delivery_confirmed'
+  | 'handoff_stalled'
+  | 'failed'
+  | 'disconnected';
+
+export type RemoteRequestAttribution =
+  | 'sender_preflight'
+  | 'sender_or_local_proxy'
+  | 'apple_media_intermediary_candidate'
+  | 'remote_network_candidate'
+  | 'origin_unresolved'
+  | 'disconnected_or_stale';
+
+export type RemoteHlsStage =
+  | 'master_playlist'
+  | 'media_playlist'
+  | 'init_fragment'
+  | 'media_segment'
+  | 'unknown';
+
+export type RemotePlaybackStatus = {
+  state: RemotePlaybackState;
+  handoff_elapsed_ms?: number | null;
+  successful_remote_inits: number;
+  successful_remote_segments: number;
+  last_request_attribution?: RemoteRequestAttribution | null;
+  last_request_stage?: RemoteHlsStage | null;
+};
+
 export type PlaybackSession = {
   gid: string;
   tracks: Array<PlaybackTrack>;
@@ -304,5 +337,7 @@ export interface ApiOperations {
   inspectPlaybackCapabilities: '/stream/{id}/capabilities';
   createPlaybackSession: '/stream/{id}/manifest';
   getPlaybackFailure: '/stream/{gid}/state/get_stderr';
+  getRemotePlaybackStatus: '/stream/{gid}/state/remote-route';
+  updateRemotePlaybackState: '/stream/{gid}/state/remote-route';
   killPlaybackSession: '/stream/{gid}/state/kill';
 }

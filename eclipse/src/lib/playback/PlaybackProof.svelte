@@ -3,7 +3,9 @@
   import type {
     PlaybackCapabilityInspection,
     PlaybackSession,
-    PlaybackTrack
+    PlaybackTrack,
+    RemotePlaybackState,
+    RemotePlaybackStatus
   } from '$lib/api/generated';
   import { session } from '$lib/auth/session.svelte';
   import Button from '$lib/primitives/Button.svelte';
@@ -14,6 +16,7 @@
   } from './capabilities';
   import {
     clearStoredPlayback,
+    createPlaybackInstanceId,
     createPlaybackOwnership,
     creationQuery,
     logPlaybackLifecycle,
@@ -27,6 +30,10 @@
   interface WebKitAirPlayVideo extends HTMLVideoElement {
     webkitShowPlaybackTargetPicker?: () => void;
     webkitCurrentPlaybackTargetIsWireless?: boolean;
+  }
+
+  interface WebKitPlaybackTargetAvailabilityEvent extends Event {
+    availability?: 'available' | 'not-available';
   }
 
   interface DashPlayer {
@@ -70,6 +77,7 @@
   let surface: HTMLElement;
   let controlsPanel: HTMLElement;
   let video: HTMLVideoElement;
+  let remoteAirPlayHost: HTMLElement;
   let timeOutput: HTMLOutputElement;
   let durationOutput: HTMLOutputElement;
   let seekInput: HTMLInputElement;
@@ -86,8 +94,20 @@
   let subtitleCleanup: (() => void) | null = null;
   let remoteSessionId: string | null = null;
   let remoteVideo: WebKitAirPlayVideo | null = null;
+  let remoteEventCleanup: (() => void) | null = null;
+  let airPlayStatusTimer: number | null = null;
+  let airPlayAttempt: { id: string; startedAt: number } | null = null;
+  let airPlayHandoffTime = 0;
+  let airPlayTargetAvailability: 'unknown' | 'available' | 'not-available' =
+    'unknown';
   let airPlayState = $state<
-    'unavailable' | 'available' | 'preparing' | 'ready' | 'active'
+    | 'unavailable'
+    | 'available'
+    | 'preparing'
+    | 'ready'
+    | 'route-selected'
+    | 'active'
+    | 'failed'
   >('unavailable');
   let controlsVisible = $state(true);
   let paused = $state(true);
@@ -101,6 +121,7 @@
   let unmountReason = 'component-unmounted';
   let unmountCaller = 'PlaybackProof.onMount.cleanup';
   const controlsIdleMs = 1_250;
+  const airPlayMetadataDeadlineMs = 15_000;
 
   const tracks = (kind: PlaybackTrack['content_type']) =>
     playbackSession?.tracks.filter((track) => track.content_type === kind) ??
@@ -550,32 +571,387 @@
       airPlayState === 'ready' &&
       remoteVideo?.webkitShowPlaybackTargetPicker
     ) {
-      remoteVideo.webkitShowPlaybackTargetPicker();
+      airPlayAttempt = {
+        id: createPlaybackInstanceId(),
+        startedAt: performance.now()
+      };
+      logAirPlayStage('attempt-started', {
+        playlistPath: new URL(remoteVideo.currentSrc || remoteVideo.src)
+          .pathname
+      });
+      void updateRemoteRouteState('handoff_requested').catch((cause) =>
+        logAirPlayStage('route-state-report-failed', {
+          routeState: 'handoff_requested',
+          failure: cause instanceof Error ? cause.message : String(cause)
+        })
+      );
+      try {
+        remoteVideo.webkitShowPlaybackTargetPicker();
+        logAirPlayStage('picker-opened');
+        // WebKit does not always emit a change event when this element inherits an already
+        // selected system route. Re-read the property at the end of the picker invocation so
+        // that an existing wireless target follows the same handoff path as a new selection.
+        queueMicrotask(() => {
+          if (remoteVideo?.webkitCurrentPlaybackTargetIsWireless)
+            void handleWirelessTargetChanged(remoteVideo);
+        });
+      } catch (cause) {
+        airPlayState = 'failed';
+        error =
+          cause instanceof Error
+            ? cause.message
+            : 'Safari could not open the AirPlay picker.';
+        logAirPlayStage('picker-failed', { failure: error });
+      }
       return;
     }
     airPlayState = 'preparing';
     try {
+      await disposeRemotePlayback('airplay-attempt-replaced');
       const remote = await createSession('airplay');
       if (!remote.remote)
         throw new Error('The backend did not provide an AirPlay resource.');
       remoteSessionId = remote.gid;
       const element = document.createElement('video') as WebKitAirPlayVideo;
-      element.src = new URL(remote.remote.url, window.location.origin).href;
-      element.preload = 'auto';
+      element.playsInline = true;
+      element.setAttribute('x-webkit-airplay', 'allow');
+      // WebKit on macOS silently returns from webkitShowPlaybackTargetPicker()
+      // while readyState is below HAVE_METADATA. Chromium has no equivalent
+      // picker precondition, so prepare this native HLS element only in the
+      // WebKit AirPlay path.
+      element.preload = 'metadata';
+      remoteAirPlayHost.append(element);
+      const onWirelessChanged = () => void handleWirelessTargetChanged(element);
+      const onAvailabilityChanged = (event: Event) => {
+        const availability = (event as WebKitPlaybackTargetAvailabilityEvent)
+          .availability;
+        airPlayTargetAvailability = availability ?? 'unknown';
+        // Safari's availability event is advisory and may report `not-available`
+        // until its system picker performs discovery. Keep the picker accessible;
+        // only the presence of the picker API determines UI support.
+        logAirPlayStage('target-availability-changed', { availability });
+      };
+      const diagnosticEvents = [
+        'abort',
+        'canplay',
+        'emptied',
+        'ended',
+        'error',
+        'loadeddata',
+        'loadedmetadata',
+        'loadstart',
+        'pause',
+        'play',
+        'playing',
+        'progress',
+        'stalled',
+        'suspend',
+        'waiting'
+      ] as const;
+      const onRemoteMediaEvent = (event: Event) => {
+        const details = remoteMediaState(element);
+        logAirPlayStage(`media-${event.type}`, details);
+        reportRemotePlayerEvent(event.type, details);
+      };
       element.addEventListener(
         'webkitcurrentplaybacktargetiswirelesschanged',
-        () => {
-          airPlayState = element.webkitCurrentPlaybackTargetIsWireless
-            ? 'active'
-            : 'ready';
-        }
+        onWirelessChanged
       );
+      element.addEventListener(
+        'webkitplaybacktargetavailabilitychanged',
+        onAvailabilityChanged
+      );
+      for (const event of diagnosticEvents)
+        element.addEventListener(event, onRemoteMediaEvent);
+      remoteEventCleanup = () => {
+        element.removeEventListener(
+          'webkitcurrentplaybacktargetiswirelesschanged',
+          onWirelessChanged
+        );
+        element.removeEventListener(
+          'webkitplaybacktargetavailabilitychanged',
+          onAvailabilityChanged
+        );
+        for (const event of diagnosticEvents)
+          element.removeEventListener(event, onRemoteMediaEvent);
+      };
       remoteVideo = element;
+      element.src = new URL(remote.remote.url, window.location.origin).href;
+      element.load();
+      await waitForAirPlayMetadata(element);
       airPlayState = 'ready';
+      logPlaybackLifecycle('airplay-resource-ready', ownership, {
+        sessionId: remote.gid,
+        playbackPlan: remote.playback_plan,
+        preload: element.preload,
+        readyState: element.readyState
+      });
     } catch (cause) {
-      airPlayState = 'available';
+      airPlayState = 'failed';
       error =
         cause instanceof Error ? cause.message : 'AirPlay preparation failed';
+    }
+  }
+
+  function waitForAirPlayMetadata(element: WebKitAirPlayVideo) {
+    if (element.readyState >= HTMLMediaElement.HAVE_METADATA)
+      return Promise.resolve();
+
+    return new Promise<void>((resolve, reject) => {
+      const finish = (failure?: Error) => {
+        window.clearTimeout(deadline);
+        element.removeEventListener('loadedmetadata', onLoadedMetadata);
+        element.removeEventListener('abort', onAbort);
+        element.removeEventListener('error', onError);
+        if (failure) reject(failure);
+        else resolve();
+      };
+      const onLoadedMetadata = () => finish();
+      const onAbort = () =>
+        finish(new Error('Safari aborted AirPlay media initialization.'));
+      const onError = () =>
+        finish(
+          new Error(
+            element.error?.message ||
+              'Safari could not initialize the AirPlay media resource.'
+          )
+        );
+      const deadline = window.setTimeout(
+        () =>
+          finish(
+            new Error(
+              'Safari did not make the AirPlay media element picker-ready within 15 seconds.'
+            )
+          ),
+        airPlayMetadataDeadlineMs
+      );
+      element.addEventListener('loadedmetadata', onLoadedMetadata);
+      element.addEventListener('abort', onAbort);
+      element.addEventListener('error', onError);
+    });
+  }
+
+  function remoteMediaState(element = remoteVideo) {
+    if (!element) return {};
+    return {
+      wirelessTarget: element.webkitCurrentPlaybackTargetIsWireless ?? false,
+      currentTime: finite(element.currentTime),
+      duration: finite(element.duration),
+      readyState: element.readyState,
+      networkState: element.networkState,
+      paused: element.paused,
+      ended: element.ended,
+      errorCode: element.error?.code,
+      errorMessage: element.error?.message
+    };
+  }
+
+  function logAirPlayStage(
+    stage: string,
+    details: Record<string, unknown> = {}
+  ) {
+    const entry = {
+      attemptId: airPlayAttempt?.id ?? null,
+      sessionId: remoteSessionId,
+      stage,
+      elapsedMs: airPlayAttempt
+        ? Math.round(performance.now() - airPlayAttempt.startedAt)
+        : null,
+      ...details
+    };
+    logPlaybackLifecycle('airplay-attempt', ownership, entry);
+    console.info(
+      '[airplay-stage]',
+      stage,
+      String(
+        details.availability ??
+          details.wireless ??
+          details.routeState ??
+          details.failure ??
+          ''
+      ),
+      JSON.stringify(entry)
+    );
+  }
+
+  function reportRemotePlayerEvent(
+    event: string,
+    details: Record<string, unknown> = {}
+  ) {
+    if (!remoteSessionId) return;
+    void session.api
+      .post(`stream/${remoteSessionId}/state/player-event`, {
+        event: `airplay-${event}`,
+        frontend_instance_id: ownership.instanceId,
+        media_file_id: fileId,
+        source_generation: ownership.sourceGeneration,
+        detail: JSON.stringify({
+          attemptId: airPlayAttempt?.id ?? null,
+          ...details
+        })
+      })
+      .catch(() => undefined);
+  }
+
+  async function updateRemoteRouteState(state: RemotePlaybackState) {
+    if (!remoteSessionId) return;
+    await session.api.request<void>(
+      `stream/${remoteSessionId}/state/remote-route`,
+      { method: 'PUT', body: JSON.stringify({ state }) }
+    );
+    logAirPlayStage('route-state-reported', { routeState: state });
+  }
+
+  function stopAirPlayStatusMonitor() {
+    if (airPlayStatusTimer !== null) window.clearTimeout(airPlayStatusTimer);
+    airPlayStatusTimer = null;
+  }
+
+  function monitorAirPlayDelivery() {
+    stopAirPlayStatusMonitor();
+    const sessionId = remoteSessionId;
+    if (!sessionId) return;
+    const poll = async () => {
+      if (remoteSessionId !== sessionId) return;
+      try {
+        const status = await session.api.get<RemotePlaybackStatus>(
+          `stream/${sessionId}/state/remote-route`
+        );
+        logAirPlayStage('delivery-status', status);
+        if (status.state === 'media_delivery_confirmed') {
+          airPlayState = 'active';
+          error = null;
+          logAirPlayStage('remote-delivery-established', status);
+          return;
+        }
+        if (status.state === 'handoff_stalled' || status.state === 'failed') {
+          airPlayState = 'failed';
+          error =
+            status.last_request_stage === 'init_fragment'
+              ? 'The AirPlay receiver reached Eclipse, but playback stopped at stream initialization.'
+              : status.last_request_stage === 'media_segment'
+                ? 'The AirPlay receiver began fetching media, but delivery stopped before playback was established.'
+                : 'Safari selected an AirPlay receiver, but Eclipse did not observe remote media delivery.';
+          logAirPlayStage('remote-delivery-failed', {
+            ...status,
+            failure: error
+          });
+          await restoreLocalPlayback();
+          return;
+        }
+        airPlayStatusTimer = window.setTimeout(poll, 500);
+      } catch (cause) {
+        airPlayState = 'failed';
+        error =
+          cause instanceof Error
+            ? cause.message
+            : 'AirPlay delivery status could not be read.';
+        logAirPlayStage('status-failed', { failure: error });
+        await restoreLocalPlayback();
+      }
+    };
+    void poll();
+  }
+
+  async function handleWirelessTargetChanged(element: WebKitAirPlayVideo) {
+    const wireless = element.webkitCurrentPlaybackTargetIsWireless === true;
+    if (
+      wireless &&
+      (airPlayState === 'route-selected' || airPlayState === 'active')
+    )
+      return;
+    logAirPlayStage('wireless-target-changed', {
+      wireless,
+      ...remoteMediaState(element)
+    });
+    if (!wireless) {
+      stopAirPlayStatusMonitor();
+      if (airPlayAttempt) {
+        await updateRemoteRouteState('disconnected').catch(() => undefined);
+        logAirPlayStage('receiver-disconnected');
+      }
+      airPlayAttempt = null;
+      airPlayState = 'ready';
+      await restoreLocalPlayback();
+      return;
+    }
+
+    airPlayState = 'route-selected';
+    airPlayHandoffTime = video.currentTime;
+    logAirPlayStage('receiver-selected', { localTime: airPlayHandoffTime });
+    try {
+      await updateRemoteRouteState('wireless_route_reported');
+      video.pause();
+      dashErrorCleanup?.();
+      dashErrorCleanup = null;
+      dashTelemetryCleanup?.();
+      dashTelemetryCleanup = null;
+      dashPlayer?.destroy();
+      dashPlayer = null;
+      await element.play();
+      logAirPlayStage(
+        'remote-play-request-accepted',
+        remoteMediaState(element)
+      );
+      monitorAirPlayDelivery();
+    } catch (cause) {
+      airPlayState = 'failed';
+      error =
+        cause instanceof Error
+          ? cause.message
+          : 'Safari rejected the AirPlay playback handoff.';
+      await updateRemoteRouteState('failed').catch(() => undefined);
+      logAirPlayStage('remote-play-request-failed', { failure: error });
+      await restoreLocalPlayback();
+    }
+  }
+
+  async function restoreLocalPlayback() {
+    if (!playbackSession || dashPlayer || phase !== 'ready') return;
+    try {
+      await activate();
+      if (airPlayHandoffTime > 0) {
+        if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+          await new Promise<void>((resolve) =>
+            video.addEventListener('loadedmetadata', () => resolve(), {
+              once: true
+            })
+          );
+        }
+        video.currentTime = airPlayHandoffTime;
+      }
+      await video.play();
+      logAirPlayStage('local-playback-restored', {
+        currentTime: video.currentTime
+      });
+    } catch (cause) {
+      error =
+        cause instanceof Error
+          ? cause.message
+          : 'Local playback could not be restored.';
+      logAirPlayStage('local-playback-restore-failed', { failure: error });
+    }
+  }
+
+  async function disposeRemotePlayback(reason: string) {
+    stopAirPlayStatusMonitor();
+    remoteEventCleanup?.();
+    remoteEventCleanup = null;
+    remoteVideo?.pause();
+    remoteVideo?.removeAttribute('src');
+    remoteVideo?.load();
+    remoteVideo?.remove();
+    remoteVideo = null;
+    airPlayAttempt = null;
+    const gid = remoteSessionId;
+    remoteSessionId = null;
+    if (gid) {
+      clearStoredPlayback(gid);
+      await teardownSession(
+        gid,
+        reason,
+        'PlaybackProof.disposeRemotePlayback'
+      ).catch(() => undefined);
     }
   }
 
@@ -591,15 +967,9 @@
     dashTelemetryCleanup = null;
     dashPlayer?.destroy();
     dashPlayer = null;
-    remoteVideo?.pause();
-    remoteVideo?.removeAttribute('src');
-    remoteVideo?.load();
-    remoteVideo = null;
-    const ids = [playbackSession?.gid, remoteSessionId].filter(
-      Boolean
-    ) as string[];
+    await disposeRemotePlayback(reason);
+    const ids = [playbackSession?.gid].filter(Boolean) as string[];
     playbackSession = null;
-    remoteSessionId = null;
     for (const gid of ids) clearStoredPlayback(gid);
     await Promise.allSettled(
       ids.map((gid) => teardownSession(gid, reason, caller))
@@ -725,6 +1095,11 @@
           sessionId: created.gid,
           sourceGeneration: currentSourceGeneration
         });
+        // Prepare the remote resource before the user gesture. WebKit requires
+        // webkitShowPlaybackTargetPicker() to run synchronously from the click;
+        // consuming that click while awaiting session creation makes the button
+        // appear inert and requires an undocumented second click.
+        if (airPlayState === 'available') void prepareAirPlay();
       } catch (cause) {
         error =
           cause instanceof Error
@@ -765,6 +1140,11 @@
   bind:this={surface}
 >
   <video bind:this={video} playsinline onclick={togglePlayback}></video>
+  <div
+    class="remote-airplay-host"
+    bind:this={remoteAirPlayHost}
+    aria-hidden="true"
+  ></div>
 
   {#if phase === 'loading'}
     <p class="status">Preparing authenticated stream…</p>
@@ -894,10 +1274,14 @@
             disabled={airPlayState === 'preparing'}
           >
             {airPlayState === 'active'
-              ? 'AirPlay active'
-              : airPlayState === 'preparing'
-                ? 'Preparing…'
-                : 'AirPlay'}
+              ? 'AirPlay streaming'
+              : airPlayState === 'route-selected'
+                ? 'Connecting AirPlay…'
+                : airPlayState === 'preparing'
+                  ? 'Preparing…'
+                  : airPlayState === 'failed'
+                    ? 'Retry AirPlay'
+                    : 'AirPlay'}
           </button>
         {/if}
         <button
@@ -962,6 +1346,20 @@
       transparent 58%,
       rgba(0, 0, 0, 0.82)
     );
+  }
+  .remote-airplay-host {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    left: 0;
+    bottom: 0;
+    overflow: hidden;
+    opacity: 0.001;
+    pointer-events: none;
+  }
+  .remote-airplay-host :global(video) {
+    width: 1px;
+    height: 1px;
   }
   .controls-visible .controls {
     opacity: 1;

@@ -802,6 +802,15 @@ impl StreamTracking {
             return Ok(process_id);
         }
 
+        let handoff_identity = (
+            session.lifecycle.frontend_instance_id.clone(),
+            session.lifecycle.media_file_id,
+            session.lifecycle.source_generation,
+        );
+        let transfer_local_capacity = session.remote_access_token.is_some()
+            && session.remote_playback_state == RemotePlaybackState::WirelessRouteReported
+            && handoff_identity.0.is_some();
+
         let retiring = if requested.plan.manifest.content_type == ContentType::Video {
             session
                 .tracks
@@ -826,12 +835,48 @@ impl StreamTracking {
             return Err(TrackingError::InvalidSelection);
         }
 
+        // The sender and receiver use different plans, but one frontend playback instance owns
+        // both sessions. Once WebKit reports a wireless route, atomically retire the matching
+        // local session's processes before admitting the first remote rendition. This prevents
+        // a legitimate handoff from being rejected merely because local and remote plans briefly
+        // overlap at the per-user admission boundary. Prepared remote sessions and sender
+        // preflight requests are deliberately not allowed to claim this transfer.
+        let handoff_retiring = if transfer_local_capacity {
+            inner
+                .sessions
+                .iter()
+                .filter(|(candidate_gid, candidate)| {
+                    *candidate_gid != gid
+                        && candidate.owner == owner
+                        && candidate.remote_access_token.is_none()
+                        && candidate.lifecycle.frontend_instance_id == handoff_identity.0
+                        && candidate.lifecycle.media_file_id == handoff_identity.1
+                        && candidate.lifecycle.source_generation == handoff_identity.2
+                })
+                .flat_map(|(candidate_gid, candidate)| {
+                    candidate
+                        .tracks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, track)| {
+                            Some((*candidate_gid, index, track.process_id.clone()?))
+                        })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         // Admit against the post-swap process count. StateManager::create registers a lazy
         // Nightfall process; FFmpeg starts only after this method returns and the init request is
         // dispatched, so the retiring and replacement transcoders do not run concurrently.
         for (index, process_id) in &retiring {
             inner.process_index.remove(process_id);
             inner.sessions.get_mut(gid).unwrap().tracks[*index].process_id = None;
+        }
+        for (candidate_gid, index, process_id) in &handoff_retiring {
+            inner.process_index.remove(process_id);
+            inner.sessions.get_mut(candidate_gid).unwrap().tracks[*index].process_id = None;
         }
         if let Err(error) = self
             .activate_locked(state, &mut inner, *gid, owner, &[public_id.to_string()])
@@ -840,6 +885,13 @@ impl StreamTracking {
             for (index, process_id) in &retiring {
                 inner.process_index.insert(process_id.clone(), *gid);
                 inner.sessions.get_mut(gid).unwrap().tracks[*index].process_id =
+                    Some(process_id.clone());
+            }
+            for (candidate_gid, index, process_id) in &handoff_retiring {
+                inner
+                    .process_index
+                    .insert(process_id.clone(), *candidate_gid);
+                inner.sessions.get_mut(candidate_gid).unwrap().tracks[*index].process_id =
                     Some(process_id.clone());
             }
             return Err(error);
@@ -851,6 +903,29 @@ impl StreamTracking {
             .and_then(|track| track.process_id.clone())
             .ok_or(TrackingError::NotFound)?;
         drop(inner);
+
+        if !handoff_retiring.is_empty() {
+            tracing::info!(
+                session_id = %gid,
+                owner,
+                frontend_instance_id = ?handoff_identity.0,
+                retired_process_count = handoff_retiring.len(),
+                new_process_id = process_id,
+                "AirPlay handoff transferred playback capacity from the local session"
+            );
+        }
+        for (local_gid, _, retired_process_id) in handoff_retiring {
+            if let Err(error) = state.die(retired_process_id.clone()).await {
+                tracing::warn!(
+                    session_id = %gid,
+                    local_session_id = %local_gid,
+                    owner,
+                    process_id = retired_process_id,
+                    %error,
+                    "Retired local playback process cleanup failed during AirPlay handoff"
+                );
+            }
+        }
 
         for (_, retired_process_id) in retiring {
             tracing::info!(
@@ -1834,6 +1909,77 @@ mod tests {
         let active = tracking.active_manifests(&gid, 7).await.unwrap();
         assert!(active.iter().any(|(track, _)| track.id == "video-b"));
         assert!(!active.iter().any(|(track, _)| track.id == "video-a"));
+    }
+
+    #[tokio::test]
+    async fn wireless_handoff_transfers_matching_local_admission_capacity() {
+        nightfall::profiles::profiles_init("/bin/false".into());
+        let tracking = StreamTracking::with_policy(TranscodePolicy {
+            global_limit: 1,
+            per_user_limit: 1,
+            per_session_limit: 1,
+            session_ttl: Duration::from_secs(60),
+        });
+        let local_gid = Uuid::new_v4();
+        let remote_gid = Uuid::new_v4();
+        let lifecycle = || PlaybackLifecycle {
+            frontend_instance_id: Some("player-a".into()),
+            media_file_id: Some(42),
+            source_generation: Some(3),
+            creation_reason: "test".into(),
+        };
+        tracking
+            .create_session_with_lifecycle(
+                local_gid,
+                7,
+                vec![direct_video("local-video")],
+                lifecycle(),
+            )
+            .await;
+        tracking
+            .create_session_with_lifecycle(
+                remote_gid,
+                7,
+                vec![direct_video("remote-video")],
+                lifecycle(),
+            )
+            .await;
+        tracking.enable_remote_access(&remote_gid, 7).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateManager::new(
+            &mut Tokio::Global,
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        tracking
+            .activate_and_compile(&state, &local_gid, 7, 0, vec!["local-video".into()])
+            .await
+            .unwrap();
+
+        // A sender preflight must not evict local playback just because it has a remote token.
+        assert!(matches!(
+            tracking
+                .activate_remote_track(&state, &remote_gid, "remote-video", 7, true)
+                .await,
+            Err(TrackingError::AdmissionLimited { .. })
+        ));
+        tracking
+            .set_remote_playback_state(&remote_gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        tracking
+            .activate_remote_track(&state, &remote_gid, "remote-video", 7, true)
+            .await
+            .unwrap();
+
+        assert!(tracking
+            .active_manifests(&local_gid, 7)
+            .await
+            .unwrap()
+            .is_empty());
+        let remote = tracking.active_manifests(&remote_gid, 7).await.unwrap();
+        assert_eq!(remote.len(), 1);
+        assert_eq!(remote[0].0.id, "remote-video");
     }
 
     #[tokio::test]

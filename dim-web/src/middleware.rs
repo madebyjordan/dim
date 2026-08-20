@@ -98,9 +98,17 @@ pub async fn trace_remote_playback<B>(
     } else {
         RemoteHlsStage::Unknown
     };
+    let segment_number = path
+        .rsplit('/')
+        .next()
+        .and_then(|value| value.strip_suffix(".m4s"))
+        .and_then(|value| value.parse::<u64>().ok());
+    let started_at = std::time::Instant::now();
 
     tracing::info!(
+        session_id = ?session_id,
         hls_stage = ?stage,
+        segment_number,
         remote_path = %path,
         remote_playback_state = ?remote_playback_state,
         request_attribution = ?request_attribution,
@@ -112,12 +120,15 @@ pub async fn trace_remote_playback<B>(
     let response = next.run(req).await;
     let successful = response.status().is_success();
     tracing::info!(
+        session_id = ?session_id,
         hls_stage = ?stage,
+        segment_number,
         remote_path = %path,
         remote_playback_state = ?remote_playback_state,
         request_attribution = ?request_attribution,
         peer = ?peer,
         status = %response.status(),
+        elapsed_ms = started_at.elapsed().as_millis(),
         "HLS transport request finished"
     );
     if let Some(gid) = session_id {
