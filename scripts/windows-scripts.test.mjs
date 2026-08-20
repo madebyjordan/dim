@@ -98,41 +98,9 @@ function runBash(item, args) {
   );
 }
 
-test("Windows bootstrap copies media executables and preserves existing copies", () => {
-  const item = fixture();
-  try {
-    const first = runBash(item, [
-      "./scripts/bootstrap.sh",
-      "--skip-ui",
-      "--skip-rust",
-    ]);
-    assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
-
-    const ffmpeg = resolve(item.repository, "utils/ffmpeg.exe");
-    const ffprobe = resolve(item.repository, "utils/ffprobe.exe");
-    assert.equal(lstatSync(ffmpeg).isSymbolicLink(), false);
-    assert.equal(lstatSync(ffprobe).isSymbolicLink(), false);
-    assert.equal(
-      readFileSync(ffmpeg, "utf8"),
-      "#!/usr/bin/env bash\necho ffmpeg-fixture\n",
-    );
-    assert.equal(
-      readFileSync(ffprobe, "utf8"),
-      "#!/usr/bin/env bash\necho ffprobe-fixture\n",
-    );
-
-    writeFileSync(ffmpeg, "preserved ffmpeg\n");
-    chmodSync(ffmpeg, 0o755);
-    const second = runBash(item, [
-      "./scripts/bootstrap.sh",
-      "--skip-ui",
-      "--skip-rust",
-    ]);
-    assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
-    assert.equal(readFileSync(ffmpeg, "utf8"), "preserved ffmpeg\n");
-  } finally {
-    item.cleanup();
-  }
+test("bootstrap remains an argument-forwarding compatibility wrapper", () => {
+  const bootstrap = readFileSync(resolve(root, "scripts/bootstrap.sh"), "utf8");
+  assert.match(bootstrap, /exec node .*scripts\/build\.mjs.*"\$@"/);
 });
 
 test("Windows run script launches eclipse.exe from the release runtime directory", () => {
@@ -172,10 +140,10 @@ printf '%s\\n' "$*" > "$WINDOWS_SCRIPT_FIXTURE/runtime.args"
 });
 
 test("runtime scripts no longer assume a dim executable", () => {
-  const bootstrap = readFileSync(resolve(root, "scripts/bootstrap.sh"), "utf8");
+  const build = readFileSync(resolve(root, "scripts/build.mjs"), "utf8");
   const run = readFileSync(resolve(root, "scripts/run.sh"), "utf8");
-  assert.match(bootstrap, /release\/eclipse\$ECLIPSE_BINARY_SUFFIX/);
+  assert.match(build, /`eclipse\$\{binarySuffix\}`/);
   assert.match(run, /ECLIPSE_PROFILE\/eclipse\$ECLIPSE_BINARY_SUFFIX/);
-  assert.doesNotMatch(bootstrap, /release\/dim\$|release\/dim\.exe/);
+  assert.doesNotMatch(build, /release\/dim|dim\.exe/);
   assert.doesNotMatch(run, /\/dim\$DIM_BINARY_SUFFIX|\/dim\.exe/);
 });

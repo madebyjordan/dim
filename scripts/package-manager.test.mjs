@@ -93,10 +93,10 @@ test("package scripts do not assume a globally resolvable pnpm command", () => {
     }
   }
 
-  const bootstrap = readFileSync(resolve(root, "scripts/bootstrap.sh"), "utf8");
+  const build = readFileSync(resolve(root, "scripts/build.mjs"), "utf8");
   assert.match(
-    bootstrap,
-    /corepack pnpm --dir eclipse install --frozen-lockfile/,
+    build,
+    /\["pnpm", "--dir", "eclipse", "install", "--frozen-lockfile"\]/,
   );
-  assert.match(bootstrap, /corepack pnpm --dir eclipse build/);
+  assert.match(build, /\["pnpm", "--dir", "eclipse", "build"\]/);
 });

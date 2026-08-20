@@ -24,6 +24,8 @@ pnpm build
 pnpm dev
 ```
 
+These commands are identical in PowerShell, CMD, Git Bash, macOS, and Linux terminals.
+
 The debug `pnpm dev` command starts both Rust and the SvelteKit/Vite development server. Open
 [http://localhost:5173](http://localhost:5173) for frontend work; Vite hot-updates Svelte components
 and CSS, and proxies backend, playback, image, and WebSocket traffic to Rust on port 8000. It does

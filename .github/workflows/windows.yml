@@ -80,8 +80,8 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne "11.9.0") {
             throw "Corepack did not resolve repository-pinned pnpm 11.9.0."
           }
-      - name: Test installer lifecycle, clean Corepack, native scripts, and toolchain detection
-        run: node --test ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/prepare-pnpm.test.mjs ./scripts/rust-dependencies.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs
+      - name: Test build orchestration, installer lifecycle, Corepack, and toolchain detection
+        run: node --test ./scripts/build.test.mjs ./scripts/install.test.mjs ./scripts/package-manager.test.mjs ./scripts/prepare-pnpm.test.mjs ./scripts/rust-dependencies.test.mjs ./scripts/windows-launcher.test.mjs ./scripts/windows-scripts.test.mjs ./scripts/windows-toolchain.test.mjs
       - name: Exercise native launcher from CMD
         shell: cmd
         run: install.cmd --demo --platform windows --yes --no-start
@@ -121,19 +121,32 @@ jobs:
             throw "Fresh Git Bash resolved unexpected pnpm version '$bashVersion'."
           }
           $shim | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Verify pinned Windows Rust release build
+      - name: Build debug Eclipse through the public PowerShell command
+        shell: pwsh
         run: |
           rustc --version --verbose
-          cargo build --release --locked
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { throw "pnpm build failed." }
+          if (-not (Test-Path target/debug/eclipse.exe)) { throw "pnpm build did not produce target/debug/eclipse.exe." }
+          if (-not (Test-Path eclipse/build/index.html)) { throw "pnpm build did not produce the frontend bundle." }
+          if (Test-Path target/debug/dim.exe) { throw "pnpm build produced the retired dim.exe name." }
+      - name: Build release Eclipse through the public CMD command
+        shell: cmd
+        run: |
+          pnpm build --release
+          if errorlevel 1 exit /b %errorlevel%
+          if not exist target\release\eclipse.exe exit /b 91
+          if not exist target\release\utils\ffmpeg.exe exit /b 92
+          if not exist target\release\utils\ffprobe.exe exit /b 93
+          if exist target\release\dim.exe exit /b 94
+      - name: Verify public release build artifacts from Git Bash
+        run: |
           test -f target/release/eclipse.exe
           test ! -f target/release/dim.exe
       - name: Test Windows-style development process and Prettier resolution
         run: node --test ./scripts/dev-processes.test.mjs ./scripts/generate-api-contract.test.mjs
-      - name: Exercise API contract check and production frontend build
-        run: |
-          node ./scripts/generate-api-contract.mjs --check
-          corepack pnpm --dir eclipse build
-          corepack pnpm --dir eclipse test -- src/routes/login/page.test.ts
+      - name: Exercise a production frontend test
+        run: corepack pnpm --dir eclipse test -- src/routes/login/page.test.ts
       - name: Start Eclipse, verify readiness, reinstall, and clean while it is running
         run: |
           set -euo pipefail
