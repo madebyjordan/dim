@@ -30,6 +30,13 @@
   import MediaCarousel from '$lib/components/MediaCarousel.svelte';
   import MediaPresentation from '$lib/components/MediaPresentation.svelte';
   import { determineCapabilities } from '$lib/playback/capabilities';
+  import {
+    createPlaybackOwnership,
+    creationQuery,
+    logPlaybackLifecycle,
+    teardownQuery,
+    type PlaybackOwnership
+  } from '$lib/playback/lifecycle';
   import { realtime } from '$lib/realtime/socket.svelte';
 
   type PlaybackComponent =
@@ -60,6 +67,10 @@
   let selectedMedia = $state<Media | null>(null);
   let selectedFile = $state<MediaFile | null>(null);
   let preparedPlayback = $state<PlaybackSession | null>(null);
+  let preparedPlaybackOwnership = $state<PlaybackOwnership | null>(null);
+  let preparePlaybackTask: Promise<void> | null = null;
+  let activePlaybackSession = $state<PlaybackSession | null>(null);
+  let activePlaybackOwnership = $state<PlaybackOwnership | null>(null);
   let selectedVideo = $state('');
   let selectedAudio = $state('');
   let selectedSubtitle = $state('');
@@ -72,6 +83,7 @@
   let playbackError = $state<string | null>(null);
   let PlaybackSurface = $state<PlaybackComponent | null>(null);
   let playbackActive = $state(false);
+  let playbackLaunching = false;
   let playbackRevealed = $state(false);
   let playbackWasActive = false;
   let playbackRevealTimer: number | null = null;
@@ -190,7 +202,7 @@
     selectedFile = null;
     detailLoading = false;
     playbackError = null;
-    void disposePreparedPlayback();
+    void disposePreparedPlayback(true, 'catalog-selection-cleared');
   }
 
   async function chooseLibrary(library: Library) {
@@ -253,17 +265,34 @@
     }
   }
 
-  async function disposePreparedPlayback(resetTracks = true) {
+  async function disposePreparedPlayback(
+    resetTracks = true,
+    reason = 'prepared-session-disposed'
+  ) {
     const gid = preparedPlayback?.gid;
+    const ownership = preparedPlaybackOwnership;
     preparedPlayback = null;
+    preparedPlaybackOwnership = null;
     if (resetTracks) {
       selectedVideo = '';
       selectedAudio = '';
       selectedSubtitle = '';
     }
-    if (gid) {
+    if (gid && ownership) {
+      logPlaybackLifecycle('session-teardown-requested', ownership, {
+        sessionId: gid,
+        reason,
+        caller: 'catalog.disposePreparedPlayback'
+      });
       await session.api
-        .delete(`stream/${gid}/state/kill`)
+        .delete(
+          `stream/${gid}/state/kill`,
+          teardownQuery(
+            ownership,
+            reason,
+            'catalog.disposePreparedPlayback'
+          )
+        )
         .catch(() => undefined);
     }
   }
@@ -276,6 +305,7 @@
   }
 
   async function preparePlayback(file: MediaFile, version: number) {
+    const ownership = createPlaybackOwnership(String(file.id), version);
     try {
       const inspection = await session.api.get<PlaybackCapabilityInspection>(
         `stream/${file.id}/capabilities`
@@ -286,16 +316,33 @@
         {
           force_ass: true,
           capabilities: JSON.stringify(capabilities),
-          target: 'browser'
+          target: 'browser',
+          ...creationQuery(ownership, 'catalog-track-preparation')
         }
       );
       if (version !== selectionVersion) {
+        logPlaybackLifecycle('session-teardown-requested', ownership, {
+          sessionId: prepared.gid,
+          reason: 'selection-generation-superseded',
+          caller: 'catalog.preparePlayback'
+        });
         await session.api
-          .delete(`stream/${prepared.gid}/state/kill`)
+          .delete(
+            `stream/${prepared.gid}/state/kill`,
+            teardownQuery(
+              ownership,
+              'selection-generation-superseded',
+              'catalog.preparePlayback'
+            )
+          )
           .catch(() => undefined);
         return;
       }
       preparedPlayback = prepared;
+      preparedPlaybackOwnership = ownership;
+      logPlaybackLifecycle('session-prepared', ownership, {
+        sessionId: prepared.gid
+      });
       selectedVideo = prepared.tracks.some(
         (track) => track.content_type === 'video' && track.id === selectedVideo
       )
@@ -324,7 +371,7 @@
       return;
     }
     const version = ++selectionVersion;
-    void disposePreparedPlayback();
+    void disposePreparedPlayback(true, 'catalog-selection-changed');
     selectedId = item.id;
     selectedFile = null;
     playbackError = null;
@@ -360,7 +407,12 @@
         selectedFile = playableFile(media, files);
       }
       detailLoading = false;
-      if (selectedFile) void preparePlayback(selectedFile, version);
+      if (selectedFile) {
+        preparePlaybackTask = preparePlayback(selectedFile, version);
+        void preparePlaybackTask.finally(() => {
+          if (version === selectionVersion) preparePlaybackTask = null;
+        });
+      }
     } catch (cause) {
       if (version === selectionVersion) {
         detailLoading = false;
@@ -458,7 +510,25 @@
   }
 
   async function launchPlayback() {
-    if (!selectedFile) return;
+    if (!selectedFile || playbackLaunching) return;
+    playbackLaunching = true;
+    const launchGeneration = selectionVersion;
+    await preparePlaybackTask;
+    if (!selectedFile || launchGeneration !== selectionVersion) {
+      playbackLaunching = false;
+      return;
+    }
+    activePlaybackSession = preparedPlayback;
+    activePlaybackOwnership =
+      preparedPlaybackOwnership ??
+      createPlaybackOwnership(String(selectedFile.id), launchGeneration);
+    preparedPlayback = null;
+    preparedPlaybackOwnership = null;
+    logPlaybackLifecycle('session-ownership-transferred', activePlaybackOwnership, {
+      sessionId: activePlaybackSession?.gid ?? null,
+      from: 'catalog',
+      to: 'PlaybackProof'
+    });
     const playback = {
       fileId: String(selectedFile.id),
       video: selectedVideo,
@@ -477,14 +547,31 @@
       playback
     });
     const componentPromise = import('$lib/playback/PlaybackProof.svelte');
-    await disposePreparedPlayback(false);
     try {
       PlaybackSurface = (await componentPromise).default;
     } catch (cause) {
+      const failedSession = activePlaybackSession;
+      const failedOwnership = activePlaybackOwnership;
+      activePlaybackSession = null;
+      activePlaybackOwnership = null;
+      if (failedSession && failedOwnership) {
+        await session.api
+          .delete(
+            `stream/${failedSession.gid}/state/kill`,
+            teardownQuery(
+              failedOwnership,
+              'player-component-load-failed',
+              'catalog.launchPlayback'
+            )
+          )
+          .catch(() => undefined);
+      }
       playbackActive = false;
       playbackError =
         cause instanceof Error ? cause.message : 'The player could not load';
       history.back();
+    } finally {
+      playbackLaunching = false;
     }
   }
 
@@ -516,11 +603,10 @@
         playbackRevealTimer = null;
       }
     }
-    if (!playbackWasActive && nextActive && preparedPlayback) {
-      void disposePreparedPlayback(false);
-    }
     if (playbackWasActive && !nextActive && selectedFile && !preparedPlayback) {
-      void preparePlayback(selectedFile, selectionVersion);
+      activePlaybackSession = null;
+      activePlaybackOwnership = null;
+      preparePlaybackTask = preparePlayback(selectedFile, selectionVersion);
     }
     playbackWasActive = nextActive;
     playbackActive = nextActive;
@@ -577,7 +663,7 @@
       if (playbackRevealTimer !== null) {
         window.clearTimeout(playbackRevealTimer);
       }
-      void disposePreparedPlayback();
+      void disposePreparedPlayback(true, 'catalog-component-unmounted');
     };
   });
 </script>
@@ -688,6 +774,8 @@
           initialVideo={playback.video}
           initialAudio={playback.audio}
           initialSubtitle={playback.subtitle}
+          initialSession={activePlaybackSession}
+          initialOwnership={activePlaybackOwnership}
           autoplay
           onexit={exitPlayback}
         />

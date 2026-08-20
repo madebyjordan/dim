@@ -637,6 +637,38 @@ mod tests {
     }
 
     #[test]
+    fn positive_browser_probe_cannot_override_an_unappendable_aac_configuration() {
+        let source = AudioSource {
+            stream_index: 1,
+            codec: "aac".into(),
+            codec_descriptor: Some("mp4a.40.2".into()),
+            channels: 8,
+            channel_layout: Some("7.1".into()),
+            bitrate: 550_000,
+            sample_rate: 48_000,
+            remux_supported: false,
+        };
+        let capabilities = BrowserCapabilities {
+            audio: vec![BrowserAudioCapability {
+                stream_index: source.stream_index,
+                content_type: "audio/mp4; codecs=\"mp4a.40.2\"".into(),
+                can_play_type: true,
+                media_source: true,
+                supported: true,
+                smooth: true,
+                power_efficient: Some(true),
+                can_play_type_result: CanPlayTypeResult::Probably,
+                media_capabilities_result: MediaCapabilitiesResult::Supported,
+            }],
+            ..Default::default()
+        };
+
+        let plan = plan_audio(source, &capabilities);
+        assert_eq!(plan.chosen_action, AudioAction::TranscodeAac);
+        assert_eq!(plan.decision_reason, "source_not_fmp4_remux_eligible");
+    }
+
+    #[test]
     fn missing_or_limited_audio_capabilities_select_normalized_aac() {
         let source = matrix_eac3_source();
         let missing = plan_audio(source.clone(), &BrowserCapabilities::default());

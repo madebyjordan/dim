@@ -32,6 +32,13 @@ and CSS, and proxies backend, playback, image, and WebSocket traffic to Rust on 
 not regenerate `eclipse/build`. Release bundles are embedded at Rust compile time, so use
 `pnpm build --release` before `pnpm dev --release`.
 
+The development launcher runs in the foreground, records the exact processes it owns, refuses a
+duplicate backend or Vite instance, and stops their child process trees on exit. Automated runs
+should set `ECLIPSE_PROCESS_OWNER` to a stable owner name. Set `ECLIPSE_DEV_LOG_DIR` when output
+needs to be captured instead of inherited by the terminal; the launcher prints every PID and log
+path it creates. `node scripts/managed-process.mjs cleanup --owner <name>` cleans only verified
+processes previously started with that owner.
+
 Before submitting a change, run:
 
 ```sh

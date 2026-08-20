@@ -93,9 +93,9 @@ impl From<TrackingError> for DimErrorWrapper {
             TrackingError::InvalidMetadata => Self(DimError::StreamingError(
                 dim_core::errors::StreamingErrors::InvalidMetadata(error.to_string()),
             )),
-            TrackingError::InvalidSelection => Self(DimError::StreamingError(
-                dim_core::errors::StreamingErrors::InvalidRequest,
-            )),
+            TrackingError::InvalidSelection | TrackingError::LifecycleMismatch => Self(
+                DimError::StreamingError(dim_core::errors::StreamingErrors::InvalidRequest),
+            ),
             TrackingError::Transcoder(_) => Self(DimError::StreamingError(
                 dim_core::errors::StreamingErrors::ProcFailed,
             )),

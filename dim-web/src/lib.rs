@@ -221,6 +221,10 @@ fn stream_routes(
             get(routes::stream::session_get_stderr),
         )
         .route(
+            "/api/v1/stream/:gid/state/player-event",
+            post(routes::stream::report_player_event),
+        )
+        .route(
             "/api/v1/stream/:gid/state/kill",
             delete(routes::stream::kill_session),
         )

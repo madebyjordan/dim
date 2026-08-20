@@ -82,6 +82,40 @@ pub fn remux_supported(stream: &Stream) -> bool {
 
 pub fn audio_remux_supported(stream: &Stream) -> bool {
     audio_codec_descriptor(stream).is_some()
+        && match stream.codec_name.as_str() {
+            // Chromium accepts the AAC MIME/codec probe for configurations that its fMP4
+            // demuxer subsequently rejects. In particular, Program Config Elements (0) and
+            // extended layouts such as 7.1 (12) fail while appending the init fragment.
+            // Restrict copy/remux to the channel configurations defined by the baseline AAC
+            // table that browser MSE implementations consume reliably.
+            "aac" => aac_channel_configuration(stream)
+                .map(|configuration| (1..=7).contains(&configuration))
+                .unwrap_or_else(|| stream.channels.is_some_and(|channels| channels <= 6)),
+            _ => true,
+        }
+}
+
+fn aac_channel_configuration(stream: &Stream) -> Option<u8> {
+    let bytes = stream.extradata_bytes()?;
+    let mut bit = 0_usize;
+    let read = |width: usize, bit: &mut usize| -> Option<u32> {
+        let mut value = 0_u32;
+        for _ in 0..width {
+            let byte = *bytes.get(*bit / 8)?;
+            value = (value << 1) | u32::from((byte >> (7 - (*bit % 8))) & 1);
+            *bit += 1;
+        }
+        Some(value)
+    };
+    let audio_object_type = read(5, &mut bit)?;
+    if audio_object_type == 31 {
+        read(6, &mut bit)?;
+    }
+    let sampling_frequency_index = read(4, &mut bit)?;
+    if sampling_frequency_index == 15 {
+        read(24, &mut bit)?;
+    }
+    u8::try_from(read(4, &mut bit)?).ok()
 }
 
 pub fn audio_codec_descriptor(stream: &Stream) -> Option<String> {
@@ -452,5 +486,56 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(audio_codec_descriptor(&he).as_deref(), Some("mp4a.40.5"));
+    }
+
+    #[test]
+    fn rejects_aac_channel_configurations_that_browser_mse_cannot_append() {
+        let shrek_like_pce = Stream {
+            codec_name: "aac".into(),
+            codec_type: "audio".into(),
+            profile: Some("LC".into()),
+            channels: Some(8),
+            extradata: Some("\n00000000: 1180 04c8 0900 0108 c800 0000\n".into()),
+            ..Default::default()
+        };
+        assert!(!audio_remux_supported(&shrek_like_pce));
+
+        let extended_7_1 = Stream {
+            codec_name: "aac".into(),
+            codec_type: "audio".into(),
+            profile: Some("LC".into()),
+            channels: Some(8),
+            extradata: Some("\n00000000: 11e0 56e5 00\n".into()),
+            ..Default::default()
+        };
+        assert!(!audio_remux_supported(&extended_7_1));
+
+        let baseline_5_1 = Stream {
+            codec_name: "aac".into(),
+            codec_type: "audio".into(),
+            profile: Some("LC".into()),
+            channels: Some(6),
+            extradata: Some("\n00000000: 11b0 56e5 00\n".into()),
+            ..Default::default()
+        };
+        assert!(audio_remux_supported(&baseline_5_1));
+    }
+
+    #[test]
+    fn conservatively_rejects_uninspectable_aac_above_six_channels() {
+        let stereo = Stream {
+            codec_name: "aac".into(),
+            codec_type: "audio".into(),
+            profile: Some("LC".into()),
+            channels: Some(2),
+            ..Default::default()
+        };
+        assert!(audio_remux_supported(&stereo));
+
+        let surround = Stream {
+            channels: Some(8),
+            ..stereo
+        };
+        assert!(!audio_remux_supported(&surround));
     }
 }

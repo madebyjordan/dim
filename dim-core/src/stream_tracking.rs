@@ -334,6 +334,8 @@ pub enum TrackingError {
     NotFound,
     #[error("streaming session belongs to another user")]
     NotOwner,
+    #[error("playback lifecycle generation does not own this session")]
+    LifecycleMismatch,
     #[error("invalid or empty track selection")]
     InvalidSelection,
     #[error(
@@ -344,6 +346,33 @@ pub enum TrackingError {
     Transcoder(String),
     #[error("media duration is missing or invalid")]
     InvalidMetadata,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PlaybackLifecycle {
+    pub frontend_instance_id: Option<String>,
+    pub media_file_id: Option<i64>,
+    pub source_generation: Option<u64>,
+    pub creation_reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaybackTeardown {
+    pub reason: String,
+    pub caller: String,
+    pub frontend_instance_id: Option<String>,
+    pub source_generation: Option<u64>,
+}
+
+impl PlaybackTeardown {
+    pub fn server(reason: impl Into<String>, caller: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            caller: caller.into(),
+            frontend_instance_id: None,
+            source_generation: None,
+        }
+    }
 }
 
 fn check_admission(
@@ -375,6 +404,8 @@ struct Session {
     owner: i64,
     created_at: Instant,
     last_activity: Instant,
+    admitted_at: Option<Instant>,
+    lifecycle: PlaybackLifecycle,
     tracks: Vec<TrackState>,
     remote_access_token: Option<String>,
     remote_playback_state: RemotePlaybackState,
@@ -411,14 +442,36 @@ impl StreamTracking {
     }
 
     pub async fn create_session(&self, gid: Uuid, owner: i64, tracks: Vec<PlannedTrack>) {
+        self.create_session_with_lifecycle(gid, owner, tracks, PlaybackLifecycle::default())
+            .await;
+    }
+
+    pub async fn create_session_with_lifecycle(
+        &self,
+        gid: Uuid,
+        owner: i64,
+        tracks: Vec<PlannedTrack>,
+        lifecycle: PlaybackLifecycle,
+    ) {
         let mut inner = self.inner.write().await;
-        tracing::info!(session_id = %gid, owner, track_count = tracks.len(), "Playback session created");
+        tracing::info!(
+            session_id = %gid,
+            owner,
+            track_count = tracks.len(),
+            frontend_instance_id = ?lifecycle.frontend_instance_id,
+            media_file_id = ?lifecycle.media_file_id,
+            source_generation = ?lifecycle.source_generation,
+            creation_reason = lifecycle.creation_reason,
+            "Playback session created"
+        );
         inner.sessions.insert(
             gid,
             Session {
                 owner,
                 created_at: Instant::now(),
                 last_activity: Instant::now(),
+                admitted_at: None,
+                lifecycle,
                 tracks: tracks
                     .into_iter()
                     .enumerate()
@@ -867,6 +920,9 @@ impl StreamTracking {
         tracing::info!(
             session_id = %gid,
             owner,
+            frontend_instance_id = ?session.lifecycle.frontend_instance_id,
+            media_file_id = ?session.lifecycle.media_file_id,
+            source_generation = ?session.lifecycle.source_generation,
             global_active,
             user_active,
             session_active,
@@ -889,6 +945,7 @@ impl StreamTracking {
             .get_mut(&gid)
             .ok_or(TrackingError::NotFound)?;
         session.last_activity = Instant::now();
+        session.admitted_at.get_or_insert_with(Instant::now);
         let mut activated: Vec<String> = Vec::new();
         for track in session.tracks.iter_mut().filter(|track| {
             selected.contains(track.plan.manifest.id.as_str()) && track.process_id.is_none()
@@ -1100,17 +1157,59 @@ impl StreamTracking {
         gid: &Uuid,
         owner: i64,
     ) -> Result<(), TrackingError> {
+        self.remove_with_context(
+            state,
+            gid,
+            owner,
+            PlaybackTeardown::server("explicit-remove", "stream-tracking-api"),
+        )
+        .await
+    }
+
+    pub async fn remove_with_context(
+        &self,
+        state: &StateManager,
+        gid: &Uuid,
+        owner: i64,
+        teardown: PlaybackTeardown,
+    ) -> Result<(), TrackingError> {
         let process_ids = {
             let mut inner = self.inner.write().await;
             let session = inner.sessions.get(gid).ok_or(TrackingError::NotFound)?;
             if session.owner != owner {
                 return Err(TrackingError::NotOwner);
             }
+            if teardown.frontend_instance_id.is_some()
+                && teardown.frontend_instance_id != session.lifecycle.frontend_instance_id
+                || teardown.source_generation.is_some()
+                    && teardown.source_generation != session.lifecycle.source_generation
+            {
+                tracing::warn!(
+                    session_id = %gid,
+                    owner,
+                    frontend_instance_id = ?teardown.frontend_instance_id,
+                    session_frontend_instance_id = ?session.lifecycle.frontend_instance_id,
+                    source_generation = ?teardown.source_generation,
+                    session_source_generation = ?session.lifecycle.source_generation,
+                    teardown_reason = teardown.reason,
+                    teardown_caller = teardown.caller,
+                    "Stale playback teardown rejected"
+                );
+                return Err(TrackingError::LifecycleMismatch);
+            }
             tracing::info!(
                 session_id = %gid,
                 owner,
+                frontend_instance_id = ?session.lifecycle.frontend_instance_id,
+                media_file_id = ?session.lifecycle.media_file_id,
+                source_generation = ?session.lifecycle.source_generation,
+                creation_reason = session.lifecycle.creation_reason,
+                teardown_reason = teardown.reason,
+                teardown_caller = teardown.caller,
                 age_ms = session.created_at.elapsed().as_millis(),
                 inactive_ms = session.last_activity.elapsed().as_millis(),
+                playback_admitted = session.admitted_at.is_some(),
+                admission_elapsed_ms = ?session.admitted_at.map(|at| at.elapsed().as_millis()),
                 process_count = session.tracks.iter().filter(|track| track.process_id.is_some()).count(),
                 "Playback session removal started"
             );
@@ -1135,7 +1234,13 @@ impl StreamTracking {
                 }
             }
         }
-        tracing::info!(session_id = %gid, owner, "Playback session removed");
+        tracing::info!(
+            session_id = %gid,
+            owner,
+            teardown_reason = teardown.reason,
+            teardown_caller = teardown.caller,
+            "Playback session removed"
+        );
         Ok(())
     }
 
@@ -1168,7 +1273,15 @@ impl StreamTracking {
                                 abandoned_handoff,
                                 "Playback session expired"
                             );
-                            (*gid, session.owner)
+                            (
+                                *gid,
+                                session.owner,
+                                if abandoned_handoff {
+                                    "remote-handoff-abandoned"
+                                } else {
+                                    "session-ttl-expired"
+                                },
+                            )
                         })
                 })
                 .collect::<Vec<_>>();
@@ -1190,7 +1303,7 @@ impl StreamTracking {
             (expired, active)
         };
         for (gid, owner, process_ids) in active {
-            if process_ids.is_empty() || gids.iter().any(|(existing, _)| *existing == gid) {
+            if process_ids.is_empty() || gids.iter().any(|(existing, _, _)| *existing == gid) {
                 continue;
             }
             let mut all_complete = true;
@@ -1200,11 +1313,18 @@ impl StreamTracking {
                 all_complete &= complete;
             }
             if all_complete {
-                gids.push((gid, owner));
+                gids.push((gid, owner, "playback-processes-complete"));
             }
         }
-        for (gid, owner) in &gids {
-            let _ = self.remove(state, gid, *owner).await;
+        for (gid, owner, reason) in &gids {
+            let _ = self
+                .remove_with_context(
+                    state,
+                    gid,
+                    *owner,
+                    PlaybackTeardown::server(*reason, "session-reaper"),
+                )
+                .await;
         }
         gids.len()
     }
@@ -1219,7 +1339,14 @@ impl StreamTracking {
                 .collect::<Vec<_>>()
         };
         for (gid, owner) in sessions {
-            let _ = self.remove(state, &gid, owner).await;
+            let _ = self
+                .remove_with_context(
+                    state,
+                    &gid,
+                    owner,
+                    PlaybackTeardown::server("server-shutdown", "stream-tracking-shutdown"),
+                )
+                .await;
         }
     }
 }
@@ -1526,6 +1653,49 @@ mod tests {
             tracking.authenticate_remote(&gid, &token).await,
             Err(TrackingError::NotFound)
         );
+    }
+
+    #[tokio::test]
+    async fn stale_frontend_generation_cannot_remove_an_active_session() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session_with_lifecycle(
+                gid,
+                7,
+                vec![planned_track()],
+                PlaybackLifecycle {
+                    frontend_instance_id: Some("player-a".into()),
+                    media_file_id: Some(42),
+                    source_generation: Some(2),
+                    creation_reason: "player-initialization".into(),
+                },
+            )
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateManager::new(
+            &mut Tokio::Global,
+            temp.path().to_string_lossy().into_owned(),
+            "unused-ffmpeg".into(),
+        );
+
+        assert_eq!(
+            tracking
+                .remove_with_context(
+                    &state,
+                    &gid,
+                    7,
+                    PlaybackTeardown {
+                        reason: "component-unmounted".into(),
+                        caller: "old-player".into(),
+                        frontend_instance_id: Some("player-a".into()),
+                        source_generation: Some(1),
+                    },
+                )
+                .await,
+            Err(TrackingError::LifecycleMismatch)
+        );
+        assert!(tracking.inspect(&gid, 7).await.is_ok());
     }
 
     #[tokio::test]

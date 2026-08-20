@@ -49,4 +49,20 @@ describe('ApiTransport', () => {
       })
     );
   });
+
+  it('adds lifecycle attribution to DELETE requests', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = new ApiTransport(() => null);
+
+    await transport.delete('stream/session/state/kill', {
+      teardown_reason: 'normal-player-exit',
+      source_generation: 3
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(init.method).toBe('DELETE');
+    expect(url.searchParams.get('teardown_reason')).toBe('normal-player-exit');
+    expect(url.searchParams.get('source_generation')).toBe('3');
+  });
 });

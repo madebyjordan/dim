@@ -153,6 +153,14 @@ impl StateManager {
             .sessions
             .get_mut(&id)
             .ok_or(NightfallError::SessionDoesntExist)?;
+        debug!(
+            process_id = id,
+            requested_segment = chunk,
+            start_segment = session.start_num(),
+            current_segment = session.current_chunk(),
+            segment_ready = session.is_chunk_done(chunk),
+            "Nightfall init demand received"
+        );
 
         // If ffmpeg abrupty closes we want to move down the profile chain and try other profiles
         // until we get something that works or we exhaust all our profiles.
@@ -174,7 +182,7 @@ impl StateManager {
                 session.reset_to(chunk);
                 session.start().await?;
 
-                let stat = self.stream_stats.entry(id).or_default();
+                let stat = self.stream_stats.entry(id.clone()).or_default();
                 stat.hard_seeked_at = chunk;
                 stat.last_hard_seek = Instant::now();
             }
@@ -189,7 +197,14 @@ impl StateManager {
         if session.is_chunk_done(chunk) {
             // reset chunk since init counter
             session.chunks_since_init = 0;
-            return Ok(session.custom_init_seg(chunk));
+            let path = session.custom_init_seg(chunk);
+            debug!(
+                process_id = id,
+                requested_segment = chunk,
+                path,
+                "Nightfall init demand resolved"
+            );
+            return Ok(path);
         }
 
         Err(NightfallError::ChunkNotDone)
@@ -201,6 +216,14 @@ impl StateManager {
             .sessions
             .get_mut(&id)
             .ok_or(NightfallError::SessionDoesntExist)?;
+        debug!(
+            process_id = id,
+            requested_segment = chunk,
+            start_segment = session.start_num(),
+            current_segment = session.current_chunk(),
+            segment_ready = session.is_chunk_done(chunk),
+            "Nightfall segment demand received"
+        );
         let stats = self.stream_stats.entry(id.clone()).or_default();
 
         if session.try_wait()
@@ -260,6 +283,14 @@ impl StateManager {
                 session.cont();
             }
 
+            let patch_started = Instant::now();
+            debug!(
+                process_id = id,
+                requested_segment = chunk,
+                path,
+                real_segment,
+                "Nightfall segment patch started"
+            );
             match patch_segment(path, real_segment).await {
                 Ok(seq) => session.real_segment = seq,
                 // Sometimes we get partial chunks, when playback goes linearly (no hard seeks have
@@ -294,6 +325,14 @@ impl StateManager {
 
             session.reset_timeout(chunk);
             session.chunks_since_init += 1;
+
+            debug!(
+                process_id = id,
+                requested_segment = chunk,
+                elapsed_ms = patch_started.elapsed().as_millis(),
+                path = chunk_path,
+                "Nightfall segment demand resolved"
+            );
 
             Ok(chunk_path)
         }

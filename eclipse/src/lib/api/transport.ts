@@ -75,7 +75,7 @@ export class ApiTransport {
     });
   }
 
-  delete(path: string) {
-    return this.request<void>(path, { method: 'DELETE' });
+  delete(path: string, query?: Record<string, QueryValue>) {
+    return this.request<void>(path, { method: 'DELETE', query });
   }
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type {
     PlaybackCapabilityInspection,
     PlaybackSession,
@@ -12,10 +12,27 @@
     determineCapabilities,
     type BrowserCapabilities
   } from './capabilities';
+  import {
+    clearStoredPlayback,
+    createPlaybackOwnership,
+    creationQuery,
+    logPlaybackLifecycle,
+    readStoredPlayback,
+    storePlayback,
+    teardownQuery,
+    type PlaybackOwnership
+  } from './lifecycle';
 
   interface WebKitAirPlayVideo extends HTMLVideoElement {
     webkitShowPlaybackTargetPicker?: () => void;
     webkitCurrentPlaybackTargetIsWireless?: boolean;
+  }
+
+  interface DashPlayer {
+    destroy(): void;
+    attachSource(url: string): void;
+    on(type: string, listener: (event: unknown) => void): void;
+    off(type: string, listener: (event: unknown) => void): void;
   }
 
   let {
@@ -23,6 +40,8 @@
     initialVideo = '',
     initialAudio = '',
     initialSubtitle = '',
+    initialSession = null,
+    initialOwnership = null,
     autoplay = false,
     onexit = () => undefined
   }: {
@@ -30,17 +49,22 @@
     initialVideo?: string;
     initialAudio?: string;
     initialSubtitle?: string;
+    initialSession?: PlaybackSession | null;
+    initialOwnership?: PlaybackOwnership | null;
     autoplay?: boolean;
     onexit?: () => void;
   } = $props();
+  const ownership = untrack(
+    () => initialOwnership ?? createPlaybackOwnership(fileId, 1)
+  );
   let surface: HTMLElement;
   let controlsPanel: HTMLElement;
   let video: HTMLVideoElement;
   let timeOutput: HTMLOutputElement;
   let durationOutput: HTMLOutputElement;
   let seekInput: HTMLInputElement;
-  let dashPlayer: { destroy(): void; attachSource(url: string): void } | null =
-    null;
+  let dashPlayer: DashPlayer | null = null;
+  let dashErrorCleanup: (() => void) | null = null;
   let playbackSession = $state<PlaybackSession | null>(null);
   let phase = $state<'loading' | 'ready' | 'error'>('loading');
   let error = $state<string | null>(null);
@@ -59,9 +83,11 @@
   let muted = $state(false);
   let controlsTimer: number | null = null;
   let keyboardInteraction = false;
+  let currentSourceGeneration = 0;
+  let unmountReason = 'component-unmounted';
+  let unmountCaller = 'PlaybackProof.onMount.cleanup';
   const controlsIdleMs = 1_250;
 
-  const playbackKey = 'eclipse.playback-session';
   const tracks = (kind: PlaybackTrack['content_type']) =>
     playbackSession?.tracks.filter((track) => track.content_type === kind) ??
     [];
@@ -126,7 +152,7 @@
     )
       return;
     if (event.key === 'Escape') {
-      if (!document.fullscreenElement) onexit();
+      if (!document.fullscreenElement) requestExit('escape-key');
       return;
     }
     if (event.key === ' ' || event.key.toLowerCase() === 'k') {
@@ -161,6 +187,58 @@
     ).href;
   }
 
+  function finite(value: number) {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function bufferedRanges() {
+    if (!video) return [];
+    return Array.from({ length: video.buffered.length }, (_, index) => [
+      video.buffered.start(index),
+      video.buffered.end(index)
+    ]);
+  }
+
+  function reportPlayerEvent(event: string, detail?: string) {
+    const gid = playbackSession?.gid;
+    if (!gid || !video) return;
+    const mediaError = video.error;
+    void fetch(`/api/v1/stream/${gid}/state/player-event`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      keepalive: true,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(session.token ? { Authorization: session.token } : {})
+      },
+      body: JSON.stringify({
+        event,
+        frontend_instance_id: ownership.instanceId,
+        media_file_id: fileId,
+        source_generation: currentSourceGeneration,
+        current_time: finite(video.currentTime),
+        duration: finite(video.duration),
+        ready_state: video.readyState,
+        network_state: video.networkState,
+        paused: video.paused,
+        ended: video.ended,
+        buffered: bufferedRanges(),
+        error_code: mediaError?.code,
+        error_message: mediaError?.message,
+        detail
+      })
+    }).catch(() => undefined);
+  }
+
+  function describeDashError(event: unknown) {
+    if (!event || typeof event !== 'object') return String(event);
+    const value = event as Record<string, unknown>;
+    return [value.type, value.event, value.error, value.message]
+      .filter((part) => part !== undefined)
+      .map(String)
+      .join(' | ');
+  }
+
   async function createSession(target: 'browser' | 'airplay' = 'browser') {
     const inspection = await session.api.get<PlaybackCapabilityInspection>(
       `stream/${fileId}/capabilities`
@@ -169,8 +247,42 @@
     return session.api.get<PlaybackSession>(`stream/${fileId}/manifest`, {
       force_ass: true,
       capabilities: JSON.stringify(capabilities),
-      target
+      target,
+      ...creationQuery(
+        ownership,
+        target === 'airplay' ? 'airplay-preparation' : 'player-initialization'
+      )
     });
+  }
+
+  function requestExit(caller: string) {
+    unmountReason = 'normal-player-exit';
+    unmountCaller = caller;
+    logPlaybackLifecycle('player-exit-requested', ownership, {
+      caller,
+      sessionId: playbackSession?.gid,
+      sourceGeneration: currentSourceGeneration
+    });
+    onexit();
+  }
+
+  async function teardownSession(
+    gid: string,
+    reason: string,
+    caller: string,
+    sessionOwnership = ownership
+  ) {
+    logPlaybackLifecycle('session-teardown-requested', sessionOwnership, {
+      sessionId: gid,
+      reason,
+      caller
+    });
+    await session.api.delete(
+      `stream/${gid}/state/kill`,
+      sessionOwnership.instanceId
+        ? teardownQuery(sessionOwnership, reason, caller)
+        : { teardown_reason: reason, teardown_caller: caller }
+    );
   }
 
   async function activate() {
@@ -194,7 +306,21 @@
       }),
       true
     );
-    player.initialize(video, manifestUrl(), autoplay);
+    const source = manifestUrl();
+    const sourceGeneration = ++currentSourceGeneration;
+    logPlaybackLifecycle('source-attached', ownership, {
+      sessionId: playbackSession?.gid,
+      source,
+      autoplay,
+      sourceGeneration
+    });
+    reportPlayerEvent('source-attached', source);
+    const onDashError = (event: unknown) =>
+      reportPlayerEvent('dash-error', describeDashError(event));
+    player.on(dash.MediaPlayer.events.ERROR, onDashError);
+    dashErrorCleanup = () =>
+      player.off(dash.MediaPlayer.events.ERROR, onDashError);
+    player.initialize(video, source, autoplay);
     dashPlayer = player;
   }
 
@@ -222,6 +348,12 @@
       { once: true }
     );
     dashPlayer.attachSource(url);
+    logPlaybackLifecycle('source-reassigned', ownership, {
+      sessionId: playbackSession?.gid,
+      trackKind: kind,
+      trackId: id,
+      sourceGeneration: ++currentSourceGeneration
+    });
   }
 
   async function switchSubtitle(id: string) {
@@ -311,9 +443,14 @@
     }
   }
 
-  async function cleanup() {
+  async function cleanup(
+    reason = 'component-unmounted',
+    caller = 'PlaybackProof.onMount.cleanup'
+  ) {
     subtitleCleanup?.();
     subtitleCleanup = null;
+    dashErrorCleanup?.();
+    dashErrorCleanup = null;
     dashPlayer?.destroy();
     dashPlayer = null;
     remoteVideo?.pause();
@@ -325,9 +462,9 @@
     ) as string[];
     playbackSession = null;
     remoteSessionId = null;
-    sessionStorage.removeItem(playbackKey);
+    for (const gid of ids) clearStoredPlayback(gid);
     await Promise.allSettled(
-      ids.map((gid) => session.api.delete(`stream/${gid}/state/kill`))
+      ids.map((gid) => teardownSession(gid, reason, caller))
     );
   }
 
@@ -349,33 +486,64 @@
     const onPlay = () => {
       paused = false;
       showControls();
+      reportPlayerEvent('play');
     };
     const onPause = () => {
       paused = true;
       showControls();
+      reportPlayerEvent('pause');
     };
+    const diagnosticEvents = [
+      'abort',
+      'canplay',
+      'emptied',
+      'ended',
+      'error',
+      'loadeddata',
+      'loadedmetadata',
+      'seeked',
+      'seeking',
+      'stalled',
+      'suspend',
+      'waiting'
+    ] as const;
+    const onDiagnosticEvent = (event: Event) =>
+      reportPlayerEvent(event.type);
     video.addEventListener('timeupdate', onTime);
     video.addEventListener('durationchange', onDuration);
     video.addEventListener('play', onPlay);
     video.addEventListener('pause', onPause);
+    for (const event of diagnosticEvents)
+      video.addEventListener(event, onDiagnosticEvent);
     // Begin the idle countdown on entry; pointer movement is not required to arm it.
     showControls();
     (async () => {
       try {
-        const stale = sessionStorage.getItem(playbackKey);
-        if (stale)
-          await session.api
-            .delete(`stream/${stale}/state/kill`)
-            .catch(() => undefined);
-        const created = await createSession();
+        const stale = readStoredPlayback();
+        if (stale && stale.gid !== initialSession?.gid) {
+          await teardownSession(
+            stale.gid,
+            'stale-session-recovery',
+            'PlaybackProof.onMount',
+            stale
+          ).catch(() => undefined);
+        }
+        const created = initialSession ?? (await createSession());
+        logPlaybackLifecycle(
+          initialSession ? 'prepared-session-adopted' : 'session-created',
+          ownership,
+          { sessionId: created.gid }
+        );
         if (disposed) {
-          await session.api
-            .delete(`stream/${created.gid}/state/kill`)
-            .catch(() => undefined);
+          await teardownSession(
+            created.gid,
+            'initialization-completed-after-dispose',
+            'PlaybackProof.onMount.initialize'
+          ).catch(() => undefined);
           return;
         }
         playbackSession = created;
-        sessionStorage.setItem(playbackKey, created.gid);
+        storePlayback(created.gid, ownership);
         selectedVideo =
           tracks('video').find((track) => track.id === initialVideo)?.id ??
           preferred('video')?.id ??
@@ -406,8 +574,10 @@
       video.removeEventListener('durationchange', onDuration);
       video.removeEventListener('play', onPlay);
       video.removeEventListener('pause', onPause);
+      for (const event of diagnosticEvents)
+        video.removeEventListener(event, onDiagnosticEvent);
       if (controlsTimer !== null) window.clearTimeout(controlsTimer);
-      void cleanup();
+      void cleanup(unmountReason, unmountCaller);
     };
   });
 </script>
@@ -431,7 +601,9 @@
   {:else if phase === 'error'}
     <div class="status failure">
       <p>{error}</p>
-      <Button tone="surface" onclick={onexit}>Return to Eclipse</Button>
+      <Button tone="surface" onclick={() => requestExit('initialization-error')}
+        >Return to Eclipse</Button
+      >
     </div>
   {/if}
 
@@ -446,7 +618,7 @@
       <button
         class="round"
         type="button"
-        onclick={onexit}
+        onclick={() => requestExit('back-button')}
         aria-label="Exit playback">←</button
       >
     </div>

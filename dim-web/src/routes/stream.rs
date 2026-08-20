@@ -5,7 +5,8 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use dim_core::core::StateManager;
 use dim_core::stream_tracking::{
-    ContentType, PlannedProfile, PlannedTrack, RemotePlaybackState, StreamTracking, VirtualManifest,
+    ContentType, PlannedProfile, PlannedTrack, PlaybackLifecycle, PlaybackTeardown,
+    RemotePlaybackState, StreamTracking, VirtualManifest,
 };
 use dim_core::streaming::codec::{
     audio_capability_request, audio_codec_descriptor, audio_remux_supported, capability_request,
@@ -29,7 +30,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::future::Future;
 use std::path::{self, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -46,6 +47,9 @@ pub struct VirtualManifestParams {
     capabilities: Option<String>,
     #[serde(default)]
     target: PlaybackTargetKind,
+    frontend_instance_id: Option<String>,
+    source_generation: Option<u64>,
+    creation_reason: Option<String>,
 }
 
 pub async fn return_virtual_manifest(
@@ -93,7 +97,21 @@ pub async fn return_virtual_manifest(
         target,
     )?;
     let gid = Uuid::new_v4();
-    stream_tracking.create_session(gid, owner, tracks).await;
+    stream_tracking
+        .create_session_with_lifecycle(
+            gid,
+            owner,
+            tracks,
+            PlaybackLifecycle {
+                frontend_instance_id: params.frontend_instance_id,
+                media_file_id: Some(id),
+                source_generation: params.source_generation,
+                creation_reason: params
+                    .creation_reason
+                    .unwrap_or_else(|| "legacy-client-manifest-request".into()),
+            },
+        )
+        .await;
     let remote = if target == PlaybackTargetKind::Airplay {
         let token = stream_tracking.enable_remote_access(&gid, owner).await?;
         Some(json!({
@@ -730,7 +748,6 @@ fn browser_aac_output(channels: u64, layout: Option<&str>) -> BrowserAacOutput {
         (4, Some("4.0")) => Some("4.0"),
         (5, Some("5.0")) => Some("5.0"),
         (6, Some("5.1")) => Some("5.1"),
-        (8, Some("7.1")) => Some("7.1"),
         _ => None,
     };
     if let Some(layout) = compatible_layout {
@@ -746,6 +763,17 @@ fn browser_aac_output(channels: u64, layout: Option<&str>) -> BrowserAacOutput {
             channels: 6,
             layout: "5.1",
             filter: Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR"),
+        };
+    }
+
+    // FFmpeg represents standard 7.1 AAC as channel configuration 12. Chromium's fMP4
+    // demuxer rejects that configuration even when MediaCapabilities reports the MIME as
+    // supported. Retain surround through FFmpeg's normal 7.1 -> 5.1 downmix matrix.
+    if channels == 8 && layout == Some("7.1") {
+        return BrowserAacOutput {
+            channels: 6,
+            layout: "5.1",
+            filter: None,
         };
     }
 
@@ -1204,12 +1232,77 @@ async fn stop_failed_transcode(
 ) {
     let stderr = state.get_stderr(id.to_owned()).await.unwrap_or_default();
     tracing::error!(stream_id = id, error = %error, ffmpeg_stderr = %stderr, "FFmpeg stream failed");
-    let _ = tracking.remove(state, &gid, owner).await;
+    let _ = tracking
+        .remove_with_context(
+            state,
+            &gid,
+            owner,
+            PlaybackTeardown::server("transcode-failed", "stop-failed-transcode"),
+        )
+        .await;
 }
 
 #[derive(Deserialize)]
 pub struct InitParams {
     start_num: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct PlayerTelemetry {
+    event: String,
+    frontend_instance_id: Option<String>,
+    media_file_id: Option<String>,
+    source_generation: Option<u64>,
+    current_time: Option<f64>,
+    duration: Option<f64>,
+    ready_state: Option<u16>,
+    network_state: Option<u16>,
+    paused: Option<bool>,
+    ended: Option<bool>,
+    buffered: Option<Vec<[f64; 2]>>,
+    error_code: Option<u16>,
+    error_message: Option<String>,
+    detail: Option<String>,
+}
+
+pub async fn report_player_event(
+    State(AppState {
+        stream_tracking, ..
+    }): State<AppState>,
+    Path(gid): Path<String>,
+    Extension(user): Extension<User>,
+    Json(event): Json<PlayerTelemetry>,
+) -> Result<impl IntoResponse, DimErrorWrapper> {
+    let gid =
+        Uuid::parse_str(&gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
+    // Inspect both authenticates ownership and keeps this active session alive.
+    stream_tracking.inspect(&gid, user.id.get()).await?;
+    let event_name = event.event.chars().take(64).collect::<String>();
+    let error_message = event
+        .error_message
+        .map(|value| value.chars().take(512).collect::<String>());
+    let detail = event
+        .detail
+        .map(|value| value.chars().take(1_024).collect::<String>());
+    tracing::info!(
+        session_id = %gid,
+        frontend_instance_id = event.frontend_instance_id.as_deref(),
+        media_file_id = event.media_file_id.as_deref(),
+        source_generation = event.source_generation,
+        player_event = event_name,
+        current_time = event.current_time,
+        duration = event.duration,
+        ready_state = event.ready_state,
+        network_state = event.network_state,
+        paused = event.paused,
+        ended = event.ended,
+        buffered = ?event.buffered,
+        error_code = event.error_code,
+        error_message,
+        detail,
+        "Browser playback event"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn get_init(
@@ -1226,15 +1319,46 @@ pub async fn get_init(
     let gid = stream_tracking
         .owner_for_process(&id, user.id.get())
         .await?;
+    let start_num = params.start_num.unwrap_or(0);
+    let requested_at = Instant::now();
+    tracing::info!(
+        session_id = %gid,
+        process_id = id,
+        start_num,
+        "Playback init demand started"
+    );
     let file = timeout_segment(
-        || state.chunk_init_request(id.clone(), params.start_num.unwrap_or(0)),
+        || state.chunk_init_request(id.clone(), start_num),
         Duration::from_millis(100),
         100,
     )
     .await;
     match file {
-        Ok(path) => Ok(reply_with_file(path, "video/mp4", &headers, true).await),
+        Ok(path) => {
+            let bytes = tokio::fs::metadata(&path)
+                .await
+                .ok()
+                .map(|value| value.len());
+            tracing::info!(
+                session_id = %gid,
+                process_id = id,
+                start_num,
+                elapsed_ms = requested_at.elapsed().as_millis(),
+                path,
+                bytes,
+                "Playback init demand resolved"
+            );
+            Ok(reply_with_file(path, "video/mp4", &headers, true).await)
+        }
         Err(error) => {
+            tracing::warn!(
+                session_id = %gid,
+                process_id = id,
+                start_num,
+                elapsed_ms = requested_at.elapsed().as_millis(),
+                error = %error,
+                "Playback init demand failed"
+            );
             stop_failed_transcode(&state, &stream_tracking, gid, user.id.get(), &id, &error).await;
             Err(error.into())
         }
@@ -1262,6 +1386,13 @@ pub async fn get_chunk(
         .and_then(|value| value.to_str())
         .and_then(|value| value.parse::<u32>().ok())
         .ok_or(dim_core::errors::StreamingErrors::InvalidRequest)?;
+    let requested_at = Instant::now();
+    tracing::info!(
+        session_id = %gid,
+        process_id = id,
+        segment_num = chunk_num,
+        "Playback segment demand started"
+    );
     let file = timeout_segment(
         || state.chunk_request(id.clone(), chunk_num),
         Duration::from_millis(100),
@@ -1269,8 +1400,31 @@ pub async fn get_chunk(
     )
     .await;
     match file {
-        Ok(path) => Ok(reply_with_file(path, "video/mp4", &headers, true).await),
+        Ok(path) => {
+            let bytes = tokio::fs::metadata(&path)
+                .await
+                .ok()
+                .map(|value| value.len());
+            tracing::info!(
+                session_id = %gid,
+                process_id = id,
+                segment_num = chunk_num,
+                elapsed_ms = requested_at.elapsed().as_millis(),
+                path,
+                bytes,
+                "Playback segment demand resolved"
+            );
+            Ok(reply_with_file(path, "video/mp4", &headers, true).await)
+        }
         Err(error) => {
+            tracing::warn!(
+                session_id = %gid,
+                process_id = id,
+                segment_num = chunk_num,
+                elapsed_ms = requested_at.elapsed().as_millis(),
+                error = %error,
+                "Playback segment demand failed"
+            );
             stop_failed_transcode(&state, &stream_tracking, gid, user.id.get(), &id, &error).await;
             Err(error.into())
         }
@@ -1401,6 +1555,14 @@ pub async fn session_get_stderr(
     Ok(Json(json!({ "errors": public_errors })))
 }
 
+#[derive(Default, Deserialize)]
+pub struct KillSessionParams {
+    teardown_reason: Option<String>,
+    teardown_caller: Option<String>,
+    frontend_instance_id: Option<String>,
+    source_generation: Option<u64>,
+}
+
 pub async fn kill_session(
     State(AppState {
         state,
@@ -1408,11 +1570,28 @@ pub async fn kill_session(
         ..
     }): State<AppState>,
     Path(gid): Path<String>,
+    Query(params): Query<KillSessionParams>,
     Extension(user): Extension<User>,
 ) -> Result<impl IntoResponse, DimErrorWrapper> {
     let gid =
         Uuid::parse_str(&gid).map_err(|_| dim_core::errors::StreamingErrors::GidParseError)?;
-    stream_tracking.remove(&state, &gid, user.id.get()).await?;
+    stream_tracking
+        .remove_with_context(
+            &state,
+            &gid,
+            user.id.get(),
+            PlaybackTeardown {
+                reason: params
+                    .teardown_reason
+                    .unwrap_or_else(|| "client-request-without-reason".into()),
+                caller: params
+                    .teardown_caller
+                    .unwrap_or_else(|| "kill-session-route".into()),
+                frontend_instance_id: params.frontend_instance_id,
+                source_generation: params.source_generation,
+            },
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1684,12 +1863,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_aac_preserves_standard_seven_one() {
+    fn browser_aac_normalizes_seven_one_to_appendable_five_one() {
         assert_eq!(
             browser_aac_output(8, Some("7.1")),
             BrowserAacOutput {
-                channels: 8,
-                layout: "7.1",
+                channels: 6,
+                layout: "5.1",
                 filter: None,
             }
         );

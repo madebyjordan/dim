@@ -12,6 +12,7 @@ expanded.rs
 *.db
 build
 logs/
+.eclipse-processes/
 metadata/
 streaming_cache/
 transcoding
