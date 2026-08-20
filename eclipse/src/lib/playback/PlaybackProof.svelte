@@ -174,10 +174,7 @@
       togglePlayback();
     } else if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      beginSeek(
-        Math.max(0, video.currentTime - 10),
-        'keyboard-arrow-left'
-      );
+      beginSeek(Math.max(0, video.currentTime - 10), 'keyboard-arrow-left');
     } else if (event.key === 'ArrowRight') {
       event.preventDefault();
       beginSeek(
@@ -322,19 +319,60 @@
   }
 
   async function createSession(target: 'browser' | 'airplay' = 'browser') {
+    logPlaybackLifecycle('preparation-state', ownership, {
+      state: 'capability-inspection-requested',
+      target,
+      pendingPromise: 'GET /capabilities'
+    });
     const inspection = await session.api.get<PlaybackCapabilityInspection>(
       `stream/${fileId}/capabilities`
     );
-    capabilities ??= await determineCapabilities(inspection);
-    return session.api.get<PlaybackSession>(`stream/${fileId}/manifest`, {
-      force_ass: true,
-      capabilities: JSON.stringify(capabilities),
+    logPlaybackLifecycle('preparation-state', ownership, {
+      state: 'capability-inspection-completed',
       target,
-      ...creationQuery(
-        ownership,
-        target === 'airplay' ? 'airplay-preparation' : 'player-initialization'
-      )
+      probeSource: inspection.probe_source,
+      audioStreamCount: inspection.audio.length
     });
+    capabilities ??= await determineCapabilities(inspection, {
+      onEvent: (probe) =>
+        logPlaybackLifecycle(`capability-probe-${probe.phase}`, ownership, {
+          ...probe,
+          target,
+          pendingPromise:
+            probe.phase === 'start'
+              ? 'navigator.mediaCapabilities.decodingInfo'
+              : null
+        })
+    });
+    logPlaybackLifecycle('preparation-state', ownership, {
+      state: 'browser-capability-probe-completed',
+      target,
+      capabilities
+    });
+    logPlaybackLifecycle('preparation-state', ownership, {
+      state: 'planner-requested',
+      target,
+      pendingPromise: 'GET /manifest'
+    });
+    const created = await session.api.get<PlaybackSession>(
+      `stream/${fileId}/manifest`,
+      {
+        force_ass: true,
+        capabilities: JSON.stringify(capabilities),
+        target,
+        ...creationQuery(
+          ownership,
+          target === 'airplay' ? 'airplay-preparation' : 'player-initialization'
+        )
+      }
+    );
+    logPlaybackLifecycle('preparation-state', ownership, {
+      state: 'planner-completed',
+      target,
+      sessionId: created.gid,
+      playbackPlan: created.playback_plan
+    });
+    return created;
   }
 
   function requestExit(caller: string) {
@@ -670,6 +708,11 @@
           preferred('audio')?.id ??
           '';
         await activate();
+        logPlaybackLifecycle('preparation-state', ownership, {
+          state: 'source-assigned',
+          sessionId: created.gid,
+          sourceGeneration: currentSourceGeneration
+        });
         if (
           initialSubtitle &&
           tracks('subtitle').some((track) => track.id === initialSubtitle)
@@ -677,12 +720,21 @@
           await switchSubtitle(initialSubtitle);
         }
         phase = 'ready';
+        logPlaybackLifecycle('preparation-state', ownership, {
+          state: 'player-ready',
+          sessionId: created.gid,
+          sourceGeneration: currentSourceGeneration
+        });
       } catch (cause) {
         error =
           cause instanceof Error
             ? cause.message
             : 'Playback initialization failed';
         phase = 'error';
+        logPlaybackLifecycle('preparation-failed', ownership, {
+          stage: 'player-initialization',
+          failure: cause instanceof Error ? cause.message : String(cause)
+        });
       }
     })();
     return () => {

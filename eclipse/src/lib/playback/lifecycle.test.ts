@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearStoredPlayback,
+  createPlaybackInstanceId,
   createPlaybackOwnership,
   creationQuery,
   readStoredPlayback,
@@ -17,6 +18,26 @@ beforeEach(() => {
 });
 
 describe('playback lifecycle ownership', () => {
+  it('uses randomUUID when the browser exposes it', () => {
+    expect(createPlaybackInstanceId()).toBe(
+      '00000000-0000-4000-8000-000000000001'
+    );
+  });
+
+  it('uses WebKit-compatible getRandomValues when randomUUID is unavailable', () => {
+    const bytes = Uint8Array.from({ length: 16 }, (_, index) => index);
+    const provider = {
+      getRandomValues<T extends ArrayBufferView | null>(target: T): T {
+        (target as Uint8Array).set(bytes);
+        return target;
+      }
+    };
+
+    expect(createPlaybackInstanceId(provider)).toBe(
+      '00010203-0405-4607-8809-0a0b0c0d0e0f'
+    );
+  });
+
   it('correlates creation and teardown with one instance and generation', () => {
     const ownership = createPlaybackOwnership('42', 7);
     expect(creationQuery(ownership, 'catalog-track-preparation')).toEqual({

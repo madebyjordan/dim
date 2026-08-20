@@ -8,12 +8,55 @@ export type StoredPlaybackOwnership = PlaybackOwnership & { gid: string };
 
 const playbackKey = 'eclipse.playback-session';
 
+type PlaybackCrypto = Pick<Crypto, 'getRandomValues'> &
+  Partial<Pick<Crypto, 'randomUUID'>>;
+
+export function createPlaybackInstanceId(
+  provider: PlaybackCrypto = globalThis.crypto
+): string {
+  if (typeof provider?.randomUUID === 'function') {
+    return provider.randomUUID();
+  }
+  if (typeof provider?.getRandomValues !== 'function') {
+    throw new Error('This browser cannot create a secure playback identity.');
+  }
+  const bytes = provider.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10).join('')
+  ].join('-');
+}
+
+export function playbackBrowserContext() {
+  const userAgent = globalThis.navigator?.userAgent ?? 'unknown';
+  const engine =
+    /AppleWebKit/i.test(userAgent) &&
+    !/(?:Chrome|Chromium|CriOS)/i.test(userAgent)
+      ? 'webkit'
+      : /(?:Chrome|Chromium|CriOS)/i.test(userAgent)
+        ? 'chromium'
+        : /Gecko\//i.test(userAgent)
+          ? 'gecko'
+          : 'unknown';
+  return {
+    browserEngine: engine,
+    browserUserAgent: userAgent,
+    secureContext: globalThis.isSecureContext ?? false
+  };
+}
+
 export function createPlaybackOwnership(
   mediaFileId: string,
   sourceGeneration: number
 ): PlaybackOwnership {
   return {
-    instanceId: crypto.randomUUID(),
+    instanceId: createPlaybackInstanceId(),
     sourceGeneration,
     mediaFileId
   };
@@ -68,10 +111,7 @@ export function readStoredPlayback(): StoredPlaybackOwnership | null {
   return null;
 }
 
-export function storePlayback(
-  gid: string,
-  ownership: PlaybackOwnership
-): void {
+export function storePlayback(gid: string, ownership: PlaybackOwnership): void {
   sessionStorage.setItem(playbackKey, JSON.stringify({ gid, ...ownership }));
 }
 
@@ -86,6 +126,7 @@ export function logPlaybackLifecycle(
 ) {
   console.info('[playback-lifecycle]', {
     event,
+    ...playbackBrowserContext(),
     frontendInstanceId: ownership.instanceId,
     mediaFileId: ownership.mediaFileId,
     sourceGeneration: ownership.sourceGeneration,

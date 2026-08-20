@@ -287,11 +287,7 @@
       await session.api
         .delete(
           `stream/${gid}/state/kill`,
-          teardownQuery(
-            ownership,
-            reason,
-            'catalog.disposePreparedPlayback'
-          )
+          teardownQuery(ownership, reason, 'catalog.disposePreparedPlayback')
         )
         .catch(() => undefined);
     }
@@ -305,12 +301,46 @@
   }
 
   async function preparePlayback(file: MediaFile, version: number) {
-    const ownership = createPlaybackOwnership(String(file.id), version);
+    let ownership: PlaybackOwnership | null = null;
+    let stage = 'ownership-creation';
     try {
+      ownership = createPlaybackOwnership(String(file.id), version);
+      logPlaybackLifecycle('preparation-state', ownership, {
+        state: 'started'
+      });
+      stage = 'capability-inspection';
+      logPlaybackLifecycle('preparation-state', ownership, {
+        state: 'capability-inspection-requested',
+        pendingPromise: 'GET /capabilities'
+      });
       const inspection = await session.api.get<PlaybackCapabilityInspection>(
         `stream/${file.id}/capabilities`
       );
-      const capabilities = await determineCapabilities(inspection);
+      logPlaybackLifecycle('preparation-state', ownership, {
+        state: 'capability-inspection-completed',
+        probeSource: inspection.probe_source,
+        audioStreamCount: inspection.audio.length
+      });
+      stage = 'browser-capability-probe';
+      const capabilities = await determineCapabilities(inspection, {
+        onEvent: (probe) =>
+          logPlaybackLifecycle(`capability-probe-${probe.phase}`, ownership!, {
+            ...probe,
+            pendingPromise:
+              probe.phase === 'start'
+                ? 'navigator.mediaCapabilities.decodingInfo'
+                : null
+          })
+      });
+      logPlaybackLifecycle('preparation-state', ownership, {
+        state: 'browser-capability-probe-completed',
+        capabilities
+      });
+      stage = 'playback-planner';
+      logPlaybackLifecycle('preparation-state', ownership, {
+        state: 'planner-requested',
+        pendingPromise: 'GET /manifest'
+      });
       const prepared = await session.api.get<PlaybackSession>(
         `stream/${file.id}/manifest`,
         {
@@ -320,6 +350,11 @@
           ...creationQuery(ownership, 'catalog-track-preparation')
         }
       );
+      logPlaybackLifecycle('preparation-state', ownership, {
+        state: 'planner-completed',
+        sessionId: prepared.gid,
+        playbackPlan: prepared.playback_plan
+      });
       if (version !== selectionVersion) {
         logPlaybackLifecycle('session-teardown-requested', ownership, {
           sessionId: prepared.gid,
@@ -359,6 +394,20 @@
           cause instanceof Error
             ? cause.message
             : 'Playback options are unavailable';
+      }
+      if (ownership) {
+        logPlaybackLifecycle('preparation-failed', ownership, {
+          stage,
+          failure: cause instanceof Error ? cause.message : String(cause)
+        });
+      } else {
+        console.error('[playback-preparation]', {
+          event: 'preparation-failed',
+          mediaFileId: String(file.id),
+          sourceGeneration: version,
+          stage,
+          failure: cause instanceof Error ? cause.message : String(cause)
+        });
       }
     }
   }
@@ -513,8 +562,19 @@
     if (!selectedFile || playbackLaunching) return;
     playbackLaunching = true;
     const launchGeneration = selectionVersion;
-    await preparePlaybackTask;
+    try {
+      await preparePlaybackTask;
+    } catch (cause) {
+      playbackError =
+        cause instanceof Error ? cause.message : 'Playback preparation failed';
+      playbackLaunching = false;
+      return;
+    }
     if (!selectedFile || launchGeneration !== selectionVersion) {
+      playbackLaunching = false;
+      return;
+    }
+    if (playbackError) {
       playbackLaunching = false;
       return;
     }
@@ -524,11 +584,15 @@
       createPlaybackOwnership(String(selectedFile.id), launchGeneration);
     preparedPlayback = null;
     preparedPlaybackOwnership = null;
-    logPlaybackLifecycle('session-ownership-transferred', activePlaybackOwnership, {
-      sessionId: activePlaybackSession?.gid ?? null,
-      from: 'catalog',
-      to: 'PlaybackProof'
-    });
+    logPlaybackLifecycle(
+      'session-ownership-transferred',
+      activePlaybackOwnership,
+      {
+        sessionId: activePlaybackSession?.gid ?? null,
+        from: 'catalog',
+        to: 'PlaybackProof'
+      }
+    );
     const playback = {
       fileId: String(selectedFile.id),
       video: selectedVideo,
