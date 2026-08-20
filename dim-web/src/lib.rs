@@ -329,6 +329,10 @@ pub fn build_router(app: AppState) -> Router {
             "/api/v1/filebrowser",
             get(routes::filebrowser::get_directory_structure),
         )
+        .route(
+            "/api/v1/filebrowser/roots",
+            get(routes::filebrowser::get_storage_roots),
+        )
         .merge(media_routes(app.clone()))
         .merge(stream_routes(app.clone()))
         .route(

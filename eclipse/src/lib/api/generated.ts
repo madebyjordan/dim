@@ -122,6 +122,13 @@ export type DirectoryListing = {
   directories: Array<DirectoryEntry>;
 };
 
+export type StorageRoot = {
+  display_name: string;
+  path: string;
+  available_bytes: number;
+  kind: 'fixed' | 'removable' | 'network';
+};
+
 export type UnmatchedMediaFile = {
   id?: number;
   name?: string;
@@ -292,6 +299,7 @@ export interface ApiOperations {
   saveProgress: '/media/{id}/progress';
   searchMedia: '/search';
   listDirectories: '/filebrowser';
+  listStorageRoots: '/filebrowser/roots';
   searchExternalMedia: '/media/tmdb_search';
   inspectPlaybackCapabilities: '/stream/{id}/capabilities';
   createPlaybackSession: '/stream/{id}/manifest';

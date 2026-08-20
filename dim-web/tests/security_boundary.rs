@@ -131,6 +131,11 @@ async fn response_body(response: axum::response::Response) -> Vec<u8> {
 #[tokio::test]
 async fn enforces_the_application_security_boundary() {
     let test = test_app().await;
+    let readable_directory_uri = if cfg!(windows) {
+        "/api/v1/filebrowser?path=C%3A%5C"
+    } else {
+        "/api/v1/filebrowser?path=/tmp"
+    };
 
     let response = test
         .router
@@ -152,7 +157,8 @@ async fn enforces_the_application_security_boundary() {
         "/api/v1/user/settings",
         "/api/v1/host/settings",
         "/api/v1/auth/invites",
-        "/api/v1/filebrowser?path=/tmp",
+        readable_directory_uri,
+        "/api/v1/filebrowser/roots",
         "/api/v1/stream/missing/state/get_stderr",
     ] {
         let response = test
@@ -201,7 +207,8 @@ async fn enforces_the_application_security_boundary() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     for (method, uri, body) in [
-        (Method::GET, "/api/v1/filebrowser?path=/tmp", ""),
+        (Method::GET, readable_directory_uri, ""),
+        (Method::GET, "/api/v1/filebrowser/roots", ""),
         (Method::GET, "/api/v1/host/settings", ""),
         (Method::POST, "/api/v1/host/settings", "{}"),
         (Method::GET, "/api/v1/auth/invites", ""),
@@ -233,7 +240,20 @@ async fn enforces_the_application_security_boundary() {
         .clone()
         .oneshot(request(
             Method::GET,
-            "/api/v1/filebrowser?path=/tmp",
+            readable_directory_uri,
+            Some(&test.owner_token),
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = test
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/api/v1/filebrowser/roots",
             Some(&test.owner_token),
             "",
         ))
@@ -432,5 +452,10 @@ async fn enforces_the_application_security_boundary() {
     let response = test.router.clone().oneshot(poisoned_host).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    std::fs::remove_dir_all(&test.root).unwrap();
+    let root = test.root.clone();
+    drop(test);
+    match std::fs::remove_dir_all(root) {
+        Err(error) if cfg!(windows) && error.raw_os_error() == Some(32) => {}
+        result => result.unwrap(),
+    }
 }

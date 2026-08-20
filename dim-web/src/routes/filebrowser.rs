@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use sysinfo::Disks;
 use tokio::task::spawn_blocking;
 
 use crate::middleware::Owner;
@@ -72,6 +73,39 @@ pub struct DirectoryListing {
     directories: Vec<DirectoryEntry>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageRootKind {
+    Fixed,
+    Removable,
+    Network,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct StorageRoot {
+    display_name: String,
+    path: String,
+    available_bytes: u64,
+    kind: StorageRootKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    Windows,
+    MacOs,
+    Linux,
+    Other,
+}
+
+#[derive(Debug)]
+struct StorageRootCandidate {
+    name: String,
+    path: PathBuf,
+    file_system: String,
+    available_bytes: u64,
+    removable: bool,
+}
+
 fn path_string(path: &FsPath) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -88,6 +122,151 @@ fn default_directory() -> PathBuf {
     }
 
     PathBuf::from(FsPath::new(std::path::MAIN_SEPARATOR_STR))
+}
+
+fn current_platform() -> Platform {
+    if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else if cfg!(target_os = "linux") {
+        Platform::Linux
+    } else {
+        Platform::Other
+    }
+}
+
+fn is_network_file_system(file_system: &str) -> bool {
+    matches!(
+        file_system.to_ascii_lowercase().as_str(),
+        "9p" | "afpfs" | "cifs" | "davfs" | "nfs" | "nfs4" | "smbfs" | "sshfs"
+    )
+}
+
+fn is_pseudo_file_system(file_system: &str) -> bool {
+    matches!(
+        file_system.to_ascii_lowercase().as_str(),
+        "autofs"
+            | "binfmt_misc"
+            | "cgroup"
+            | "cgroup2"
+            | "configfs"
+            | "debugfs"
+            | "devpts"
+            | "devtmpfs"
+            | "fusectl"
+            | "hugetlbfs"
+            | "mqueue"
+            | "proc"
+            | "pstore"
+            | "rpc_pipefs"
+            | "securityfs"
+            | "squashfs"
+            | "sysfs"
+            | "tmpfs"
+            | "tracefs"
+    )
+}
+
+fn has_path_prefix(path: &FsPath, prefix: &str) -> bool {
+    path == FsPath::new(prefix) || path.starts_with(format!("{prefix}/"))
+}
+
+fn is_usable_mount(candidate: &StorageRootCandidate, platform: Platform) -> bool {
+    match platform {
+        Platform::Windows | Platform::Other => true,
+        Platform::MacOs => {
+            candidate.path == FsPath::new("/")
+                || (candidate.path.starts_with("/Volumes")
+                    && candidate.path.components().count() == 3)
+        }
+        Platform::Linux => {
+            candidate.path == FsPath::new("/")
+                || (!is_pseudo_file_system(&candidate.file_system)
+                    && !["/boot", "/dev", "/proc", "/run", "/snap", "/sys"]
+                        .iter()
+                        .any(|prefix| has_path_prefix(&candidate.path, prefix)))
+        }
+    }
+}
+
+fn fallback_name(path: &FsPath, platform: Platform) -> String {
+    match platform {
+        Platform::Windows => path
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_owned(),
+        Platform::MacOs if path == FsPath::new("/") => "System Volume".to_owned(),
+        Platform::Linux if path == FsPath::new("/") => "System".to_owned(),
+        _ => path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+    }
+}
+
+fn display_name(candidate: &StorageRootCandidate, platform: Platform) -> String {
+    let name = candidate.name.trim();
+    let device_like = name.is_empty()
+        || name.starts_with("/dev/")
+        || name.starts_with("\\\\?\\")
+        || name.starts_with("disk");
+
+    if device_like {
+        fallback_name(&candidate.path, platform)
+    } else {
+        name.to_owned()
+    }
+}
+
+fn normalize_storage_roots(
+    candidates: Vec<StorageRootCandidate>,
+    platform: Platform,
+) -> Vec<StorageRoot> {
+    let mut roots = candidates
+        .into_iter()
+        .filter(|candidate| is_usable_mount(candidate, platform))
+        .map(|candidate| StorageRoot {
+            display_name: display_name(&candidate, platform),
+            path: path_string(&candidate.path),
+            available_bytes: candidate.available_bytes,
+            kind: if is_network_file_system(&candidate.file_system) {
+                StorageRootKind::Network
+            } else if candidate.removable {
+                StorageRootKind::Removable
+            } else {
+                StorageRootKind::Fixed
+            },
+        })
+        .collect::<Vec<_>>();
+
+    roots.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    roots.dedup_by(|a, b| a.path.eq_ignore_ascii_case(&b.path));
+    roots
+}
+
+pub fn discover_storage_roots() -> Vec<StorageRoot> {
+    let candidates = Disks::new_with_refreshed_list()
+        .iter()
+        .map(|disk| StorageRootCandidate {
+            name: disk.name().to_string_lossy().into_owned(),
+            path: disk.mount_point().to_owned(),
+            file_system: disk.file_system().to_string_lossy().into_owned(),
+            available_bytes: disk.available_space(),
+            removable: disk.is_removable(),
+        })
+        .filter(|candidate| is_readable_directory(&candidate.path))
+        .collect();
+
+    normalize_storage_roots(candidates, current_platform())
+}
+
+pub async fn get_storage_roots(_owner: Owner) -> Result<Json<Vec<StorageRoot>>, FileBrowserError> {
+    let roots = spawn_blocking(discover_storage_roots)
+        .await
+        .map_err(|_| FileBrowserError::Io)?;
+    Ok(Json(roots))
 }
 
 pub fn enumerate_directory(path: PathBuf) -> Result<DirectoryListing, FileBrowserError> {
@@ -189,5 +368,95 @@ mod tests {
             Err(FileBrowserError::NotDirectory)
         ));
         fs::remove_file(file).unwrap();
+    }
+
+    fn candidate(
+        name: &str,
+        path: PathBuf,
+        file_system: &str,
+        available_bytes: u64,
+        removable: bool,
+    ) -> StorageRootCandidate {
+        StorageRootCandidate {
+            name: name.to_owned(),
+            path,
+            file_system: file_system.to_owned(),
+            available_bytes,
+            removable,
+        }
+    }
+
+    #[test]
+    fn normalizes_windows_drive_roots() {
+        let roots = normalize_storage_roots(
+            vec![
+                candidate("Local Disk", PathBuf::from(r"C:\"), "NTFS", 100, false),
+                candidate("USB", PathBuf::from(r"D:\"), "exFAT", 50, true),
+            ],
+            Platform::Windows,
+        );
+
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].display_name, "Local Disk");
+        assert_eq!(roots[0].path, r"C:\");
+        assert_eq!(roots[1].kind, StorageRootKind::Removable);
+    }
+
+    #[test]
+    fn linux_filters_pseudo_mounts_and_keeps_real_volumes() {
+        let media = PathBuf::from("/media/archive");
+        let roots = normalize_storage_roots(
+            vec![
+                candidate("/dev/root", PathBuf::from("/"), "ext4", 100, false),
+                candidate("proc", PathBuf::from("/proc"), "proc", 0, false),
+                candidate("Media", media.clone(), "ext4", 80, false),
+            ],
+            Platform::Linux,
+        );
+
+        assert!(roots.iter().any(|root| root.path == "/"));
+        assert!(roots.iter().any(|root| root.path == path_string(&media)));
+        assert!(!roots.iter().any(|root| root.path == "/proc"));
+    }
+
+    #[test]
+    fn macos_keeps_system_and_top_level_external_volumes_only() {
+        let roots = normalize_storage_roots(
+            vec![
+                candidate("Macintosh HD", PathBuf::from("/"), "apfs", 100, false),
+                candidate(
+                    "Archive",
+                    PathBuf::from("/Volumes/Archive"),
+                    "apfs",
+                    80,
+                    true,
+                ),
+                candidate(
+                    "Data",
+                    PathBuf::from("/System/Volumes/Data"),
+                    "apfs",
+                    60,
+                    false,
+                ),
+            ],
+            Platform::MacOs,
+        );
+
+        assert_eq!(roots.len(), 2);
+        assert!(roots.iter().any(|root| root.display_name == "Macintosh HD"));
+        assert!(roots.iter().any(|root| root.display_name == "Archive"));
+    }
+
+    #[test]
+    fn discovery_returns_readable_native_roots() {
+        let roots = discover_storage_roots();
+
+        assert!(!roots.is_empty());
+        for root in roots {
+            assert!(!root.display_name.is_empty());
+            let path = PathBuf::from(&root.path);
+            assert!(path.is_absolute());
+            assert!(is_readable_directory(&path));
+        }
     }
 }
