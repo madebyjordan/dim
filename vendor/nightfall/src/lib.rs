@@ -245,31 +245,65 @@ impl StateManager {
         }
 
         if !session.is_chunk_done(chunk) {
+            let current_chunk = session.current_chunk();
+            let raw_speed = session.raw_speed();
+            let effective_raw_speed = session.effective_raw_speed();
             let eta = session.eta_for(chunk).as_millis() as f64;
-            let eta_tol = (10_000.0 / session.raw_speed()).max(8_000.0);
+            let eta_tol = (10_000.0 / effective_raw_speed).max(8_000.0);
 
             // FIXME: When we hard seek and start a new ffmpeg session for some reason ffmpeg
             // reports invalid speed but then evens out. The problem is that causes seeking
             // multiple times in a row to be very slow.
             // thus for like the first 10s after a hard seek we exclusively hard seek if the
             // target is over 10 chunks into the future.
-            let should_hard_seek = chunk < session.start_num()
-                || (chunk > session.current_chunk() + 15
+            let hard_seek_reason = if chunk < session.start_num() {
+                Some("backward-before-process-start")
+            } else if chunk > current_chunk + 15
                     && Instant::now() < stats.last_hard_seek + Duration::from_secs(15)
-                    && chunk > stats.hard_seeked_at)
-                || eta > eta_tol;
+                    && chunk > stats.hard_seeked_at
+            {
+                Some("forward-after-recent-hard-seek")
+            } else if eta > eta_tol {
+                Some("sequential-eta-exceeds-threshold")
+            } else {
+                None
+            };
 
             session.cont();
 
-            if should_hard_seek {
+            if let Some(reason) = hard_seek_reason {
+                let restart_started = Instant::now();
+                let previous_start_segment = session.start_num();
+                info!(
+                    process_id = id,
+                    reason,
+                    previous_start_segment,
+                    current_segment = current_chunk,
+                    requested_segment = chunk,
+                    segment_duration_seconds = session.chunk_size,
+                    raw_speed,
+                    effective_raw_speed,
+                    estimated_sequential_eta_ms = eta as u64,
+                    hard_seek_threshold_ms = eta_tol as u64,
+                    "Nightfall hard seek started"
+                );
                 session.join().await;
+                let stop_elapsed_ms = restart_started.elapsed().as_millis();
                 session.reset_to(chunk);
                 session.start().await?;
 
                 stats.last_hard_seek = Instant::now();
                 stats.hard_seeked_at = chunk;
 
-                debug!("Resetting {} to chunk {} because user seeked.", &id, chunk);
+                info!(
+                    process_id = id,
+                    reason,
+                    previous_start_segment,
+                    requested_segment = chunk,
+                    stop_elapsed_ms,
+                    restart_elapsed_ms = restart_started.elapsed().as_millis(),
+                    "Nightfall hard seek completed"
+                );
             }
 
             Err(NightfallError::ChunkNotDone)
@@ -378,7 +412,7 @@ impl StateManager {
         }
 
         Ok((session.eta_for(chunk).as_millis() as f64)
-            > (10_000.0 / session.raw_speed()).max(5_000.0))
+            > (10_000.0 / session.effective_raw_speed()).max(5_000.0))
     }
 
     #[handler]

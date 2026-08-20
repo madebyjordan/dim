@@ -27,7 +27,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::LinesStream;
 use tokio_stream::StreamExt;
 
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Represents how many chunks we encode before we require a timeout reset.
 /// Basically if within MAX_CHUNKS_AHEAD we do not get a timeout reset we kill the stream.
@@ -100,6 +100,7 @@ impl Session {
     }
 
     pub async fn start(&mut self) -> Result<(), io::Error> {
+        let started_at = Instant::now();
         std::fs::create_dir_all(&self.profile_ctx.output_ctx.outdir)?;
         crate::profiles::video::prepare_hdr_luts(&self.profile_ctx)?;
         let args = self
@@ -144,6 +145,16 @@ impl Session {
         self.has_started = true;
         self.is_throttled = false;
 
+        info!(
+            process_id = self.id,
+            pid = self.child_pid,
+            profile = self.profile.tag(),
+            start_segment = self.start_num(),
+            start_seconds = self.start_num() * self.chunk_size,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            ffmpeg = %self.profile_ctx.ffmpeg_bin,
+            "Nightfall FFmpeg process started"
+        );
         debug!(pid = self.child_pid, ffmpeg = %self.profile_ctx.ffmpeg_bin, ?args, "Started ffmpeg");
 
         if !self.profile.is_stdio_stream() {
@@ -301,12 +312,16 @@ impl Session {
         self.get_key("speed")
             .map(|x| x.trim_end_matches('x').to_string())
             .and_then(|x| x.parse::<f64>().ok())
-            .unwrap_or(1.0) // assume if key is missing that our speed is 2.0
+            .unwrap_or(1.0)
+    }
+
+    pub fn effective_raw_speed(&self) -> f64 {
+        valid_raw_speed(self.raw_speed())
     }
 
     // returns how many chunks per second
     pub fn speed(&self) -> f64 {
-        self.raw_speed().floor().max(20.0) / self.chunk_size as f64
+        chunks_per_second(self.raw_speed(), self.chunk_size)
     }
 
     pub fn eta_for(&self, chunk: u32) -> Duration {
@@ -387,6 +402,21 @@ impl Session {
     }
 }
 
+fn chunks_per_second(raw_speed: f64, chunk_size: u32) -> f64 {
+    // FFmpeg reports encoding speed as a real-time multiplier. Preserve fractional
+    // speeds: treating a 0.4x transcode as a fast encoder makes distant seeks wait
+    // for minutes of sequential output instead of restarting near the target.
+    valid_raw_speed(raw_speed) / chunk_size.max(1) as f64
+}
+
+fn valid_raw_speed(raw_speed: f64) -> f64 {
+    if raw_speed.is_finite() && raw_speed > 0.0 {
+        raw_speed
+    } else {
+        1.0
+    }
+}
+
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
@@ -449,6 +479,34 @@ impl StdoutParser {
 
         let mut lock = STREAMING_SESSION.write().unwrap();
         let _ = lock.remove(&self.id);
+    }
+}
+
+#[cfg(test)]
+mod eta_tests {
+    use super::chunks_per_second;
+
+    #[test]
+    fn fractional_encoder_speed_is_preserved_for_seek_eta() {
+        let chunks_per_second = chunks_per_second(0.4, 5);
+        let eta_seconds = 42.0 / chunks_per_second;
+        assert!((eta_seconds - 525.0).abs() < f64::EPSILON);
+        let threshold_seconds = (10.0 / 0.4_f64).max(8.0);
+        assert!(eta_seconds > threshold_seconds);
+        assert!(12.5 < threshold_seconds, "an adjacent segment should wait");
+    }
+
+    #[test]
+    fn fast_encoder_speed_is_not_artificially_changed() {
+        let chunks_per_second = chunks_per_second(20.0, 5);
+        let eta_seconds = 42.0 / chunks_per_second;
+        assert!((eta_seconds - 10.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn invalid_progress_speed_uses_a_safe_realtime_estimate() {
+        assert_eq!(chunks_per_second(0.0, 5), 0.2);
+        assert_eq!(chunks_per_second(f64::NAN, 5), 0.2);
     }
 }
 

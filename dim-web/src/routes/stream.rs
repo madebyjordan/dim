@@ -1263,6 +1263,11 @@ pub struct PlayerTelemetry {
     error_code: Option<u16>,
     error_message: Option<String>,
     detail: Option<String>,
+    seek_id: Option<String>,
+    seek_reason: Option<String>,
+    seek_from: Option<f64>,
+    seek_target: Option<f64>,
+    seek_elapsed_ms: Option<u64>,
 }
 
 pub async fn report_player_event(
@@ -1300,6 +1305,11 @@ pub async fn report_player_event(
         error_code = event.error_code,
         error_message,
         detail,
+        seek_id = event.seek_id.as_deref(),
+        seek_reason = event.seek_reason.as_deref(),
+        seek_from = event.seek_from,
+        seek_target = event.seek_target,
+        seek_elapsed_ms = event.seek_elapsed_ms,
         "Browser playback event"
     );
     Ok(StatusCode::NO_CONTENT)

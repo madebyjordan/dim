@@ -22,6 +22,7 @@
     teardownQuery,
     type PlaybackOwnership
   } from './lifecycle';
+  import { createSeekCommitter } from './seek';
 
   interface WebKitAirPlayVideo extends HTMLVideoElement {
     webkitShowPlaybackTargetPicker?: () => void;
@@ -33,6 +34,15 @@
     attachSource(url: string): void;
     on(type: string, listener: (event: unknown) => void): void;
     off(type: string, listener: (event: unknown) => void): void;
+  }
+
+  interface SeekTrace {
+    id: string;
+    reason: string;
+    from: number;
+    target: number;
+    startedAt: number;
+    inputCount?: number;
   }
 
   let {
@@ -65,6 +75,7 @@
   let seekInput: HTMLInputElement;
   let dashPlayer: DashPlayer | null = null;
   let dashErrorCleanup: (() => void) | null = null;
+  let dashTelemetryCleanup: (() => void) | null = null;
   let playbackSession = $state<PlaybackSession | null>(null);
   let phase = $state<'loading' | 'ready' | 'error'>('loading');
   let error = $state<string | null>(null);
@@ -84,6 +95,9 @@
   let controlsTimer: number | null = null;
   let keyboardInteraction = false;
   let currentSourceGeneration = 0;
+  let seekSequence = 0;
+  let activeSeek: SeekTrace | null = null;
+  let initialPlaybackComplete = false;
   let unmountReason = 'component-unmounted';
   let unmountCaller = 'PlaybackProof.onMount.cleanup';
   const controlsIdleMs = 1_250;
@@ -160,12 +174,15 @@
       togglePlayback();
     } else if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      video.currentTime = Math.max(0, video.currentTime - 10);
+      beginSeek(
+        Math.max(0, video.currentTime - 10),
+        'keyboard-arrow-left'
+      );
     } else if (event.key === 'ArrowRight') {
       event.preventDefault();
-      video.currentTime = Math.min(
-        video.duration || Infinity,
-        video.currentTime + 10
+      beginSeek(
+        Math.min(video.duration || Infinity, video.currentTime + 10),
+        'keyboard-arrow-right'
       );
     } else if (event.key.toLowerCase() === 'm') toggleMute();
     else if (event.key.toLowerCase() === 'f') toggleFullscreen();
@@ -199,7 +216,11 @@
     ]);
   }
 
-  function reportPlayerEvent(event: string, detail?: string) {
+  function reportPlayerEvent(
+    event: string,
+    detail?: string,
+    seekTrace: SeekTrace | null = activeSeek
+  ) {
     const gid = playbackSession?.gid;
     if (!gid || !video) return;
     const mediaError = video.error;
@@ -225,10 +246,51 @@
         buffered: bufferedRanges(),
         error_code: mediaError?.code,
         error_message: mediaError?.message,
-        detail
+        detail,
+        seek_id: seekTrace?.id,
+        seek_reason: seekTrace?.reason,
+        seek_from: seekTrace ? finite(seekTrace.from) : undefined,
+        seek_target: seekTrace ? finite(seekTrace.target) : undefined,
+        seek_elapsed_ms: seekTrace
+          ? Math.round(performance.now() - seekTrace.startedAt)
+          : undefined
       })
     }).catch(() => undefined);
   }
+
+  function beginSeek(
+    target: number,
+    reason: string,
+    from = video.currentTime,
+    inputCount?: number
+  ) {
+    const trace: SeekTrace = {
+      id: `${ownership.instanceId}:${++seekSequence}`,
+      reason,
+      from,
+      target,
+      startedAt: performance.now(),
+      inputCount
+    };
+    activeSeek = trace;
+    reportPlayerEvent(
+      'seek-committed',
+      inputCount === undefined
+        ? undefined
+        : JSON.stringify({ scrub_input_count: inputCount }),
+      trace
+    );
+    video.currentTime = target;
+  }
+
+  const timelineSeek = createSeekCommitter(
+    () => video.currentTime,
+    (target) => {
+      if (timeOutput) timeOutput.value = formatTime(target);
+    },
+    ({ from, target, inputCount }) =>
+      beginSeek(target, 'timeline-commit', from, inputCount)
+  );
 
   function describeDashError(event: unknown) {
     if (!event || typeof event !== 'object') return String(event);
@@ -237,6 +299,26 @@
       .filter((part) => part !== undefined)
       .map(String)
       .join(' | ');
+  }
+
+  function describeDashFragment(event: unknown) {
+    if (!event || typeof event !== 'object') return String(event);
+    const value = event as Record<string, unknown>;
+    const request =
+      value.request && typeof value.request === 'object'
+        ? (value.request as Record<string, unknown>)
+        : {};
+    const response = value.response;
+    return JSON.stringify({
+      media_type: request.mediaType,
+      request_type: request.type,
+      index: request.index,
+      start_time: request.startTime,
+      duration: request.duration,
+      url: request.url,
+      response_bytes:
+        response instanceof ArrayBuffer ? response.byteLength : undefined
+    });
   }
 
   async function createSession(target: 'browser' | 'airplay' = 'browser') {
@@ -320,6 +402,22 @@
     player.on(dash.MediaPlayer.events.ERROR, onDashError);
     dashErrorCleanup = () =>
       player.off(dash.MediaPlayer.events.ERROR, onDashError);
+    const fragmentEvents = [
+      dash.MediaPlayer.events.FRAGMENT_LOADING_STARTED,
+      dash.MediaPlayer.events.FRAGMENT_LOADING_COMPLETED
+    ];
+    const onDashFragment = (event: unknown) => {
+      if (initialPlaybackComplete && !activeSeek) return;
+      const eventType =
+        event && typeof event === 'object' && 'type' in event
+          ? String((event as { type: unknown }).type)
+          : 'fragment';
+      reportPlayerEvent(`dash-${eventType}`, describeDashFragment(event));
+    };
+    for (const event of fragmentEvents) player.on(event, onDashFragment);
+    dashTelemetryCleanup = () => {
+      for (const event of fragmentEvents) player.off(event, onDashFragment);
+    };
     player.initialize(video, source, autoplay);
     dashPlayer = player;
   }
@@ -451,6 +549,8 @@
     subtitleCleanup = null;
     dashErrorCleanup?.();
     dashErrorCleanup = null;
+    dashTelemetryCleanup?.();
+    dashTelemetryCleanup = null;
     dashPlayer?.destroy();
     dashPlayer = null;
     remoteVideo?.pause();
@@ -477,7 +577,8 @@
     const onTime = () => {
       // Deliberately non-reactive: timeupdate writes only to this local output node.
       if (timeOutput) timeOutput.value = formatTime(video.currentTime);
-      if (seekInput) seekInput.value = String(video.currentTime);
+      if (seekInput && !timelineSeek.isPreviewing())
+        seekInput.value = String(video.currentTime);
     };
     const onDuration = () => {
       if (durationOutput) durationOutput.value = formatTime(video.duration);
@@ -493,6 +594,11 @@
       showControls();
       reportPlayerEvent('pause');
     };
+    const onPlaying = () => {
+      reportPlayerEvent('playing');
+      initialPlaybackComplete = true;
+      activeSeek = null;
+    };
     const diagnosticEvents = [
       'abort',
       'canplay',
@@ -507,12 +613,23 @@
       'suspend',
       'waiting'
     ] as const;
-    const onDiagnosticEvent = (event: Event) =>
+    const onDiagnosticEvent = (event: Event) => {
+      if (event.type === 'seeking' && !activeSeek) {
+        activeSeek = {
+          id: `${ownership.instanceId}:${++seekSequence}`,
+          reason: 'media-element-or-dash',
+          from: video.currentTime,
+          target: video.currentTime,
+          startedAt: performance.now()
+        };
+      }
       reportPlayerEvent(event.type);
+    };
     video.addEventListener('timeupdate', onTime);
     video.addEventListener('durationchange', onDuration);
     video.addEventListener('play', onPlay);
     video.addEventListener('pause', onPause);
+    video.addEventListener('playing', onPlaying);
     for (const event of diagnosticEvents)
       video.addEventListener(event, onDiagnosticEvent);
     // Begin the idle countdown on entry; pointer movement is not required to arm it.
@@ -574,6 +691,7 @@
       video.removeEventListener('durationchange', onDuration);
       video.removeEventListener('play', onPlay);
       video.removeEventListener('pause', onPause);
+      video.removeEventListener('playing', onPlaying);
       for (const event of diagnosticEvents)
         video.removeEventListener(event, onDiagnosticEvent);
       if (controlsTimer !== null) window.clearTimeout(controlsTimer);
@@ -637,7 +755,9 @@
           step="0.1"
           value="0"
           oninput={(event) =>
-            (video.currentTime = Number(event.currentTarget.value))}
+            timelineSeek.preview(Number(event.currentTarget.value))}
+          onchange={(event) =>
+            timelineSeek.commit(Number(event.currentTarget.value))}
         />
         <span class="time">
           <output bind:this={timeOutput} aria-label="Current time">0:00</output>

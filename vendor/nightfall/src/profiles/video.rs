@@ -218,6 +218,15 @@ impl TranscodingProfile for H264TranscodeProfile {
                 args.push(bitrate.to_string());
                 args.push("-bufsize".into());
                 args.push(bitrate.div_ceil(2).to_string());
+            } else {
+                // libx264's average-bitrate mode can spend tens of megabytes on its
+                // first GOP before rate control converges. That delays both transfer
+                // and MSE append even though later segments meet the requested rate.
+                // Keep the same average/quality target while bounding startup bursts.
+                args.push("-maxrate".into());
+                args.push(bitrate.saturating_mul(3).div_ceil(2).to_string());
+                args.push("-bufsize".into());
+                args.push(bitrate.saturating_mul(2).to_string());
             }
         }
 
@@ -635,6 +644,9 @@ mod tests {
         assert_eq!(value_after(&args, "-color_trc"), Some("bt709"));
         assert_eq!(value_after(&args, "-color_primaries"), Some("bt709"));
         assert_eq!(value_after(&args, "-color_range"), Some("tv"));
+        assert_eq!(value_after(&args, "-b:v"), Some("10000000"));
+        assert_eq!(value_after(&args, "-maxrate"), Some("15000000"));
+        assert_eq!(value_after(&args, "-bufsize"), Some("20000000"));
     }
 
     #[test]
