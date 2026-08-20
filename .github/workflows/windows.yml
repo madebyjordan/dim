@@ -61,6 +61,13 @@ jobs:
       - name: Install Windows media and SQLite tools
         shell: pwsh
         run: choco install ffmpeg sqlite -y --no-progress
+      - name: Require FFmpeg 9 toolchain
+        shell: pwsh
+        run: |
+          $ffmpeg = & ffmpeg -version | Select-Object -First 1
+          if ($ffmpeg -notmatch '^ffmpeg version n?(?<major>\d+)' -or [int]$Matches.major -lt 9) { throw "Unsupported FFmpeg: $ffmpeg" }
+          $ffprobe = & ffprobe -version | Select-Object -First 1
+          if ($ffprobe -notmatch '^ffprobe version n?(?<major>\d+)' -or [int]$Matches.major -lt 9) { throw "Unsupported FFprobe: $ffprobe" }
       - name: Mask any globally installed pnpm command
         shell: pwsh
         run: |

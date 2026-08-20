@@ -50,13 +50,12 @@ impl TranscodingProfile for AmfTranscodeProfile {
 
         args.append(&mut vec![
             "-start_at_zero".into(),
-            "-vsync".into(),
-            "passthrough".into(),
             "-avoid_negative_ts".into(),
             "disabled".into(),
             "-max_muxing_queue_size".into(),
             "2048".into(),
         ]);
+        super::video::append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
 
         args.append(&mut vec![
             "-f".into(),
@@ -90,7 +89,7 @@ impl TranscodingProfile for AmfTranscodeProfile {
             format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
         ]);
 
-        args.append(&mut vec!["-hls_segment_type".into(), 1.to_string()]);
+        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
         args.append(&mut vec![
             "-loglevel".into(),
             "info".into(),

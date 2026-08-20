@@ -112,11 +112,11 @@ done
   );
   executable(
     resolve(bin, "ffmpeg"),
-    '#!/usr/bin/env bash\necho "ffmpeg version 8.0 fixture"\n',
+    '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n',
   );
   executable(
     resolve(bin, "ffprobe"),
-    '#!/usr/bin/env bash\necho "ffprobe version 8.0 fixture"\n',
+    '#!/usr/bin/env bash\necho "ffprobe version 9.0 fixture"\n',
   );
   executable(resolve(bin, "sqlite3"));
   executable(resolve(bin, "pkg-config"));
@@ -403,7 +403,7 @@ test("Windows recovers supported requirements through exact WinGet packages", ()
 printf '%s\n' "$*" >> "$INSTALL_FIXTURE/winget.args"
 case " $* " in
   *" Gyan.FFmpeg "*)
-    printf '#!/usr/bin/env bash\necho "ffmpeg version 8.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
+    printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
     cp "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
     chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
     ;;
@@ -580,7 +580,7 @@ test("Linux recovers documented native packages with apt-get", () => {
       `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$INSTALL_FIXTURE/apt.args"
 if [[ " $* " == *" install "* ]]; then
-  printf '#!/usr/bin/env bash\necho "ffmpeg version 8.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
+  printf '#!/usr/bin/env bash\necho "ffmpeg version 9.0 fixture"\n' > "$INSTALL_FIXTURE_BIN/ffmpeg"
   cp "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$INSTALL_FIXTURE_BIN/pkg-config"
   chmod +x "$INSTALL_FIXTURE_BIN/ffmpeg" "$INSTALL_FIXTURE_BIN/ffprobe" "$INSTALL_FIXTURE_BIN/pkg-config"

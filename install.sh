@@ -1035,7 +1035,7 @@ node_is_supported() {
 media_tool_is_supported() {
     local tool=$1
     command_available "$tool" && "$tool" -version 2>/dev/null | head -n 1 | awk '
-        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) { found = 1; split($i, version, "."); exit(version[1] >= 6 ? 0 : 1) } }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) { found = 1; split($i, version, "."); exit(version[1] >= 9 ? 0 : 1) } }
         END { if (!found) exit 1 }
     '
 }
@@ -1064,7 +1064,7 @@ print_requirement_failure() {
         node) printf '  • Node.js 24.19.0 or newer in the 24.x line — Homebrew package: node@24\n' ;;
         corepack) printf '  • Corepack — included with supported Node.js; then run: corepack enable pnpm\n' ;;
         rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — https://rustup.rs\n' ;;
-        ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — Homebrew package: ffmpeg\n' ;;
+        ffmpeg) printf '  • FFmpeg and FFprobe 9.0 or newer — Homebrew package: ffmpeg (ffmpeg@9)\n' ;;
         sqlite) printf '  • SQLite tools — Homebrew package: sqlite\n' ;;
         pkgconfig) printf '  • pkg-config — Homebrew package: pkg-config\n' ;;
         curl) printf '  • curl — supplied by macOS and needed to install Rustup\n' ;;
@@ -1084,7 +1084,7 @@ print_linux_requirement_failure() {
             ;;
         corepack) printf '  • Corepack — install it with supported Node.js, then run: corepack enable pnpm\n' ;;
         rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — https://rustup.rs\n' ;;
-        ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — Debian/Ubuntu package: ffmpeg\n' ;;
+        ffmpeg) printf '  • FFmpeg and FFprobe 9.0 or newer — Debian/Ubuntu package: ffmpeg (the configured repository must provide major version 9+)\n' ;;
         sqlite) printf '  • SQLite tools — Debian/Ubuntu package: sqlite3\n' ;;
         pkgconfig) printf '  • pkg-config — Debian/Ubuntu package: pkg-config\n' ;;
         buildtools) printf '  • C/C++ build toolchain — Debian/Ubuntu package: build-essential\n' ;;
@@ -1431,7 +1431,7 @@ print_windows_requirement_failure() {
             ;;
         corepack) printf '  • Corepack — reinstall supported Node.js; the installer prepares the pnpm command once Corepack is available\n' ;;
         rustup) printf '  • Rustup and the repository-pinned Rust 1.93.1 toolchain — WinGet package: Rustlang.Rustup\n' ;;
-        ffmpeg) printf '  • FFmpeg and FFprobe 6.0 or newer — WinGet package: Gyan.FFmpeg\n' ;;
+        ffmpeg) printf '  • FFmpeg and FFprobe 9.0 or newer — WinGet package: Gyan.FFmpeg\n' ;;
         sqlite) printf '  • SQLite tools — WinGet package: SQLite.SQLite\n' ;;
         buildtools) printf '  • Visual Studio 2022 C++ Build Tools, MSVC and Windows SDK were not found — WinGet package: Microsoft.VisualStudio.2022.BuildTools\n' ;;
         vctools) printf '  • Visual Studio is installed, but the MSVC x64 compiler/VCTools component is missing. In Visual Studio Installer, choose Modify and add Desktop development with C++.\n' ;;

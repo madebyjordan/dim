@@ -133,8 +133,8 @@ async fn run(
                 tracing::info!("{}", stdout);
                 failed
             }
-            Err(program) => {
-                tracing::error!("Could not find: {}", program);
+            Err(diagnostic) => {
+                tracing::error!("FFmpeg tool validation failed: {}", diagnostic);
                 true
             }
         });

@@ -175,13 +175,23 @@ export function validateMediaTool(
     command ?? basename(executable).replace(/\..*$/, "")
   ).toLowerCase();
   const output = `${result.stdout}\n${result.stderr}`.toLowerCase();
-  if (!output.includes(`${expected} version`)) {
+  const identity = output.match(
+    new RegExp(`(?:^|\\n)${expected} version (?:n)?(\\d+)(?:\\.|\\s|$)`),
+  );
+  if (!identity) {
     return {
       ok: false,
-      detail: `version check did not identify itself as ${expected}`,
+      detail: `version check did not identify itself as ${expected} with a numeric major version`,
     };
   }
-  return { ok: true, detail: "" };
+  const major = Number.parseInt(identity[1], 10);
+  if (major < 9) {
+    return {
+      ok: false,
+      detail: `${expected} major version ${major} is unsupported; Eclipse requires FFmpeg 9 or newer`,
+    };
+  }
+  return { ok: true, detail: "", major };
 }
 
 function windowsMediaToolCandidates(source) {
@@ -284,37 +294,32 @@ function ensureMediaTool(
     return provisionWindowsMediaTool(source, destination, { command, env });
   }
 
-  let destinationExists = false;
-  try {
-    lstatSync(destination);
-    destinationExists = true;
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-
-  if (destinationExists) {
-    try {
-      accessSync(
-        destination,
-        platform === "win32" ? constants.F_OK : constants.X_OK,
-      );
-    } catch {
-      throw new Error(
-        `${destination} exists but is not executable; leaving it unchanged.`,
-      );
-    }
+  const existing = validateMediaTool(destination, { command, env });
+  if (existing.ok) {
     console.log(`Using existing ${destination}`);
-    return source;
+    return destination;
   }
 
-  mkdirSync(dirname(destination), { recursive: true });
-  if (platform === "win32") {
-    copyFileSync(source, destination);
-    chmodSync(destination, 0o755);
-  } else {
-    symlinkSync(source, destination);
+  const discovered = source ?? findExecutable(command, { env, platform });
+  const candidate = validateMediaTool(discovered, { command, env });
+  if (!candidate.ok) {
+    throw new Error(
+      `${discovered} is not a supported ${command}: ${candidate.detail}`,
+    );
   }
-  return source;
+  if (exists(destination)) {
+    console.warn(`Repairing invalid ${destination}: ${existing.detail}`);
+    rmSync(destination, { force: true });
+  }
+  mkdirSync(dirname(destination), { recursive: true });
+  symlinkSync(discovered, destination);
+  const installed = validateMediaTool(destination, { command, env });
+  if (!installed.ok) {
+    throw new Error(
+      `Provisioned ${command} failed its installed version check: ${installed.detail}`,
+    );
+  }
+  return destination;
 }
 
 export async function build({
@@ -360,17 +365,13 @@ export async function build({
 
   mkdirSync(resolve(root, "utils"), { recursive: true });
   const ffmpeg = ensureMediaTool(
-    platform === "win32"
-      ? undefined
-      : findExecutable("ffmpeg", { env, platform }),
+    undefined,
     resolve(root, `utils/ffmpeg${mediaSuffix}`),
     platform,
     { command: "ffmpeg", env },
   );
   const ffprobe = ensureMediaTool(
-    platform === "win32"
-      ? undefined
-      : findExecutable("ffprobe", { env, platform }),
+    undefined,
     resolve(root, `utils/ffprobe${mediaSuffix}`),
     platform,
     { command: "ffprobe", env },

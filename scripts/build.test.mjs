@@ -31,7 +31,7 @@ function windowsFixture() {
   const mediaTool = resolve(directory, "media-tool.exe");
   writeFileSync(
     mediaToolSource,
-    'fn main() { if std::env::args().nth(1).as_deref() != Some("-version") { std::process::exit(2); } let executable = std::env::current_exe().unwrap(); let name = executable.file_name().unwrap().to_string_lossy().to_ascii_lowercase(); let command = if name.starts_with("ffprobe") { "ffprobe" } else { "ffmpeg" }; println!("{command} version fixture 1"); }\n',
+    'fn main() { if std::env::args().nth(1).as_deref() != Some("-version") { std::process::exit(2); } let executable = std::env::current_exe().unwrap(); let name = executable.file_name().unwrap().to_string_lossy().to_ascii_lowercase(); let command = if name.starts_with("ffprobe") { "ffprobe" } else { "ffmpeg" }; println!("{command} version 9.0 fixture"); }\n',
   );
   const compiled = spawnSync("rustc.exe", [mediaToolSource, "-o", mediaTool], {
     encoding: "utf8",
@@ -136,6 +136,28 @@ test(
 );
 
 test(
+  "media tool validation rejects an executable with a legacy major version",
+  { skip: process.platform !== "win32" },
+  () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "eclipse-ffmpeg8-test-"));
+    try {
+      const source = resolve(directory, "legacy.rs");
+      const executable = resolve(directory, "ffmpeg.exe");
+      writeFileSync(source, 'fn main() { println!("ffmpeg version 8.1"); }\n');
+      const compiled = spawnSync("rustc.exe", [source, "-o", executable], {
+        encoding: "utf8",
+      });
+      assert.equal(compiled.status, 0, compiled.stderr);
+      const validation = validateMediaTool(executable, { command: "ffmpeg" });
+      assert.equal(validation.ok, false);
+      assert.match(validation.detail, /major version 8 is unsupported/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "Windows provisioning follows Scoop shim metadata and copies the real executable",
   { skip: process.platform !== "win32" },
   async () => {
@@ -184,8 +206,14 @@ test(
     const bin = resolve(directory, "bin");
     mkdirSync(bin, { recursive: true });
     mkdirSync(repository);
+    writeFileSync(resolve(bin, "git"), "#!/bin/sh\nexit 0\n");
+    for (const command of ["ffmpeg", "ffprobe"]) {
+      writeFileSync(
+        resolve(bin, command),
+        `#!/bin/sh\necho '${command} version 9.0 fixture'\n`,
+      );
+    }
     for (const command of ["git", "ffmpeg", "ffprobe"]) {
-      writeFileSync(resolve(bin, command), "fixture\n");
       chmodSync(resolve(bin, command), 0o755);
     }
     try {

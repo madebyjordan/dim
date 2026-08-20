@@ -215,8 +215,6 @@ impl TranscodingProfile for VaapiTranscodeProfile {
         super::video::append_h264_output_signalling(&mut args, &ctx);
 
         args.append(&mut vec![
-            "-vsync".into(),
-            "passthrough".into(),
             "-avoid_negative_ts".into(),
             "disabled".into(),
             "-max_muxing_queue_size".into(),
@@ -228,6 +226,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             "-frag_duration".into(),
             "5000000".into(),
         ]);
+        super::video::append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
 
         args.append(&mut super::video::get_discont_flags(&ctx));
 
@@ -269,7 +268,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             "0".into(),
         ]);
 
-        args.append(&mut vec!["-hls_segment_type".into(), 1.to_string()]);
+        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
         args.append(&mut vec![
             "-loglevel".into(),
             "info".into(),

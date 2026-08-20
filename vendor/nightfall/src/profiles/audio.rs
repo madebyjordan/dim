@@ -62,7 +62,7 @@ impl TranscodingProfile for AudioTransmuxProfile {
             "-hls_time".into(),
             ctx.output_ctx.target_gop.to_string(),
             "-hls_segment_type".into(),
-            "1".into(),
+            "fmp4".into(),
             "-loglevel".into(),
             "info".into(),
             "-progress".into(),
@@ -146,18 +146,16 @@ impl TranscodingProfile for AacTranscodeProfile {
             args.push(sample_rate.to_string());
         }
         if let Some(layout) = ctx.output_ctx.audio_channel_layout.as_ref() {
-            args.push("-channel_layout".into());
+            args.push("-ch_layout:a:0".into());
             args.push(layout.clone());
         }
 
         let ab = ctx.output_ctx.bitrate.unwrap_or(120_000).to_string();
-        args.push("-ab".into());
+        args.push("-b:a:0".into());
         args.push(ab);
 
         args.append(&mut vec![
             "-start_at_zero".into(),
-            "-vsync".into(),
-            "-1".into(),
             "-avoid_negative_ts".into(),
             "make_non_negative".into(),
         ]);
@@ -203,14 +201,9 @@ impl TranscodingProfile for AacTranscodeProfile {
         args.append(&mut vec![
             "-hls_time".into(),
             format!("{:.9}", ctx.output_ctx.segment_duration()),
-            "-force_key_frames".into(),
-            format!(
-                "expr:gte(t,n_forced*{:.9})",
-                ctx.output_ctx.segment_duration()
-            ),
         ]);
 
-        args.append(&mut vec!["-hls_segment_type".into(), "1".into()]);
+        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
         args.append(&mut vec![
             "-loglevel".into(),
             "info".into(),
@@ -255,7 +248,7 @@ mod tests {
         ctx.output_ctx.codec = "eac3".into();
         let args = AudioTransmuxProfile.build(ctx).unwrap();
         assert_eq!(value_after(&args, "-c:0"), Some("copy"));
-        assert_eq!(value_after(&args, "-hls_segment_type"), Some("1"));
+        assert_eq!(value_after(&args, "-hls_segment_type"), Some("fmp4"));
     }
 
     #[test]
@@ -270,8 +263,8 @@ mod tests {
 
         let args = AacTranscodeProfile.build(ctx).unwrap();
         assert_eq!(value_after(&args, "-ac"), Some("6"));
-        assert_eq!(value_after(&args, "-channel_layout"), Some("5.1"));
-        assert_eq!(value_after(&args, "-ab"), Some("576000"));
+        assert_eq!(value_after(&args, "-ch_layout:a:0"), Some("5.1"));
+        assert_eq!(value_after(&args, "-b:a:0"), Some("576000"));
         assert_eq!(
             value_after(&args, "-af"),
             Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR")
@@ -288,8 +281,8 @@ mod tests {
 
         let args = AacTranscodeProfile.build(ctx).unwrap();
         assert_eq!(value_after(&args, "-ac"), Some("8"));
-        assert_eq!(value_after(&args, "-channel_layout"), Some("7.1"));
-        assert_eq!(value_after(&args, "-ab"), Some("512000"));
+        assert_eq!(value_after(&args, "-ch_layout:a:0"), Some("7.1"));
+        assert_eq!(value_after(&args, "-b:a:0"), Some("512000"));
         assert_eq!(value_after(&args, "-af"), None);
     }
 }

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo apt-get update
-      - run: sudo apt-get install -y libva-dev libva-drm2 libva2 sqlite3 ffmpeg
+      - run: sudo apt-get install -y libva-dev libva-drm2 libva2 sqlite3 curl xz-utils
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -33,30 +33,19 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
+      - name: Provision verified FFmpeg 9 tools
+        run: |
+          bash scripts/install-ffmpeg9-linux.sh utils amd64
+          echo "$GITHUB_WORKSPACE/utils" >> "$GITHUB_PATH"
+
       - name: Verify source installation
         run: ./scripts/bootstrap.sh --release
-
-      - name: Download ffmpeg artifact
-        uses: dsaltares/fetch-gh-release-asset@master
-        with:
-          repo: "Dusk-Labs/ffmpeg-static"
-          version: "tags/ffmpeg-all-0.0.1"
-          file: "ffmpeg"
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download ffprobe artifact
-        uses: dsaltares/fetch-gh-release-asset@master
-        with:
-          repo: "Dusk-Labs/ffmpeg-static"
-          version: "tags/ffmpeg-all-0.0.1"
-          file: "ffprobe"
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create release dir
         run: |
           mkdir -p release/utils
-          cp ffmpeg release/utils/ffmpeg
-          cp ffprobe release/utils/ffprobe
+          cp utils/ffmpeg release/utils/ffmpeg
+          cp utils/ffprobe release/utils/ffprobe
           chmod +x release/utils/ffmpeg
           chmod +x release/utils/ffprobe
 

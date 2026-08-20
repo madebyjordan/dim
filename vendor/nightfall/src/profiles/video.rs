@@ -43,13 +43,12 @@ impl TranscodingProfile for H264TransmuxProfile {
 
         args.append(&mut vec![
             "-start_at_zero".into(),
-            "-vsync".into(),
-            "passthrough".into(),
             "-avoid_negative_ts".into(),
             "disabled".into(),
             "-max_muxing_queue_size".into(),
             "2048".into(),
         ]);
+        append_video_fps_mode(&mut args, false);
 
         args.append(&mut vec![
             "-f".into(),
@@ -89,7 +88,7 @@ impl TranscodingProfile for H264TransmuxProfile {
             ),
         ]);
 
-        args.append(&mut vec!["-hls_segment_type".into(), 1.to_string()]);
+        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
         args.append(&mut vec![
             "-loglevel".into(),
             "info".into(),
@@ -174,8 +173,6 @@ impl TranscodingProfile for H264TranscodeProfile {
         }
         if ctx.output_ctx.force_cfr {
             args.extend([
-                "-fps_mode".into(),
-                "cfr".into(),
                 "-r".into(),
                 format!("{:.12}", ctx.input_ctx.fps),
             ]);
@@ -225,17 +222,12 @@ impl TranscodingProfile for H264TranscodeProfile {
         }
 
         args.append(&mut vec![
-            "-vsync".into(),
-            if ctx.output_ctx.force_cfr {
-                "cfr".into()
-            } else {
-                "passthrough".into()
-            },
             "-avoid_negative_ts".into(),
             "make_non_negative".into(),
             "-max_muxing_queue_size".into(),
             "2048".into(),
         ]);
+        append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
 
         args.append(&mut vec![
             "-f".into(),
@@ -273,7 +265,7 @@ impl TranscodingProfile for H264TranscodeProfile {
             ),
         ]);
 
-        args.append(&mut vec!["-hls_segment_type".into(), 1.to_string()]);
+        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
         args.append(&mut vec![
             "-loglevel".into(),
             "info".into(),
@@ -334,8 +326,8 @@ fn hdr_to_sdr_filter(
     if !matches!(transfer, "smpte2084" | "arib-std-b67") {
         return None;
     }
-    let eotf_lut = format!("{outdir}/hdr_eotf.cube");
-    let oetf_lut = format!("{outdir}/bt709_oetf.cube");
+    let eotf_lut = ffmpeg_filter_path(&format!("{outdir}/hdr_eotf.cube"));
+    let oetf_lut = ffmpeg_filter_path(&format!("{outdir}/bt709_oetf.cube"));
     let peak = peak_nits.unwrap_or(1_000.0).clamp(100.0, 10_000.0) / 100.0;
     let mut filters = Vec::new();
     if let Some(scale) = scale {
@@ -360,6 +352,14 @@ fn hdr_to_sdr_filter(
         "sidedata=mode=delete:type=AMBIENT_VIEWING_ENVIRONMENT".into(),
     ]);
     Some(filters.join(","))
+}
+
+fn ffmpeg_filter_path(path: &str) -> String {
+    // Escape only for FFmpeg's filter expression grammar. Eclipse continues
+    // to keep and pass native filesystem paths everywhere else.
+    path.replace('\\', "/")
+        .replace(':', "\\:")
+        .replace('\'', "\\'")
 }
 
 const TRANSFER_LUT_SIZE: usize = 4096;
@@ -476,6 +476,16 @@ pub(crate) fn append_h264_output_signalling(
     }
 }
 
+/// FFmpeg 9 removed the legacy global `-vsync` switch. Frame-rate policy is an
+/// output, per-video-stream option now, and every Nightfall video profile maps
+/// exactly one output video stream.
+pub(crate) fn append_video_fps_mode(args: &mut Vec<String>, force_cfr: bool) {
+    args.extend([
+        "-fps_mode:v:0".into(),
+        if force_cfr { "cfr" } else { "passthrough" }.into(),
+    ]);
+}
+
 #[derive(Debug)]
 pub struct RawVideoTranscodeProfile;
 
@@ -506,6 +516,8 @@ impl TranscodingProfile for RawVideoTranscodeProfile {
             args.push(seek.to_string());
         }
 
+        args.extend(["-i".into(), ctx.file.clone()]);
+
         if let Some(max_to_transcode) = ctx.output_ctx.max_to_transcode {
             args.push("-t".into());
             args.push(max_to_transcode.to_string());
@@ -516,11 +528,7 @@ impl TranscodingProfile for RawVideoTranscodeProfile {
             format!("0:{}", ctx.input_ctx.stream),
         ]);
         args.append(&mut vec!["-c:v".into(), "rawvideo".into()]);
-        args.append(&mut vec![
-            "-flags2".into(),
-            "-pix_fmt".into(),
-            "rgb24".into(),
-        ]);
+        args.append(&mut vec!["-pix_fmt".into(), "rgb24".into()]);
         args.append(&mut vec!["-preset".into(), "ultrafast".into()]);
 
         if let Some(height) = ctx.output_ctx.height {
@@ -630,14 +638,22 @@ mod tests {
     }
 
     #[test]
+    fn windows_drive_paths_are_escaped_for_ffmpeg_filter_expressions() {
+        assert_eq!(
+            ffmpeg_filter_path(r"C:\cache\hdr_eotf.cube"),
+            r"C\:/cache/hdr_eotf.cube"
+        );
+    }
+
+    #[test]
     fn remote_hls_transcode_uses_one_clock_aligned_cfr_contract() {
         let mut context = browser_h264_context(false);
         context.input_ctx.fps = 24_000.0 / 1_001.0;
         context.output_ctx.force_cfr = true;
         context.output_ctx.hls_segment_duration = Some(5.005);
         let args = H264TranscodeProfile.build(context).unwrap();
-        assert_eq!(value_after(&args, "-fps_mode"), Some("cfr"));
-        assert_eq!(value_after(&args, "-vsync"), Some("cfr"));
+        assert_eq!(value_after(&args, "-fps_mode:v:0"), Some("cfr"));
+        assert!(!args.iter().any(|arg| arg == "-vsync"));
         assert_eq!(value_after(&args, "-hls_time"), Some("5.005000000"));
         assert_eq!(value_after(&args, "-maxrate"), Some("10000000"));
         assert_eq!(value_after(&args, "-bufsize"), Some("5000000"));

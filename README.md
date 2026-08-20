@@ -43,7 +43,7 @@ The repository pins its primary development tools:
 - Rust 1.93.1 through `rust-toolchain.toml`
 - Node.js 24.19.0 through `.nvmrc`
 - pnpm 11.9.0 through `package.json`
-- FFmpeg and FFprobe 6.0 or newer
+- FFmpeg and FFprobe 9.0 or newer (both executables are checked at build and runtime)
 - SQLite development tools
 - A C/C++ build toolchain and `pkg-config`
 - OpenSSL development headers on Linux
@@ -66,6 +66,12 @@ brew install ffmpeg sqlite pkg-config
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libssl-dev sqlite3 ffmpeg
 ```
+
+Eclipse requires the installed `ffmpeg` and `ffprobe` commands to report major version 9 or
+newer. Homebrew's current `ffmpeg`/`ffmpeg@9` formula satisfies that baseline. On Linux, use a
+distribution repository that provides FFmpeg 9; the installer fails with a version diagnostic
+instead of accepting an older distro package. Release and container builds use a pinned,
+checksum-verified FFmpeg 9.0.1 static toolchain for x86_64 and arm64.
 
 On Windows, the installer uses WinGet where appropriate and configures a user-level pnpm shim for
 new PowerShell, CMD, and Git Bash sessions. **Visual Studio Build Tools must include the MSVC x64 compiler and a Windows SDK**.
