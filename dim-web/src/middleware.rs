@@ -215,9 +215,9 @@ pub async fn request_id<B>(
                     ("conflict", "The request conflicts with the current state.")
                 }
                 axum::http::StatusCode::SERVICE_UNAVAILABLE => {
-                    ("server_unavailable", "Dim is temporarily unavailable.")
+                    ("server_unavailable", "Eclipse is temporarily unavailable.")
                 }
-                _ => ("internal_error", "Dim could not complete the request."),
+                _ => ("internal_error", "Eclipse could not complete the request."),
             };
             if status.is_server_error() {
                 tracing::error!(%status, "Legacy API error was mapped to the safe envelope");

@@ -7,9 +7,10 @@ video/audio IDs; subtitle extraction starts only when that subtitle is fetched.
 
 The default policy is 8 active FFmpeg jobs globally, 4 per authenticated user, and 3 per playback
 session. Sessions expire after 30 minutes without manifest, segment, subtitle, or control activity.
-Deployments can make narrow operational overrides with `DIM_TRANSCODE_GLOBAL_LIMIT`,
-`DIM_TRANSCODE_USER_LIMIT`, `DIM_TRANSCODE_SESSION_LIMIT`, and
-`DIM_STREAM_SESSION_TTL_SECS`. These are intentionally not part of the broader runtime settings
+Deployments can make narrow operational overrides with `ECLIPSE_TRANSCODE_GLOBAL_LIMIT`,
+`ECLIPSE_TRANSCODE_USER_LIMIT`, `ECLIPSE_TRANSCODE_SESSION_LIMIT`, and
+`ECLIPSE_STREAM_SESSION_TTL_SECS`. The former `DIM_*` names remain fallback aliases for existing
+deployments. These are intentionally not part of the broader runtime settings
 redesign planned for Milestone 4.
 
 Capability negotiation is source-specific and conservative. The server derives RFC 6381 codec
@@ -60,6 +61,6 @@ introduced. Selecting a wireless route transfers play, pause, seek, progress, te
 error ownership to the AirPlay media element, and disconnecting restores the position to local
 DASH playback.
 
-Nightfall remains vendored only as a narrow FFmpeg/fMP4 compatibility adapter. Dim owns planning,
+Nightfall remains vendored only as a narrow FFmpeg/fMP4 compatibility adapter. Eclipse owns planning,
 admission, ownership, TTL, and cleanup. Remaining replacement work is documented in
 `vendor/nightfall/DIM_PATCHES.md`.

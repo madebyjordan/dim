@@ -295,20 +295,35 @@ pub struct TranscodePolicy {
 
 impl Default for TranscodePolicy {
     fn default() -> Self {
-        fn env_usize(name: &str, default: usize) -> usize {
+        fn env_usize(name: &str, legacy_name: &str, default: usize) -> usize {
             std::env::var(name)
+                .or_else(|_| std::env::var(legacy_name))
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|v| *v > 0)
                 .unwrap_or(default)
         }
         Self {
-            global_limit: env_usize("DIM_TRANSCODE_GLOBAL_LIMIT", 8),
-            per_user_limit: env_usize("DIM_TRANSCODE_USER_LIMIT", 4),
-            per_session_limit: env_usize("DIM_TRANSCODE_SESSION_LIMIT", 3),
-            session_ttl: Duration::from_secs(
-                env_usize("DIM_STREAM_SESSION_TTL_SECS", 30 * 60) as u64
+            global_limit: env_usize(
+                "ECLIPSE_TRANSCODE_GLOBAL_LIMIT",
+                "DIM_TRANSCODE_GLOBAL_LIMIT",
+                8,
             ),
+            per_user_limit: env_usize(
+                "ECLIPSE_TRANSCODE_USER_LIMIT",
+                "DIM_TRANSCODE_USER_LIMIT",
+                4,
+            ),
+            per_session_limit: env_usize(
+                "ECLIPSE_TRANSCODE_SESSION_LIMIT",
+                "DIM_TRANSCODE_SESSION_LIMIT",
+                3,
+            ),
+            session_ttl: Duration::from_secs(env_usize(
+                "ECLIPSE_STREAM_SESSION_TTL_SECS",
+                "DIM_STREAM_SESSION_TTL_SECS",
+                30 * 60,
+            ) as u64),
         }
     }
 }

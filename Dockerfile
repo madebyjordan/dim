@@ -1,12 +1,12 @@
 FROM node:24.19.0-bookworm AS web
-WORKDIR /dim
+WORKDIR /eclipse
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY eclipse/package.json eclipse/package.json
-RUN corepack enable && pnpm --dir eclipse install --frozen-lockfile
+RUN corepack pnpm --dir eclipse install --frozen-lockfile
 COPY api-contract api-contract
 COPY scripts/generate-api-contract.mjs scripts/generate-api-contract.mjs
 COPY eclipse eclipse
-RUN pnpm --dir eclipse build
+RUN corepack pnpm --dir eclipse build
 
 FROM debian:bookworm-slim AS ffmpeg
 ARG DEBIAN_FRONTEND=noninteractive
@@ -39,28 +39,28 @@ RUN if [ "${TARGETPLATFORM}" = "linux/arm/v7" ]; then \
 RUN chmod +x /static/ffmpeg && chmod +x /static/ffprobe
 
 
-FROM rust:bullseye AS dim
+FROM rust:bullseye AS eclipse
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     libva-dev \
     libva-drm2 \
     libva2 \
     sqlite3
-WORKDIR /dim
+WORKDIR /eclipse
 COPY . ./
-COPY --from=web /dim/eclipse/build eclipse/build
+COPY --from=web /eclipse/eclipse/build eclipse/build
 ARG DATABASE_URL="sqlite://dim_dev.db"
 
 # Sometimes we may need to quickly build a test image
 ARG RUST_BUILD=release
 RUN if [ "$RUST_BUILD" = "debug" ]; then \
-        cargo build --features vaapi && \
-        mv ./target/debug/dim ./target/dim \
+        cargo build --features vaapi --locked && \
+        mv ./target/debug/eclipse ./target/eclipse \
     ; fi
 
 RUN if [ "$RUST_BUILD" = "release" ]; then \
-        cargo build --features vaapi --release && \
-        mv ./target/release/dim ./target/dim \
+        cargo build --features vaapi --release --locked && \
+        mv ./target/release/eclipse ./target/eclipse \
     ; fi
 
 FROM debian:bullseye
@@ -77,21 +77,24 @@ RUN apt-get update && apt-get install -y \
     libvorbis0a \
     libvorbisenc2 curl tini \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ffmpeg /static/ffmpeg /opt/dim/utils/ffmpeg
-COPY --from=ffmpeg /static/ffprobe /opt/dim/utils/ffprobe
-COPY --from=dim /dim/target/dim /opt/dim/dim
+COPY --from=ffmpeg /static/ffmpeg /opt/eclipse/utils/ffmpeg
+COPY --from=ffmpeg /static/ffprobe /opt/eclipse/utils/ffprobe
+COPY --from=eclipse /eclipse/target/eclipse /opt/eclipse/eclipse
+COPY scripts/docker-entrypoint.sh /usr/local/bin/eclipse-entrypoint
 
-RUN useradd --system --uid 10001 --home-dir /opt/dim --shell /usr/sbin/nologin dim && \
-    mkdir -p /opt/dim/config /opt/dim/metadata /opt/dim/streaming_cache /opt/dim/logs && \
-    chown -R dim:dim /opt/dim
+RUN useradd --system --uid 10001 --home-dir /opt/eclipse --shell /usr/sbin/nologin eclipse && \
+    mkdir -p /opt/eclipse/config /opt/eclipse/metadata /opt/eclipse/streaming_cache /opt/eclipse/logs \
+             /opt/dim/config /opt/dim/metadata /opt/dim/streaming_cache /opt/dim/logs && \
+    ln -s /opt/eclipse/utils /opt/dim/utils && \
+    chmod +x /usr/local/bin/eclipse-entrypoint && \
+    chown -R eclipse:eclipse /opt/eclipse /opt/dim
 
 EXPOSE 8000
-VOLUME ["/opt/dim/config", "/opt/dim/metadata", "/opt/dim/streaming_cache", "/opt/dim/logs"]
+VOLUME ["/opt/eclipse/config", "/opt/eclipse/metadata", "/opt/eclipse/streaming_cache", "/opt/eclipse/logs"]
 
 ENV RUST_LOG=info
-WORKDIR /opt/dim
-USER dim
+WORKDIR /opt/eclipse
+USER eclipse
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
     CMD curl --fail --silent http://127.0.0.1:8000/health/ready >/dev/null || exit 1
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["./dim"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/eclipse-entrypoint"]

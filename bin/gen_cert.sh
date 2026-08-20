@@ -6,8 +6,8 @@
 # with a DNS name, or if it simply hasn't been implemented yet. See
 # https://bugzilla.mozilla.org/show_bug.cgi?id=552346 for a bit more info.
 
-CA_SUBJECT="/C=UK/O=Dim CA/CN=Dim Labs CA"
-SUBJECT="/C=UK/O=Dim/CN=localhost"
+CA_SUBJECT="/C=UK/O=Eclipse CA/CN=Eclipse Local CA"
+SUBJECT="/C=UK/O=Eclipse/CN=localhost"
 ALT="DNS:localhost"
 
 openssl genrsa -out ca_key.pem 4096

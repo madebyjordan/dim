@@ -3,11 +3,11 @@
 ![Dashboard](docs/design/eclipse-design-home.png)
 [![Discord](https://img.shields.io/discord/834495310332035123)](https://discord.gg/gBPyQ7NVah)
 
-Eclipse is a self-media manager based on Dim. Eclipse builds on Dim's foundation and media engine nightfall, expanding on the overall user experience, making it more broadly accessible to a wider audience.
+Eclipse is a personal media manager derived from the upstream Dim project. It retains Dim's internal Rust crate structure and the Nightfall media engine while presenting Eclipse as the product and runtime.
 
 ## Running from source
 
-Dim's supported source-development path is macOS, Linux, or native Windows through Git Bash. The repository pins Rust in
+Eclipse's supported source-development path is macOS, Linux, or native Windows through Git Bash. The repository pins Rust in
 `rust-toolchain.toml`, Node.js in `.nvmrc`, and pnpm in the root and Eclipse package manifests.
 
 ### Guided setup
@@ -30,8 +30,12 @@ installed, it asks before installing `Git.Git` with WinGet. WSL is not required.
 The first prompt asks you to choose macOS, Linux, or Windows. Each platform path checks the
 required platform, Node, Rust, media, and native build tooling; offers focused recovery for anything
 missing; runs the existing locked release bootstrap; and can start Eclipse and open
-[http://localhost:8000](http://localhost:8000). Existing configuration and FFmpeg/FFprobe entries
-are never replaced. Linux can automatically install documented native requirements on Debian and
+[http://localhost:8000](http://localhost:8000). Existing installations are detected before the
+build starts. Reinstall/update preserves all state; Reset removes host settings, cache, and logs
+while preserving accounts, libraries, progress, and metadata (and signs out existing browser
+sessions when it generates a new host secret); Clean install removes managed state after explicit
+confirmation. Running Eclipse processes are stopped before executable replacement.
+Existing FFmpeg/FFprobe entries are never replaced. Linux can automatically install documented native requirements on Debian and
 Ubuntu through `apt-get`; other distributions receive exact missing-package guidance. On Windows,
 the native launcher uses Git Bash internally rather than WSL. The installer uses WinGet for
 supported dependency recovery and may prompt for administrator approval when Visual Studio Build
@@ -54,6 +58,8 @@ install.cmd --demo
 ```
 
 Demo mode uses deterministic simulated results and includes the missing-requirement recovery path.
+Use `--demo-scenario fresh|reinstall|reset|clean|exit` to preview every lifecycle branch. For
+automation, `--existing-action reinstall|reset|clean|exit` can be combined with `--yes`.
 
 ### Prerequisites
 
@@ -110,8 +116,8 @@ corepack enable pnpm
 From a fresh clone:
 
 ```sh
-git clone https://github.com/Dusk-Labs/dim.git
-cd dim
+git clone https://github.com/madebyjordan/eclipse.git
+cd eclipse
 pnpm build
 pnpm dev
 ```
@@ -148,24 +154,32 @@ gate, including formatting, contract, type, lint, test, and optimized-build vali
 pnpm release:validate
 ```
 
-Dim creates local state relative to its runtime directory. `scripts/run.sh` uses the repository root for development builds and `target/release/` for release builds, matching the layout of packaged binaries:
+Eclipse creates local state relative to its runtime directory. `scripts/run.sh` uses the repository root for development builds and `target/release/` for release builds, matching the layout of packaged binaries:
 
-| Path                 | Purpose                                               |
-| -------------------- | ----------------------------------------------------- |
-| `config/config.toml` | Host configuration and generated local session secret |
-| `config/dim.db`      | SQLite database                                       |
-| `metadata/`          | Downloaded artwork and metadata                       |
-| `streaming_cache/`   | Temporary playback and transcoding data               |
+| Path                 | Purpose                                                                |
+| -------------------- | ---------------------------------------------------------------------- |
+| `config/config.toml` | Host configuration and generated local session secret                  |
+| `config/dim.db`      | SQLite accounts, sessions, libraries, scan/index records, and progress |
+| `metadata/`          | Durable downloaded artwork, avatars, and metadata                      |
+| `streaming_cache/`   | Disposable playback and transcoding data                               |
+| `logs/`              | Disposable runtime diagnostics                                         |
 
-Existing configuration files are preserved. If upgrading from a version that exposed `secret_key`, remove that setting once and restart Dim to generate a new secret and invalidate existing sessions.
+The historical `config/dim.db` filename and `dim_session` cookie name remain compatibility
+boundaries: renaming either would make an existing installation appear empty or invalidate active
+sessions. Eclipse reuses them directly. Legacy `DIM_*` environment variables remain fallback
+aliases; new deployments should use the corresponding `ECLIPSE_*` names. If upgrading from a
+version that exposed `secret_key`, remove that setting once and restart Eclipse to generate a new
+secret and invalidate existing sessions.
 
-Dim listens on `127.0.0.1` by default. Trusted LAN access is opt-in with an explicit listener, for example `dim --bind-address 0.0.0.0` or `bind_address = "0.0.0.0"` in the configuration file. The effective listener is logged at startup.
+Eclipse listens on `127.0.0.1` by default. Trusted LAN access is opt-in with an explicit listener,
+for example `eclipse --bind-address 0.0.0.0`, `ECLIPSE_BIND_ADDRESS=0.0.0.0`, or
+`bind_address = "0.0.0.0"` in the configuration file. The effective listener is logged at startup.
 
-Direct internet exposure is unsupported. Dim has no built-in TLS termination; use an appropriately configured trusted reverse proxy when HTTPS access is intentional. See [the deployment and authentication boundary](docs/design/deployment-security.md) for proxy settings, session migration behavior, and security limits.
+Direct internet exposure is unsupported. Eclipse has no built-in TLS termination; use an appropriately configured trusted reverse proxy when HTTPS access is intentional. See [the deployment and authentication boundary](docs/design/deployment-security.md) for proxy settings, session migration behavior, and security limits.
 
 ## Automated releases
 
-`Cargo.toml`'s `workspace.package.version` is the single application-version source. Every Dim
+`Cargo.toml`'s `workspace.package.version` is the single application-version source. Every Eclipse
 workspace crate inherits it, and Cargo synchronizes `Cargo.lock` when the release command changes
 the version.
 
@@ -208,8 +222,8 @@ non-ignored project changes, and creates one `chore: release vX.Y.Z` commit. It 
 without force and verifies the remote commit before creating an annotated tag on that exact commit
 and pushing the tag separately. The one tag-triggered workflow builds the Linux x86_64 archive and
 checksum, publishes versioned Linux x86_64 `ghcr.io/madebyjordan/eclipse` tags, and creates an
-`Eclipse vX.Y.Z` GitHub Release. Archives remain `dim-vX.Y.Z-linux-x86_64.tar.gz` because the
-packaged executable and runtime layout are still named `dim`. Dry runs
+`Eclipse vX.Y.Z` GitHub Release. Archives are named `eclipse-vX.Y.Z-linux-x86_64.tar.gz` and contain
+the `eclipse` executable. Dry runs
 execute the complete inspection and validation path but never modify files or the index, create a
 commit or tag, push, or publish anything.
 
@@ -241,24 +255,24 @@ branch CI; every other locked workspace test runs before a release can be commit
 - libvorbisenc
 - libtheora0
 
-Download `dim-vX.Y.Z-linux-x86_64.tar.gz` and its `.sha256` file from the fork's GitHub Release,
+Download `eclipse-vX.Y.Z-linux-x86_64.tar.gz` and its `.sha256` file from the fork's GitHub Release,
 then verify and unpack it:
 
-1. Verify with `sha256sum -c dim-vX.Y.Z-linux-x86_64.tar.gz.sha256`.
-2. Unpack with `tar -xvzf dim-vX.Y.Z-linux-x86_64.tar.gz`.
-3. Run `cd release && ./dim`.
-4. Access the Dim web UI at `http://localhost:8000`.
+1. Verify with `sha256sum -c eclipse-vX.Y.Z-linux-x86_64.tar.gz.sha256`.
+2. Unpack with `tar -xvzf eclipse-vX.Y.Z-linux-x86_64.tar.gz`.
+3. Run `cd release && ./eclipse`.
+4. Access the Eclipse web UI at `http://localhost:8000`.
 
 ## Running with docker
 
-The following command runs dim on port 8000, storing configuration in `$HOME/.config/dim`.
+The following command runs Eclipse on port 8000, storing configuration in `$HOME/.config/eclipse`.
 You may change that path if you'd like to store configuration somewhere else.
 You can mount as many directories containing media as you like by repeating the `-v HOST_PATH:CONTAINER_PATH` option.
 In this example, the path `/media` on the host is made available at the same path inside the Docker container.
 This name "media" is arbitrary and you can choose whatever you like.
 
 ```
-docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro ghcr.io/madebyjordan/eclipse:dev
+docker run -d --name eclipse -p 127.0.0.1:8000:8000/tcp -e ECLIPSE_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/eclipse:/opt/eclipse/config -v /media:/media:ro ghcr.io/madebyjordan/eclipse:dev
 ```
 
 The multi-architecture image resides at `ghcr.io/madebyjordan/eclipse:master`.
@@ -266,14 +280,16 @@ The multi-architecture image resides at `ghcr.io/madebyjordan/eclipse:master`.
 To use hardware acceleration, mount the relevant device:
 
 ```
-docker run -d -p 127.0.0.1:8000:8000/tcp -e DIM_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/dim:/opt/dim/config -v /media:/media:ro --device=/dev/dri/renderD128 ghcr.io/madebyjordan/eclipse:dev
+docker run -d --name eclipse -p 127.0.0.1:8000:8000/tcp -e ECLIPSE_BIND_ADDRESS=0.0.0.0 -v $HOME/.config/eclipse:/opt/eclipse/config -v /media:/media:ro --device=/dev/dri/renderD128 ghcr.io/madebyjordan/eclipse:dev
 ```
 
-Refer to [docker-compose-template.yml](docker-compose-template.yml) to run Dim using Docker Compose.
+Existing containers that explicitly mount legacy `/opt/dim/{config,metadata,streaming_cache,logs}`
+paths remain supported: the entrypoint detects those mounts and runs against the legacy persistent
+layout. New deployments use `/opt/eclipse`. Refer to [docker-compose-template.yml](docker-compose-template.yml).
 
 ## License
 
-Dim is licensed under the AGPLv3 license (see [LICENSE.md](LICENSE.md) or https://opensource.org/licenses/AGPL-3.0)
+Eclipse is licensed under the AGPLv3 license (see [LICENSE.md](LICENSE.md) or https://opensource.org/licenses/AGPL-3.0)
 
 ## Screenshots
 

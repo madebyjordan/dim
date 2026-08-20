@@ -1,16 +1,16 @@
 version: "3.8"
 services:
-  dim:
-    container_name: dim
+  eclipse:
+    container_name: eclipse
     image: ghcr.io/madebyjordan/eclipse:dev
     restart: unless-stopped
     ports:
       - 8000:8000
     volumes:
-      - /<host_config_folder>:/opt/dim/config
-      - /<host_metadata_folder>:/opt/dim/metadata
-      - /<host_cache_folder>:/opt/dim/streaming_cache
-      - /<host_logs_folder>:/opt/dim/logs
+      - /<host_config_folder>:/opt/eclipse/config
+      - /<host_metadata_folder>:/opt/eclipse/metadata
+      - /<host_cache_folder>:/opt/eclipse/streaming_cache
+      - /<host_logs_folder>:/opt/eclipse/logs
       - /<host_media_path>:/media
       # Add more folders like so:
       # - /<host_media_path>:/media2

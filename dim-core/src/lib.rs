@@ -1,18 +1,18 @@
-//! Dim is a media manager written in rust.
+//! Eclipse is a media manager written in Rust.
 //! It uses Diesel as the ORM and rocket for the http/s server
 //!
 //! The project is split up into several crates:
 //! * [`database`](dim-database) - Holds all the database models including some frequently used db operations
 //! * [`routes`](routes) - All of the routes that we expose over http are stored in there
 //! * [`scanners`](scanner) - The filesystem scanner and daemon code is located here
-//! ffmpeg that is used by several parts of dim
+//! ffmpeg that is used by several parts of Eclipse
 //!
 //! # Building
-//! Dim can easily be built with cargo build --release.
-//! When built with --release, build.rs will compile the web ui and embed it into dim.
+//! Eclipse can be built with `cargo build --release`.
+//! When built with --release, build.rs will compile the web UI and embed it into Eclipse.
 //!
 //! # To run
-//! Dim can be ran using docker, by pulling vgarleanu/dim-server, or locally.
+//! Eclipse can run locally or in its published container image.
 //! If ran locally, make sure PostgreSQL is running with the password for postgres: dimpostgres
 //!
 //! # Testing
@@ -32,7 +32,7 @@ pub mod utils;
 /// Module contains our core initialization logic.
 pub mod core;
 pub mod diagnostics;
-/// Module contains all the error definitions used in dim, and returned by the web-service.
+/// Module contains all the error definitions used by Eclipse and returned by the web service.
 pub mod errors;
 /// Contains the code for fetching assets like posters and stills.
 pub mod fetcher;
@@ -77,7 +77,7 @@ pub fn setup_logging_at(
         std::env::set_var("RUST_LOG", "info,tower_http=trace");
     }
 
-    let log_appender = tracing_appender::rolling::daily(directory, "dim-log.log");
+    let log_appender = tracing_appender::rolling::daily(directory, "eclipse-log.log");
     let (non_blocking_file, guard) = tracing_appender::non_blocking(log_appender);
 
     let subscriber = tracing_subscriber::registry()

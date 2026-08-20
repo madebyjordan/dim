@@ -81,7 +81,7 @@ impl IntoResponse for Error {
                 crate::error::api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
-                    "Dim could not complete the request.",
+                    "Eclipse could not complete the request.",
                 )
             }
         }

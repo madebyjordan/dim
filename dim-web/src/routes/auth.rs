@@ -72,7 +72,7 @@ impl IntoResponse for AuthError {
                 crate::error::api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
-                    "Dim could not complete the request.",
+                    "Eclipse could not complete the request.",
                 )
             }
         }
@@ -336,7 +336,7 @@ impl IntoResponse for LoginError {
                 crate::error::api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
-                    "Dim could not complete the request.",
+                    "Eclipse could not complete the request.",
                 )
             }
         }
@@ -468,7 +468,7 @@ impl IntoResponse for RegisterError {
                 crate::error::api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
-                    "Dim could not complete the request.",
+                    "Eclipse could not complete the request.",
                 )
             }
         }

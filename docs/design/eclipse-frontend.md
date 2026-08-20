@@ -1,6 +1,6 @@
 # Eclipse frontend foundation
 
-Eclipse is a greenfield SvelteKit client. It shares Dim's Rust backend and domain contracts, but it
+Eclipse is a SvelteKit client over the inherited Rust backend and domain contracts, but it
 is the repository's sole frontend implementation.
 
 ## Runtime boundaries
@@ -51,7 +51,7 @@ Safari's `webkitShowPlaybackTargetPicker` is capability-detected. On supported b
 creates a separate `target=airplay` session and uses the backend's authenticated remote HLS resource;
 unsupported browsers expose no active control.
 
-The product currently omits Watchlist, cast, and content-rating presentation because Dim has no
+The product currently omits Watchlist, cast, and content-rating presentation because Eclipse has no
 persisted domain contract for those values. They must not be synthesized from design fixtures. The
 metadata provider can fetch cast upstream, but scanner ingestion does not currently store or expose
 it. The existing `rating` field is a provider score, not a content certification.

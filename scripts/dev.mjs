@@ -66,15 +66,20 @@ process.once("SIGTERM", () => {
 });
 
 if (release) {
-  start("Dim", resolve(root, "scripts/run.sh"), backendArgs, {
-    env: { ...process.env, DIM_BIND_ADDRESS: "0.0.0.0" },
+  start("Eclipse", resolve(root, "scripts/run.sh"), backendArgs, {
+    env: { ...process.env, ECLIPSE_BIND_ADDRESS: "0.0.0.0" },
   });
 } else {
   // run.sh intentionally executes a prepared artifact. Development must rebuild first or a
   // restart can silently run stale Rust while Vite serves current UI code.
-  await runBeforeStart("Dim backend build", "cargo", ["build", "--locked", "-p", "dim"]);
-  start("Dim backend", resolve(root, "scripts/run.sh"), [], {
-    env: { ...process.env, DIM_BIND_ADDRESS: "127.0.0.1" },
+  await runBeforeStart("Eclipse backend build", "cargo", [
+    "build",
+    "--locked",
+    "-p",
+    "dim",
+  ]);
+  start("Eclipse backend", resolve(root, "scripts/run.sh"), [], {
+    env: { ...process.env, ECLIPSE_BIND_ADDRESS: "127.0.0.1" },
   });
   start("Eclipse dev server", "corepack", ["pnpm", "--dir", "eclipse", "dev"]);
 }

@@ -53,7 +53,7 @@ impl RuntimePaths {
             create_private_dir(directory).map_err(|error| {
                 path_io_error(&format!("prepare {purpose} directory"), directory, error)
             })?;
-            let probe = directory.join(".dim-write-probe");
+            let probe = directory.join(".eclipse-write-probe");
             fs::write(&probe, b"").map_err(|error| {
                 path_io_error(&format!("write {purpose} startup probe"), &probe, error)
             })?;
@@ -80,7 +80,7 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         // Existing installations may intentionally share media/cache directories with a group.
-        // Restrict only directories created by Dim; never rewrite an existing operator's mode.
+        // Restrict only directories created by Eclipse; never rewrite an existing operator's mode.
         if !existed {
             let mut permissions = fs::metadata(path)?.permissions();
             permissions.set_mode(0o700);

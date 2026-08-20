@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -25,7 +25,19 @@ import {
 } from "./release.mjs";
 
 const root = resolve(import.meta.dirname, "..");
-const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+const gitLocator = spawnSync(
+  process.platform === "win32" ? "where.exe" : "which",
+  [process.platform === "win32" ? "git.exe" : "git"],
+  { encoding: "utf8" }
+);
+if (gitLocator.status !== 0 || !gitLocator.stdout) {
+  throw new Error(`Could not locate Git: ${gitLocator.stderr ?? ""}`);
+}
+const realGit = gitLocator.stdout.split(/\r?\n/, 1)[0];
+const realBash =
+  process.platform === "win32"
+    ? resolve(dirname(realGit), "../bin/bash.exe")
+    : "/bin/bash";
 
 function command(cwd, executable, args, env = {}) {
   return spawnSync(executable, args, {
@@ -36,7 +48,7 @@ function command(cwd, executable, args, env = {}) {
 }
 
 function fixture() {
-  const directory = mkdtempSync(resolve(tmpdir(), "dim-release-test-"));
+  const directory = mkdtempSync(resolve(tmpdir(), "eclipse-release-test-"));
   const repository = resolve(directory, "repo");
   const remote = resolve(directory, "origin.git");
   const bin = resolve(directory, "bin");
@@ -78,6 +90,10 @@ exit 1
     '#!/usr/bin/env bash\nif [[ "${1:-}" == "--version" ]]; then echo "fixture"; exit 0; fi\nif [[ "${1:-}" == "release:validate" ]]; then if [[ "${FAKE_VALIDATION_FAIL:-}" == "1" ]]; then echo "validation failed" >&2; exit 1; fi; echo "validation passed"; exit 0; fi\nexit 1\n'
   );
   writeFileSync(
+    resolve(bin, "corepack"),
+    '#!/usr/bin/env bash\nif [[ "${1:-}" == "--version" ]]; then echo "corepack fixture"; exit 0; fi\n[[ "${1:-}" == "pnpm" ]] || exit 1\nshift\nexec "$(dirname "$0")/pnpm" "$@"\n'
+  );
+  writeFileSync(
     resolve(bin, "cargo"),
     '#!/usr/bin/env bash\nif [[ "${1:-}" == "--version" ]]; then echo "cargo fixture"; exit 0; fi\nif [[ "${1:-}" == "check" ]]; then version=$(awk -F\'"\' \'/^version = / { print $2; exit }\' Cargo.toml); printf \'# fixture\\nversion = "%s"\\n\' "$version" > Cargo.lock; exit 0; fi\nif [[ "${1:-}" == "metadata" ]]; then echo \'{"packages":[],"workspace_members":[]}\'; exit 0; fi\nexit 1\n'
   );
@@ -92,8 +108,17 @@ exec "${realGit}" "$@"
   );
   chmodSync(resolve(bin, "gh"), 0o755);
   chmodSync(resolve(bin, "pnpm"), 0o755);
+  chmodSync(resolve(bin, "corepack"), 0o755);
   chmodSync(resolve(bin, "cargo"), 0o755);
   chmodSync(resolve(bin, "git"), 0o755);
+  if (process.platform === "win32") {
+    for (const name of ["gh", "pnpm", "corepack", "cargo", "git"]) {
+      writeFileSync(
+        resolve(bin, `${name}.cmd`),
+        `@echo off\r\n"${realBash}" "%~dp0${name}" %*\r\n`
+      );
+    }
+  }
 
   command(directory, "git", ["init", "--bare", remote]);
   command(repository, "git", ["init", "-b", "master"]);
@@ -121,7 +146,7 @@ exec "${realGit}" "$@"
     directory,
     repository,
     remote,
-    env: { PATH: `${bin}:${process.env.PATH}` },
+    env: { PATH: `${bin}${delimiter}${process.env.PATH}` },
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
   };
 }
@@ -242,7 +267,7 @@ test("GitHub release repository is derived from the configured remote", () => {
     "madebyjordan/eclipse"
   );
   assert.throws(
-    () => parseGitHubRepository("https://example.com/dim.git"),
+    () => parseGitHubRepository("https://example.com/other.git"),
     /not a GitHub/
   );
 });
@@ -416,6 +441,14 @@ test("validation failure leaves files, index, commits, tags, and remote unchange
 test("commit push failure prevents local and remote tag creation", () => {
   const item = fixture();
   try {
+    if (process.platform === "win32") {
+      const hook = resolve(item.remote, "hooks/pre-receive");
+      writeFileSync(
+        hook,
+        "#!/bin/sh\necho 'simulated commit push failure' >&2\nexit 1\n"
+      );
+      chmodSync(hook, 0o755);
+    }
     const remoteBefore = snapshot(item).remote;
     const result = runRelease(item, {
       dryRun: false,

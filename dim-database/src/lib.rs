@@ -55,7 +55,7 @@ const SCAN_PROGRESS_MIGRATION: i64 = 20260816130000;
 /// How long SQLite waits for another connection to release a lock before returning `BUSY`.
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Dim uses WAL with `synchronous=NORMAL` on file-backed databases. In WAL mode this preserves
+/// Eclipse uses WAL with `synchronous=NORMAL` on file-backed databases. In WAL mode this preserves
 /// database consistency and normally survives application/process crashes, while accepting that
 /// the most recent committed transaction can be lost after an operating-system or power failure.
 fn connection_options(path: &str, read_only: bool) -> SqliteConnectOptions {

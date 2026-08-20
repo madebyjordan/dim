@@ -1,4 +1,10 @@
-import type { LoginRequest, LoginResponse, User } from '$lib/api/generated';
+import type {
+  AdminExists,
+  LoginRequest,
+  LoginResponse,
+  RegisterResponse,
+  User
+} from '$lib/api/generated';
 import { ApiError, ApiTransport } from '$lib/api/transport';
 
 export type SessionStatus = 'loading' | 'authenticated' | 'anonymous' | 'error';
@@ -33,8 +39,25 @@ class SessionState {
       'auth/login',
       credentials
     );
-    this.token = result.token;
-    sessionStorage.setItem(tokenKey, result.token);
+    await this.establish(result.token);
+  }
+
+  async adminExists() {
+    const result = await this.api.get<AdminExists>('auth/admin_exists');
+    return result.exists;
+  }
+
+  async register(credentials: LoginRequest) {
+    const result = await this.api.post<RegisterResponse>(
+      'auth/register',
+      credentials
+    );
+    await this.establish(result.token);
+  }
+
+  private async establish(token: string) {
+    this.token = token;
+    sessionStorage.setItem(tokenKey, token);
     await this.bootstrap();
   }
 

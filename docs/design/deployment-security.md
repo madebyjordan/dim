@@ -1,16 +1,16 @@
 # Deployment and authentication boundary
 
-Dim is a local-first application for a developer or early tester on one machine. The supported
+Eclipse is a local-first application for a developer or early tester on one machine. The supported
 default is HTTP on `127.0.0.1:8000`. Set `bind_address` in `config/config.toml`, pass
-`--bind-address`, or set `DIM_BIND_ADDRESS` to a non-loopback IP only when intentionally allowing
+`--bind-address`, or set `ECLIPSE_BIND_ADDRESS` to a non-loopback IP only when intentionally allowing
 trusted LAN clients. Startup logs always report the effective address and whether the process is in
 local or LAN opt-in mode.
 
-Direct internet exposure is unsupported. Dim does not terminate TLS. Internet-adjacent access must
+Direct internet exposure is unsupported. Eclipse does not terminate TLS. Internet-adjacent access must
 use a trusted, correctly configured reverse proxy that provides HTTPS, request-size/rate controls,
 and access policy appropriate to the operator. Set both `https_reverse_proxy = true` and
-`trust_proxy_headers = true` only when that proxy runs on the same host and connects to Dim from a
-loopback address. Dim otherwise rejects forwarded headers. The proxy must preserve `Host`; browser
+`trust_proxy_headers = true` only when that proxy runs on the same host and connects to Eclipse from a
+loopback address. Eclipse otherwise rejects forwarded headers. The proxy must preserve `Host`; browser
 requests with `Origin` must match `Host` and the configured HTTP/HTTPS mode.
 
 ## Credentials and sessions
@@ -47,4 +47,4 @@ display filenames rather than absolute server paths.
 
 Controls intentionally deferred include public-internet TLS termination, distributed rate limiting,
 WAF/bot controls, account recovery/email verification, and multi-host session replication. They do
-not fit Dim's supported deployment model.
+not fit Eclipse's supported deployment model.

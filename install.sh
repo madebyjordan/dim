@@ -13,12 +13,24 @@ ECLIPSE_SELECTED_PLATFORM=""
 ECLIPSE_AUTO_CONFIRM=false
 ECLIPSE_START=true
 ECLIPSE_DEMO=false
+ECLIPSE_DEMO_SCENARIO=fresh
 ECLIPSE_DEMO_REQUIREMENTS_RESOLVED=false
 ECLIPSE_MENU_SELECTION=0
+ECLIPSE_NEXT_MENU_SELECTION=0
 ECLIPSE_LOG=""
 ECLIPSE_STEP_PID=""
 ECLIPSE_WINDOWS_TOOLCHAIN_DETAIL=""
 ECLIPSE_WINDOWS_TOOLCHAIN_STATUS="toolchain-inconclusive"
+ECLIPSE_INSTALL_MODE=fresh
+ECLIPSE_EXISTING_ACTION=""
+ECLIPSE_EXISTING_INSTALLATION=false
+ECLIPSE_RUNNING_PIDS=()
+ECLIPSE_MANAGED_PATHS=()
+ECLIPSE_LIFECYCLE_LOG=""
+ECLIPSE_LIFECYCLE_DIAGNOSTICS_SHOWN=false
+ECLIPSE_SHUTDOWN_ATTEMPTED=false
+ECLIPSE_RUNTIME_DIR="$ECLIPSE_ROOT/target/release"
+ECLIPSE_BINARY_SUFFIX=""
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     ECLIPSE_BOLD=$'\033[1m'
@@ -40,11 +52,13 @@ fi
 
 usage() {
     cat <<'EOF'
-Usage: ./install.sh [--demo] [--platform macos|linux|windows] [--yes] [--no-start]
-Windows CMD or PowerShell: install.cmd [--demo] [--platform windows] [--yes] [--no-start]
+Usage: ./install.sh [--demo] [--demo-scenario SCENARIO] [--existing-action ACTION] [--platform macos|linux|windows] [--yes] [--no-start]
+Windows CMD or PowerShell: install.cmd [--demo] [--demo-scenario SCENARIO] [--existing-action ACTION] [--platform windows] [--yes] [--no-start]
 
 Without --platform, Eclipse Setup starts with an interactive platform selector.
 Demo mode runs the same flow with deterministic fake checks and no system changes.
+Demo scenarios: fresh, reinstall, reset, clean, or exit.
+Existing-install actions for automation: reinstall, reset, clean, or exit (requires --yes).
 EOF
 }
 
@@ -61,6 +75,16 @@ while [[ $# -gt 0 ]]; do
         --demo)
             ECLIPSE_DEMO=true
             ;;
+        --demo-scenario)
+            [[ $# -ge 2 ]] || { echo "--demo-scenario requires fresh, reinstall, reset, clean, or exit." >&2; exit 2; }
+            ECLIPSE_DEMO_SCENARIO=$2
+            shift
+            ;;
+        --existing-action)
+            [[ $# -ge 2 ]] || { echo "--existing-action requires reinstall, reset, clean, or exit." >&2; exit 2; }
+            ECLIPSE_EXISTING_ACTION=$2
+            shift
+            ;;
         --no-start)
             ECLIPSE_START=false
             ;;
@@ -76,6 +100,19 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+case "$ECLIPSE_DEMO_SCENARIO" in
+    fresh|reinstall|reset|clean|exit) ;;
+    *) echo "Unknown demo scenario: $ECLIPSE_DEMO_SCENARIO" >&2; exit 2 ;;
+esac
+case "$ECLIPSE_EXISTING_ACTION" in
+    ""|reinstall|reset|clean|exit) ;;
+    *) echo "Unknown existing-install action: $ECLIPSE_EXISTING_ACTION" >&2; exit 2 ;;
+esac
+if [[ -n "$ECLIPSE_EXISTING_ACTION" && "$ECLIPSE_AUTO_CONFIRM" != true ]]; then
+    echo "--existing-action requires --yes so confirmations remain explicit." >&2
+    exit 2
+fi
 
 success() { printf '%s✓%s %s\n' "$ECLIPSE_GREEN" "$ECLIPSE_RESET" "$*"; }
 notice() { printf '%s›%s %s\n' "$ECLIPSE_BLUE" "$ECLIPSE_RESET" "$*"; }
@@ -118,10 +155,11 @@ select_menu() {
     local prompt=$1
     local allow_auto=$2
     shift 2
-    local selected=0
+    local selected=$ECLIPSE_NEXT_MENU_SELECTION
     local key
     local escape
     local options=("$@")
+    ECLIPSE_NEXT_MENU_SELECTION=0
 
     if [[ -n "$prompt" ]]; then
         printf '%s%s%s\n\n' "$ECLIPSE_BOLD" "$prompt" "$ECLIPSE_RESET"
@@ -235,6 +273,756 @@ run_step() {
 
 command_available() {
     command -v "$1" >/dev/null 2>&1
+}
+
+add_running_pid() {
+    local candidate=$1
+    local existing
+    candidate=${candidate//$'\r'/}
+    [[ "$candidate" =~ ^[0-9]+$ ]] || return 0
+    for existing in "${ECLIPSE_RUNNING_PIDS[@]:-}"; do
+        [[ "$existing" == "$candidate" ]] && return 0
+    done
+    ECLIPSE_RUNNING_PIDS+=("$candidate")
+}
+
+ensure_lifecycle_log() {
+    [[ "$ECLIPSE_DEMO" == false ]] || return 0
+    [[ -z "$ECLIPSE_LIFECYCLE_LOG" ]] || return 0
+    mkdir -p "$ECLIPSE_RUNTIME_DIR/logs"
+    ECLIPSE_LIFECYCLE_LOG=$(mktemp "$ECLIPSE_RUNTIME_DIR/logs/install-lifecycle.XXXXXX.log")
+}
+
+lifecycle_debug() {
+    [[ -n "$ECLIPSE_LIFECYCLE_LOG" ]] || return 0
+    printf '%s\n' "$*" >> "$ECLIPSE_LIFECYCLE_LOG"
+}
+
+surface_lifecycle_diagnostics() {
+    [[ -n "$ECLIPSE_LIFECYCLE_LOG" && -s "$ECLIPSE_LIFECYCLE_LOG" ]] || return 0
+    [[ "$ECLIPSE_LIFECYCLE_DIAGNOSTICS_SHOWN" == false ]] || return 0
+    ECLIPSE_LIFECYCLE_DIAGNOSTICS_SHOWN=true
+    printf '\n%sProcess lifecycle diagnostic:%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" >&2
+    tail -n 40 "$ECLIPSE_LIFECYCLE_LOG" >&2
+    printf '%sFull lifecycle log:%s %s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" "$ECLIPSE_LIFECYCLE_LOG" >&2
+}
+
+canonical_existing_file() {
+    local path=$1
+    [[ -e "$path" ]] || return 1
+    (cd "$(dirname "$path")" && printf '%s/%s\n' "$PWD" "$(basename "$path")")
+}
+
+process_matches_unix_runtime() {
+    local pid=$1
+    local eclipse_binary=$2
+    local legacy_binary=$3
+    local executable=""
+    local command_line=""
+
+    if [[ -e "/proc/$pid/exe" ]]; then
+        executable=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+        executable=${executable% (deleted)}
+        [[ "$executable" == "$eclipse_binary" || "$executable" == "$legacy_binary" ]]
+        return
+    fi
+
+    command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    [[ "$command_line" == "$eclipse_binary" || "$command_line" == "$eclipse_binary "* ||
+       "$command_line" == "$legacy_binary" || "$command_line" == "$legacy_binary "* ]]
+}
+
+detect_windows_runtime_processes() {
+    local eclipse_binary=$1
+    local legacy_binary=$2
+    local targets
+    local detector_error_log=${ECLIPSE_LIFECYCLE_LOG:-/dev/null}
+    local recorded_pid=""
+    local pid
+
+    if command_available cygpath; then
+        eclipse_binary=$(cygpath -w "$eclipse_binary")
+        [[ -z "$legacy_binary" ]] || legacy_binary=$(cygpath -w "$legacy_binary")
+    fi
+    targets="$eclipse_binary"
+    [[ -z "$legacy_binary" ]] || targets="$targets;$legacy_binary"
+    if [[ -f "$ECLIPSE_RUNTIME_DIR/eclipse.pid" ]]; then
+        recorded_pid=$(tr -dc '0-9' < "$ECLIPSE_RUNTIME_DIR/eclipse.pid")
+    fi
+    lifecycle_debug "detect targets=$targets recorded_pid=${recorded_pid:-none}"
+    while IFS= read -r pid; do
+        add_running_pid "$pid"
+    done < <(
+        ECLIPSE_PROCESS_TARGETS="$targets" \
+        ECLIPSE_RECORDED_PID="$recorded_pid" \
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+            $comparison = [StringComparison]::OrdinalIgnoreCase
+            $targets = @($env:ECLIPSE_PROCESS_TARGETS.Split(";") |
+                Where-Object { $_ } |
+                ForEach-Object { [IO.Path]::GetFullPath($_) })
+            $recordedPid = 0
+            [void][int]::TryParse($env:ECLIPSE_RECORDED_PID, [ref]$recordedPid)
+
+            function Add-LifecycleTrace([string] $message) {
+                [Console]::Error.WriteLine($message)
+            }
+
+            function Find-CommandTarget([string] $commandLine) {
+                if (-not $commandLine) { return $null }
+                $commandLine = $commandLine.Trim()
+                foreach ($target in $targets) {
+                    if ($commandLine.Equals($target, $comparison) -or
+                        $commandLine.StartsWith($target + " ", $comparison) -or
+                        $commandLine.Equals("`"$target`"", $comparison) -or
+                        $commandLine.StartsWith("`"$target`" ", $comparison)) {
+                        return $target
+                    }
+                }
+                return $null
+            }
+
+            Add-LifecycleTrace("windows process scan started targets=" + ($targets -join ";"))
+            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    $process = $_
+                    $normalizedExecutable = $null
+                    if ($process.ExecutablePath) {
+                        try {
+                            $normalizedExecutable = [IO.Path]::GetFullPath($process.ExecutablePath)
+                        } catch {
+                            $normalizedExecutable = $null
+                        }
+                    }
+                    $executableTarget = $targets | Where-Object {
+                        $normalizedExecutable -and $_.Equals($normalizedExecutable, $comparison)
+                    } | Select-Object -First 1
+                    $commandTarget = Find-CommandTarget $process.CommandLine
+                    $namedCandidate = $process.Name -and
+                        ($process.Name.Equals("eclipse.exe", $comparison) -or
+                         $process.Name.Equals("dim.exe", $comparison))
+                    $recordedCandidate = $recordedPid -gt 0 -and $process.ProcessId -eq $recordedPid
+                    if (-not ($namedCandidate -or $recordedCandidate -or $executableTarget -or $commandTarget)) {
+                        return
+                    }
+
+                    $accepted = [bool]($executableTarget -or $commandTarget)
+                    $kind = if ($executableTarget) {
+                        [IO.Path]::GetFileName($executableTarget)
+                    } elseif ($commandTarget) {
+                        [IO.Path]::GetFileName($commandTarget)
+                    } else {
+                        "another path"
+                    }
+                    $reason = if ($executableTarget) {
+                        "exact normalized ExecutablePath"
+                    } elseif ($commandTarget) {
+                        "exact command-line executable"
+                    } elseif ($recordedCandidate) {
+                        "recorded PID lacks exact path evidence"
+                    } else {
+                        "process name only"
+                    }
+                    $executableDisplay = if ($process.ExecutablePath) {
+                        $process.ExecutablePath
+                    } else {
+                        "<unavailable>"
+                    }
+                    $normalizedDisplay = if ($normalizedExecutable) {
+                        $normalizedExecutable
+                    } else {
+                        "<unavailable>"
+                    }
+                    $commandDisplay = if ($process.CommandLine) {
+                        $process.CommandLine
+                    } else {
+                        "<unavailable>"
+                    }
+                    Add-LifecycleTrace(
+                        "candidate pid=$($process.ProcessId) name=$($process.Name) kind=$kind " +
+                        "executable=$executableDisplay normalized=$normalizedDisplay " +
+                        "accepted=$accepted reason=$reason command=$commandDisplay"
+                    )
+                    if ($accepted) {
+                        [Console]::Out.Write("$($process.ProcessId)`n")
+                    }
+                }
+        ' 2>>"$detector_error_log" || lifecycle_debug "windows process scan command failed"
+    )
+    lifecycle_debug "detect accepted_pids=${ECLIPSE_RUNNING_PIDS[*]:-none}"
+}
+
+detect_unix_runtime_processes() {
+    local eclipse_binary=$1
+    local legacy_binary=$2
+    local pid=""
+    local command_line=""
+
+    if [[ -f "$ECLIPSE_RUNTIME_DIR/eclipse.pid" ]]; then
+        pid=$(tr -dc '0-9' < "$ECLIPSE_RUNTIME_DIR/eclipse.pid")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null &&
+            process_matches_unix_runtime "$pid" "$eclipse_binary" "$legacy_binary"; then
+            add_running_pid "$pid"
+        fi
+    fi
+
+    while read -r pid command_line; do
+        [[ -n "$pid" ]] || continue
+        if [[ "$command_line" == "$eclipse_binary" || "$command_line" == "$eclipse_binary "* ||
+              "$command_line" == "$legacy_binary" || "$command_line" == "$legacy_binary "* ]]; then
+            add_running_pid "$pid"
+        fi
+    done < <(ps -ax -o pid= -o command= 2>/dev/null || true)
+}
+
+detect_running_eclipse() {
+    local eclipse_binary="$ECLIPSE_RUNTIME_DIR/eclipse$ECLIPSE_BINARY_SUFFIX"
+    local legacy_binary="$ECLIPSE_RUNTIME_DIR/dim$ECLIPSE_BINARY_SUFFIX"
+    local canonical
+
+    ECLIPSE_RUNNING_PIDS=()
+    if [[ "$ECLIPSE_DEMO" == true && "$ECLIPSE_DEMO_SCENARIO" != fresh ]]; then
+        ECLIPSE_RUNNING_PIDS=(4242)
+        return 0
+    fi
+    [[ "$ECLIPSE_DEMO" == false ]] || return 1
+
+    canonical=$(canonical_existing_file "$eclipse_binary" 2>/dev/null || true)
+    [[ -n "$canonical" ]] && eclipse_binary=$canonical
+    canonical=$(canonical_existing_file "$legacy_binary" 2>/dev/null || true)
+    [[ -n "$canonical" ]] && legacy_binary=$canonical
+
+    if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+        detect_windows_runtime_processes "$eclipse_binary" "$legacy_binary"
+    else
+        detect_unix_runtime_processes "$eclipse_binary" "$legacy_binary"
+    fi
+    [[ ${#ECLIPSE_RUNNING_PIDS[@]} -gt 0 ]]
+}
+
+detect_existing_installation() {
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        [[ "$ECLIPSE_DEMO_SCENARIO" != fresh ]]
+        return
+    fi
+
+    [[ -f "$ECLIPSE_RUNTIME_DIR/eclipse$ECLIPSE_BINARY_SUFFIX" ||
+       -f "$ECLIPSE_RUNTIME_DIR/dim$ECLIPSE_BINARY_SUFFIX" ||
+       -f "$ECLIPSE_RUNTIME_DIR/config/config.toml" ||
+       -f "$ECLIPSE_RUNTIME_DIR/config/dim.db" ||
+       -d "$ECLIPSE_RUNTIME_DIR/metadata" ||
+       -d "$ECLIPSE_RUNTIME_DIR/streaming_cache" ]] && return 0
+
+    detect_running_eclipse
+}
+
+exit_without_changes() {
+    success "No changes made"
+    exit 0
+}
+
+prepare_installation_lifecycle() {
+    local selection=0
+
+    ECLIPSE_BINARY_SUFFIX=""
+    [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]] && ECLIPSE_BINARY_SUFFIX=".exe"
+    detect_existing_installation || return 0
+    ECLIPSE_EXISTING_INSTALLATION=true
+
+    printf '%sExisting Eclipse installation detected.%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+    if [[ -n "$ECLIPSE_EXISTING_ACTION" ]]; then
+        case "$ECLIPSE_EXISTING_ACTION" in
+            reinstall) ECLIPSE_NEXT_MENU_SELECTION=0 ;;
+            reset) ECLIPSE_NEXT_MENU_SELECTION=1 ;;
+            clean) ECLIPSE_NEXT_MENU_SELECTION=2 ;;
+            exit) ECLIPSE_NEXT_MENU_SELECTION=3 ;;
+        esac
+    elif [[ "$ECLIPSE_DEMO" == true ]]; then
+        case "$ECLIPSE_DEMO_SCENARIO" in
+            reinstall) ECLIPSE_NEXT_MENU_SELECTION=0 ;;
+            reset) ECLIPSE_NEXT_MENU_SELECTION=1 ;;
+            clean) ECLIPSE_NEXT_MENU_SELECTION=2 ;;
+            exit) ECLIPSE_NEXT_MENU_SELECTION=3 ;;
+        esac
+    fi
+    select_menu "What would you like to do?" true \
+        "Reinstall / update Eclipse" "Reset Eclipse" "Clean install" "Exit"
+    selection=$ECLIPSE_MENU_SELECTION
+
+    case $selection in
+        0)
+            ECLIPSE_INSTALL_MODE=reinstall
+            printf 'Configuration, accounts, libraries, metadata, and other persistent state will be preserved.\n'
+            ;;
+        1)
+            ECLIPSE_INSTALL_MODE=reset
+            printf 'Reset removes host settings, streaming cache, and logs.\n'
+            printf 'Accounts, libraries, indexed media state, watch progress, and metadata are preserved.\n'
+            printf 'A new host secret is generated, so existing browser sessions must sign in again.\n'
+            confirm "Continue with Reset Eclipse?" || exit_without_changes
+            ;;
+        2)
+            ECLIPSE_INSTALL_MODE=clean
+            printf 'Clean install permanently removes Eclipse-managed configuration, accounts, libraries,\n'
+            printf 'indexed media state, watch progress, sessions, metadata, streaming cache, and logs.\n'
+            printf 'Media source files and the source repository are not removed.\n'
+            confirm "Permanently remove this Eclipse installation's managed data?" || exit_without_changes
+            ;;
+        3) exit_without_changes ;;
+    esac
+
+    if [[ "$ECLIPSE_INSTALL_MODE" == clean ]]; then
+        ensure_lifecycle_log
+        lifecycle_debug "clean install confirmed runtime=${ECLIPSE_RUNTIME_DIR} platform=${ECLIPSE_SELECTED_PLATFORM}"
+    fi
+    if detect_running_eclipse; then
+        warning "Running Eclipse detected (PID(s): ${ECLIPSE_RUNNING_PIDS[*]})."
+        printf 'Eclipse must be stopped before its runtime files can be changed.\n'
+    fi
+}
+
+wait_for_processes_to_stop() {
+    local attempts=0
+    local pid
+    lifecycle_debug "waiting for verified process exit pids=${ECLIPSE_RUNNING_PIDS[*]:-none} timeout_seconds=20"
+    while [[ $attempts -lt 80 ]]; do
+        if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+            if ! detect_running_eclipse; then
+                lifecycle_debug "verified process exited during graceful wait attempt=$attempts"
+                return 0
+            fi
+            attempts=$((attempts + 1))
+            sleep 0.25
+            continue
+        fi
+        local alive=false
+        for pid in "${ECLIPSE_RUNNING_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                alive=true
+                break
+            fi
+        done
+        if [[ "$alive" == false ]]; then
+            lifecycle_debug "verified process exited during graceful wait attempt=$attempts"
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.25
+    done
+    lifecycle_debug "verified process remained alive through graceful timeout pids=${ECLIPSE_RUNNING_PIDS[*]:-none}"
+    return 1
+}
+
+format_elapsed() {
+    local seconds=$1
+    printf '%02d:%02d' "$((seconds / 60))" "$((seconds % 60))"
+}
+
+run_installation() {
+    local log
+    local stage_file
+    local pid
+    local frame=0
+    local current_stage=""
+    local shown_stage=""
+    local started=$SECONDS
+    local label
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        for current_stage in \
+            "Installing frontend dependencies" \
+            "Building frontend" \
+            "Building Eclipse backend… 01:42" \
+            "Preparing runtime"; do
+            printf '%s⠋%s %s\n' "$ECLIPSE_BLUE" "$ECLIPSE_RESET" "$current_stage"
+        done
+        success "Eclipse installed"
+        return 0
+    fi
+
+    log=$(mktemp "${TMPDIR:-/tmp}/eclipse-install.XXXXXX")
+    stage_file=$(mktemp "${TMPDIR:-/tmp}/eclipse-stage.XXXXXX")
+    ECLIPSE_LOG=$log
+    "$ECLIPSE_ROOT/scripts/bootstrap.sh" --release --stage-file "$stage_file" >"$log" 2>&1 &
+    pid=$!
+    ECLIPSE_STEP_PID=$pid
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ -s "$stage_file" ]]; then
+            current_stage=$(head -n 1 "$stage_file")
+        fi
+        label=$current_stage
+        if [[ "$current_stage" == "Building Eclipse backend" ]]; then
+            label="$current_stage… $(format_elapsed "$((SECONDS - started))")"
+        fi
+        if [[ -t 1 ]]; then
+            printf '\r%s%s%s %s' "$ECLIPSE_BLUE" "${frames[$frame]}" "$ECLIPSE_RESET" "${label:-Preparing installation}"
+            frame=$(((frame + 1) % ${#frames[@]}))
+        elif [[ -n "$label" && "$label" != "$shown_stage" ]]; then
+            notice "$label"
+            shown_stage=$label
+        fi
+        sleep 0.1
+    done
+    [[ ! -t 1 ]] || printf '\r\033[2K'
+
+    if wait "$pid"; then
+        ECLIPSE_STEP_PID=""
+        rm -f "$log" "$stage_file"
+        ECLIPSE_LOG=""
+        success "Eclipse installed"
+        return 0
+    fi
+
+    ECLIPSE_STEP_PID=""
+    failure "Eclipse installation failed."
+    if [[ -s "$log" ]]; then
+        printf '\n%sDiagnostic output:%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" >&2
+        tail -n 30 "$log" >&2
+    fi
+    printf '\n%sFull log:%s %s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET" "$log" >&2
+    rm -f "$stage_file"
+    return 1
+}
+
+force_stop_windows_processes() {
+    local joined=""
+    local pid
+    for pid in "${ECLIPSE_RUNNING_PIDS[@]}"; do
+        joined="${joined:+$joined,}$pid"
+    done
+    ECLIPSE_PROCESS_IDS="$joined" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+        $ids = $env:ECLIPSE_PROCESS_IDS.Split(",") | ForEach-Object { [int]$_ }
+        Get-Process -Id $ids -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+    '
+}
+
+stop_running_eclipse() {
+    local context=${1:-replace}
+    local pid
+    [[ ${#ECLIPSE_RUNNING_PIDS[@]} -gt 0 ]] || return 0
+
+    confirm "Stop the running Eclipse process now?" || exit_without_changes
+    ECLIPSE_SHUTDOWN_ATTEMPTED=true
+    lifecycle_debug "shutdown confirmed for verified pids=${ECLIPSE_RUNNING_PIDS[*]}"
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        if [[ "$context" == clean ]]; then
+            success "Eclipse stopped"
+        else
+            success "Running Eclipse stopped before replacement"
+        fi
+        ECLIPSE_RUNNING_PIDS=()
+        return 0
+    fi
+
+    if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+        lifecycle_debug "sending runtime-local graceful shutdown request path=$ECLIPSE_RUNTIME_DIR/eclipse.shutdown"
+        if ! printf '%s\n' "shutdown" > "$ECLIPSE_RUNTIME_DIR/eclipse.shutdown"; then
+            failure "The runtime-local Eclipse shutdown request could not be written."
+            lifecycle_debug "runtime-local graceful shutdown request write failed"
+            surface_lifecycle_diagnostics
+            return 1
+        fi
+        lifecycle_debug "runtime-local graceful shutdown request written successfully"
+    else
+        for pid in "${ECLIPSE_RUNNING_PIDS[@]}"; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+    fi
+
+    if wait_for_processes_to_stop; then
+        if [[ "$context" == clean ]]; then
+            success "Eclipse stopped"
+        else
+            success "Running Eclipse stopped before replacement"
+        fi
+        return 0
+    fi
+
+    warning "Eclipse did not finish shutting down within 20 seconds."
+    lifecycle_debug "graceful shutdown timed out; explicit force-stop confirmation required"
+    confirm "Force stop only the verified Eclipse process(es) for this installation?" || {
+        failure "Eclipse is still running; installation cannot safely continue."
+        lifecycle_debug "force-stop declined; destructive lifecycle aborted"
+        surface_lifecycle_diagnostics
+        return 1
+    }
+    if ! detect_running_eclipse; then
+        lifecycle_debug "verified process exited before force-stop was issued"
+        return 0
+    fi
+    lifecycle_debug "force-stopping reverified pids=${ECLIPSE_RUNNING_PIDS[*]}"
+    if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+        if ! force_stop_windows_processes; then
+            failure "The verified Eclipse process could not be force-stopped."
+            lifecycle_debug "verified force-stop command failed pids=${ECLIPSE_RUNNING_PIDS[*]}"
+            surface_lifecycle_diagnostics
+            return 1
+        fi
+    else
+        for pid in "${ECLIPSE_RUNNING_PIDS[@]}"; do
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+    fi
+    wait_for_processes_to_stop || {
+        failure "The verified Eclipse process could not be stopped."
+        lifecycle_debug "verified process still alive after force-stop"
+        surface_lifecycle_diagnostics
+        return 1
+    }
+    lifecycle_debug "verified process exited after force-stop"
+    if [[ "$context" == clean ]]; then
+        success "Eclipse stopped"
+    else
+        success "Running Eclipse stopped before replacement"
+    fi
+}
+
+read_runtime_setting() {
+    local key=$1
+    local config="$ECLIPSE_RUNTIME_DIR/config/config.toml"
+    [[ -f "$config" ]] || return 1
+    awk -F= -v key="$key" '
+        $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+            value = $2
+            sub(/#.*/, "", value)
+            gsub(/^[[:space:]\"]+|[[:space:]\"]+$/, "", value)
+            print value
+            exit
+        }
+    ' "$config"
+}
+
+configured_runtime_path() {
+    local value=$1
+    if [[ "$value" == /* ]]; then
+        printf '%s\n' "$value"
+    elif [[ "$value" =~ ^[A-Za-z]:[\\/] ]]; then
+        if command_available cygpath; then cygpath -u "$value"; else printf '%s\n' "$value"; fi
+    else
+        printf '%s/%s\n' "$ECLIPSE_RUNTIME_DIR" "$value"
+    fi
+}
+
+remove_managed_path() {
+    local path=$1
+    local runtime_absolute
+    local parent_absolute
+    local absolute
+    [[ -e "$path" || -L "$path" ]] || return 0
+    runtime_absolute=$(cd "$ECLIPSE_RUNTIME_DIR" && pwd -P)
+    parent_absolute=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || {
+        warning "Preserved unresolvable path: $path"
+        return 0
+    }
+    absolute="$parent_absolute/$(basename "$path")"
+    case "$absolute" in
+        "$runtime_absolute"/*)
+            [[ "$absolute" != "$runtime_absolute" ]] || {
+                failure "Refusing to remove the runtime root."
+                return 1
+            }
+            rm -rf -- "$absolute"
+            ;;
+        *) warning "Preserved externally configured path: $path" ;;
+    esac
+}
+
+queue_managed_path() {
+    local path=$1
+    local runtime_absolute
+    local parent_absolute
+    local absolute
+    local queued
+    [[ -e "$path" || -L "$path" ]] || return 0
+    runtime_absolute=$(cd "$ECLIPSE_RUNTIME_DIR" && pwd -P)
+    parent_absolute=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || {
+        warning "Preserved unresolvable path: $path"
+        return 0
+    }
+    absolute="$parent_absolute/$(basename "$path")"
+    case "$absolute" in
+        "$runtime_absolute"/*)
+            [[ "$absolute" != "$runtime_absolute" ]] || {
+                failure "Refusing to remove the runtime root."
+                return 1
+            }
+            if [[ ${#ECLIPSE_MANAGED_PATHS[@]} -gt 0 ]]; then
+                for queued in "${ECLIPSE_MANAGED_PATHS[@]}"; do
+                    [[ "$queued" == "$absolute" ]] && return 0
+                done
+            fi
+            ECLIPSE_MANAGED_PATHS+=("$absolute")
+            ;;
+        *) warning "Preserved externally configured path: $path" ;;
+    esac
+}
+
+collect_reset_boundary() {
+    local configured_cache
+    local config_temp
+    configured_cache=$(read_runtime_setting cache_dir 2>/dev/null || true)
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/config/config.toml"
+    for config_temp in "$ECLIPSE_RUNTIME_DIR"/config/.config.toml.tmp-*; do
+        queue_managed_path "$config_temp"
+    done
+    [[ -n "$configured_cache" ]] && queue_managed_path "$(configured_runtime_path "$configured_cache")"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/streaming_cache"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/logs"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/eclipse.log"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/eclipse.pid"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/eclipse.shutdown"
+}
+
+collect_clean_boundary() {
+    local configured_metadata
+    local configured_cache
+    configured_metadata=$(read_runtime_setting metadata_dir 2>/dev/null || true)
+    configured_cache=$(read_runtime_setting cache_dir 2>/dev/null || true)
+    collect_reset_boundary
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/config/dim.db"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/config/dim.db-journal"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/config/dim.db-wal"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/config/dim.db-shm"
+    [[ -n "$configured_metadata" ]] && queue_managed_path "$(configured_runtime_path "$configured_metadata")"
+    [[ -n "$configured_cache" ]] && queue_managed_path "$(configured_runtime_path "$configured_cache")"
+    queue_managed_path "$ECLIPSE_RUNTIME_DIR/metadata"
+}
+
+verify_windows_managed_paths_released() {
+    local joined=""
+    local path
+    local windows_path
+    local diagnostic
+    if [[ ${#ECLIPSE_MANAGED_PATHS[@]} -gt 0 ]]; then
+        for path in "${ECLIPSE_MANAGED_PATHS[@]}"; do
+            windows_path=$path
+            if command_available cygpath; then
+                windows_path=$(cygpath -w "$path")
+            fi
+            joined="${joined}${joined:+$'\n'}$windows_path"
+        done
+    fi
+    [[ -n "$joined" ]] || return 0
+
+    if ! diagnostic=$(ECLIPSE_CLEAN_TARGETS="$joined" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+        $failed = $false
+        foreach ($target in ($env:ECLIPSE_CLEAN_TARGETS -split "`n")) {
+            $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+            if ($null -eq $item) { continue }
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $files = if ($item.PSIsContainer) {
+                Get-ChildItem -LiteralPath $item.FullName -File -Force -Recurse -ErrorAction Stop |
+                    Where-Object {
+                        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
+                    }
+            } else {
+                @($item)
+            }
+            foreach ($file in $files) {
+                $stream = $null
+                try {
+                    $stream = [IO.File]::Open(
+                        $file.FullName,
+                        [IO.FileMode]::Open,
+                        [IO.FileAccess]::ReadWrite,
+                        [IO.FileShare]::None
+                    )
+                } catch {
+                    [Console]::Error.WriteLine("$($file.FullName): $($_.Exception.Message)")
+                    $failed = $true
+                } finally {
+                    if ($null -ne $stream) { $stream.Dispose() }
+                }
+            }
+        }
+        if ($failed) { exit 1 }
+    ' 2>&1); then
+        if [[ "$ECLIPSE_SHUTDOWN_ATTEMPTED" == true ]]; then
+            failure "Existing Eclipse data is still in use after the verified process exited; no files were removed."
+        else
+            failure "No exact Eclipse process could be verified, but existing Eclipse data is locked; no files were removed."
+        fi
+        while IFS= read -r path; do
+            [[ -z "$path" ]] || printf '  %s\n' "$path" >&2
+        done <<< "$diagnostic"
+        lifecycle_debug "exclusive-lock preflight failed shutdown_attempted=$ECLIPSE_SHUTDOWN_ATTEMPTED"
+        while IFS= read -r path; do
+            [[ -z "$path" ]] || lifecycle_debug "locked path=$path"
+        done <<< "$diagnostic"
+        surface_lifecycle_diagnostics
+        return 1
+    fi
+    lifecycle_debug "exclusive-lock preflight succeeded for all managed files"
+}
+
+verify_clean_boundary_ready() {
+    if detect_running_eclipse; then
+        failure "Verified Eclipse process is still running (PID(s): ${ECLIPSE_RUNNING_PIDS[*]}). No files were removed."
+        lifecycle_debug "clean preflight blocked by running verified pids=${ECLIPSE_RUNNING_PIDS[*]}"
+        surface_lifecycle_diagnostics
+        return 1
+    fi
+    lifecycle_debug "no exact Eclipse process remains before exclusive-lock preflight"
+    if [[ "$ECLIPSE_SELECTED_PLATFORM" == windows ]]; then
+        verify_windows_managed_paths_released
+    fi
+}
+
+remove_collected_managed_paths() {
+    local path
+    [[ ${#ECLIPSE_MANAGED_PATHS[@]} -gt 0 ]] || return 0
+    for path in "${ECLIPSE_MANAGED_PATHS[@]}"; do
+        rm -rf -- "$path"
+    done
+}
+
+apply_reset_boundary() {
+    ECLIPSE_MANAGED_PATHS=()
+    collect_reset_boundary
+    remove_collected_managed_paths
+}
+
+apply_clean_boundary() {
+    ECLIPSE_MANAGED_PATHS=()
+    collect_clean_boundary
+    notice "Checking existing data"
+    verify_clean_boundary_ready
+    success "Existing data ready for removal"
+    notice "Removing existing Eclipse data"
+    remove_collected_managed_paths
+    success "Existing Eclipse data removed"
+}
+
+apply_installation_lifecycle() {
+    if [[ "$ECLIPSE_INSTALL_MODE" == clean ]]; then
+        printf '\n%sPreparing clean install%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
+    fi
+    if detect_running_eclipse; then
+        warning "Running Eclipse detected (PID(s): ${ECLIPSE_RUNNING_PIDS[*]})."
+        [[ "$ECLIPSE_INSTALL_MODE" != clean ]] || notice "Stopping Eclipse"
+        stop_running_eclipse "$ECLIPSE_INSTALL_MODE"
+    fi
+
+    if [[ "$ECLIPSE_DEMO" == true ]]; then
+        case "$ECLIPSE_INSTALL_MODE" in
+            reset) success "Demo reset boundary simulated" ;;
+            clean)
+                notice "Checking existing data"
+                success "Existing data ready for removal"
+                notice "Removing existing Eclipse data"
+                success "Existing Eclipse data removal simulated"
+                ;;
+        esac
+        return 0
+    fi
+
+    case "$ECLIPSE_INSTALL_MODE" in
+        reset) apply_reset_boundary ;;
+        clean) apply_clean_boundary ;;
+    esac
+
+    remove_managed_path "$ECLIPSE_RUNTIME_DIR/dim$ECLIPSE_BINARY_SUFFIX"
 }
 
 node_is_supported() {
@@ -822,11 +1610,18 @@ open_browser() {
 }
 
 install_and_offer_start() {
+    apply_installation_lifecycle
     printf '\n%sInstalling Eclipse%s\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
-    run_step "Eclipse installed" "$ECLIPSE_ROOT/scripts/bootstrap.sh" --release
-    if [[ "$ECLIPSE_DEMO" == true || -f "$ECLIPSE_ROOT/target/release/config/config.toml" ]]; then
-        success "Existing configuration preserved"
+    run_installation
+    if [[ -n "$ECLIPSE_LIFECYCLE_LOG" ]]; then
+        rm -f "$ECLIPSE_LIFECYCLE_LOG"
+        ECLIPSE_LIFECYCLE_LOG=""
     fi
+    case "$ECLIPSE_INSTALL_MODE" in
+        reinstall) success "Existing configuration preserved" ;;
+        reset) success "Accounts, libraries, and metadata preserved" ;;
+        clean) success "Managed Eclipse data reset for a clean first run" ;;
+    esac
     use_configured_local_url
 
     printf '\n%sEclipse is ready.%s\n\n' "$ECLIPSE_BOLD" "$ECLIPSE_RESET"
@@ -858,6 +1653,7 @@ install_platform_macos() {
         notice "Demo mode — all checks and actions are simulated"
     fi
     printf '\n'
+    prepare_installation_lifecycle
     prepare_macos_path
     if [[ "$ECLIPSE_DEMO" == false ]]; then
         check_existing_media_tools
@@ -877,6 +1673,7 @@ install_platform_linux() {
         notice "Demo mode — all checks and actions are simulated"
     fi
     printf '\n'
+    prepare_installation_lifecycle
     if [[ -d "${CARGO_HOME:-$HOME/.cargo}/bin" && "$ECLIPSE_DEMO" == false ]]; then
         export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
     fi
@@ -903,6 +1700,7 @@ install_platform_windows() {
         notice "Demo mode — all checks and actions are simulated"
     fi
     printf '\n'
+    prepare_installation_lifecycle
     refresh_windows_path
     if [[ "$ECLIPSE_DEMO" == false ]]; then
         check_existing_media_tools

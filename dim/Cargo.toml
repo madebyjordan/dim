@@ -1,9 +1,14 @@
 [package]
 name = "dim"
+autobins = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+
+[[bin]]
+name = "eclipse"
+path = "src/main.rs"
 
 [dependencies]
 dim-core = { path = "../dim-core" }

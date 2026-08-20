@@ -1,17 +1,18 @@
 ## Contributing
+
 Contributions are absolutely, positively welcome and encouraged! Contributions
 come in many forms. You could:
 
-  1. Submit a feature request or bug report as an [issue].
-  2. Ask for improved documentation as an [issue].
-  3. Contribute code via [pull requests].
+1. Submit a feature request or bug report as an [issue].
+2. Ask for improved documentation as an [issue].
+3. Contribute code via [pull requests].
 
-[issue]: https://github.com/Dusk-Labs/dim/issues
-[pull_requests]: https://github.com/Dusk-Labs/dim/pulls
+[issue]: https://github.com/madebyjordan/eclipse/issues
+[pull_requests]: https://github.com/madebyjordan/eclipse/pulls
 
 All pull requests are code reviewed and tested by the CI. Note that unless you
 explicitly state otherwise, any contribution intentionally submitted for
-inclusion in dim by you shall be licensed under the AGPLv3 License 
+inclusion in Eclipse by you shall be licensed under the AGPLv3 License
 without any additional terms or conditions.
 
 ### Local development
@@ -43,6 +44,7 @@ additionally runs the two legacy scanner tests excluded from the deterministic r
 and release gate.
 
 ## Contributors
+
 Valerian G. (Lead Developer and maintainer) \
 [Valerian G.](https://github.com/vgarleanu)
 [eraychumal](https://github.com/eraychumak)

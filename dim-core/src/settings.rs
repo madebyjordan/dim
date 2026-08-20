@@ -73,7 +73,7 @@ pub struct GlobalSettings {
     pub secret_key: Option<[u8; 32]>,
     pub enable_hwaccel: bool,
     pub version: String,
-    /// Set only when HTTPS is terminated by a trusted reverse proxy. Dim itself remains HTTP-only.
+    /// Set only when HTTPS is terminated by a trusted reverse proxy. Eclipse itself remains HTTP-only.
     pub https_reverse_proxy: bool,
     /// Trust `Forwarded`/`X-Forwarded-*` only when the immediate peer is the trusted proxy.
     pub trust_proxy_headers: bool,

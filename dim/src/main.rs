@@ -10,18 +10,29 @@ use runtime::ApplicationContext;
 use xtra::spawn::Tokio;
 
 #[derive(Debug, clap::Parser)]
-#[clap(name = "Dim", about = "Dim, a media manager fueled by dark forces.")]
+#[clap(name = "Eclipse", about = "Eclipse, a personal media manager.")]
 #[clap(version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"))]
 #[clap(rename_all = "kebab")]
 struct Args {
-    #[clap(short, long, env = "DIM_CONFIG_PATH")]
+    #[clap(short, long, env = "ECLIPSE_CONFIG_PATH")]
     config: Option<PathBuf>,
     /// Override the configured listener IP. Non-loopback addresses explicitly opt into LAN use.
-    #[clap(long, env = "DIM_BIND_ADDRESS")]
+    #[clap(long, env = "ECLIPSE_BIND_ADDRESS")]
     bind_address: Option<std::net::IpAddr>,
 }
 
 async fn shutdown_signal() {
+    let shutdown_file = PathBuf::from("eclipse.shutdown");
+    let file_signal = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if shutdown_file.exists() {
+                let _ = std::fs::remove_file(&shutdown_file);
+                tracing::info!("Installer shutdown request received, shutting down");
+                break;
+            }
+        }
+    };
     #[cfg(unix)]
     {
         let mut terminate =
@@ -33,14 +44,20 @@ async fn shutdown_signal() {
                 tracing::info!("SIGINT received, shutting down");
             }
             _ = terminate.recv() => tracing::info!("SIGTERM received, shutting down"),
+            _ = file_signal => {},
         }
     }
     #[cfg(not(unix))]
     {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(?error, "Shutdown signal handler failed");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(?error, "Shutdown signal handler failed");
+                }
+                tracing::info!("Console shutdown signal received, shutting down");
+            }
+            _ = file_signal => {},
         }
-        tracing::info!("Shutdown signal received, shutting down");
     }
 }
 
@@ -48,10 +65,24 @@ fn main() {
     let args = Args::parse();
     let config_path = args
         .config
+        .or_else(|| std::env::var_os("DIM_CONFIG_PATH").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("config/config.toml"));
+    let bind_address = match args.bind_address {
+        Some(address) => Some(address),
+        None => match std::env::var("DIM_BIND_ADDRESS") {
+            Ok(address) => match address.parse() {
+                Ok(address) => Some(address),
+                Err(error) => {
+                    eprintln!("Eclipse startup failed: invalid legacy DIM_BIND_ADDRESS: {error}");
+                    std::process::exit(2);
+                }
+            },
+            Err(_) => None,
+        },
+    };
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create a tokio runtime");
-    if let Err(error) = runtime.block_on(run(config_path, args.bind_address)) {
-        eprintln!("Dim startup failed: {error}");
+    if let Err(error) = runtime.block_on(run(config_path, bind_address)) {
+        eprintln!("Eclipse startup failed: {error}");
         std::process::exit(1);
     }
 }
@@ -60,6 +91,7 @@ async fn run(
     config_path: PathBuf,
     bind_override: Option<std::net::IpAddr>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = std::fs::remove_file("eclipse.shutdown");
     let mut context = ApplicationContext::build(config_path.clone()).await?;
     if let Some(bind_address) = bind_override {
         context.settings = context.settings.with_bind_override(bind_address)?;
@@ -164,7 +196,7 @@ async fn run(
     } else {
         "lan-opt-in"
     };
-    tracing::info!(%address, deployment, https_reverse_proxy = global_settings.https_reverse_proxy, "Launching Dim with effective listener");
+    tracing::info!(%address, deployment, https_reverse_proxy = global_settings.https_reverse_proxy, "Launching Eclipse with effective listener");
     let event_rx = context.take_event_rx();
     dim_web::start_webserver(
         address,

@@ -31,31 +31,31 @@ RUN chmod +x /static/ffmpeg && chmod +x /static/ffprobe
 #RUN /static/ffmpeg -version
 #RUN /static/ffprobe -version
 
-FROM debian:bullseye AS dim
+FROM debian:bullseye AS eclipse
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
-WORKDIR /dim
+WORKDIR /eclipse
 COPY bin/ bin/
 RUN ls -al bin/
 RUN mkdir -p target/
 
 RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
-    mv bin/amd64-bin/dim target/dim && \
-    chmod +x target/dim && \
+    mv bin/amd64-bin/eclipse target/eclipse && \
+    chmod +x target/eclipse && \
     ls -la target/ . && \
     pwd \
     ; fi
     
 RUN if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
-    mv bin/aarch64-bin/dim target/dim && \
-    chmod +x target/dim && \
+    mv bin/aarch64-bin/eclipse target/eclipse && \
+    chmod +x target/eclipse && \
     ls -la target/ . && \
     pwd \
     ; fi
     
 RUN if [ "${TARGETPLATFORM}" = "linux/arm/v7" ]; then \
-    mv bin/armhf-bin/dim target/dim && \
-    chmod +x target/dim && \
+    mv bin/armhf-bin/eclipse target/eclipse && \
+    chmod +x target/eclipse && \
     ls -la target/ . && \
     pwd \
     ; fi
@@ -75,21 +75,24 @@ RUN apt-get update && apt-get install -y \
     libvorbis0a \
     libvorbisenc2 curl tini \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ffmpeg /static/ffmpeg /opt/dim/utils/ffmpeg
-COPY --from=ffmpeg /static/ffprobe /opt/dim/utils/ffprobe
-COPY --from=dim /dim/target/dim /opt/dim/dim
+COPY --from=ffmpeg /static/ffmpeg /opt/eclipse/utils/ffmpeg
+COPY --from=ffmpeg /static/ffprobe /opt/eclipse/utils/ffprobe
+COPY --from=eclipse /eclipse/target/eclipse /opt/eclipse/eclipse
+COPY scripts/docker-entrypoint.sh /usr/local/bin/eclipse-entrypoint
 
-RUN useradd --system --uid 10001 --home-dir /opt/dim --shell /usr/sbin/nologin dim && \
-    mkdir -p /opt/dim/config /opt/dim/metadata /opt/dim/streaming_cache /opt/dim/logs && \
-    chown -R dim:dim /opt/dim
+RUN useradd --system --uid 10001 --home-dir /opt/eclipse --shell /usr/sbin/nologin eclipse && \
+    mkdir -p /opt/eclipse/config /opt/eclipse/metadata /opt/eclipse/streaming_cache /opt/eclipse/logs \
+             /opt/dim/config /opt/dim/metadata /opt/dim/streaming_cache /opt/dim/logs && \
+    ln -s /opt/eclipse/utils /opt/dim/utils && \
+    chmod +x /usr/local/bin/eclipse-entrypoint && \
+    chown -R eclipse:eclipse /opt/eclipse /opt/dim
 
 EXPOSE 8000
-VOLUME ["/opt/dim/config", "/opt/dim/metadata", "/opt/dim/streaming_cache", "/opt/dim/logs"]
+VOLUME ["/opt/eclipse/config", "/opt/eclipse/metadata", "/opt/eclipse/streaming_cache", "/opt/eclipse/logs"]
 
 ENV RUST_LOG=info
-WORKDIR /opt/dim
-USER dim
+WORKDIR /opt/eclipse
+USER eclipse
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
     CMD curl --fail --silent http://127.0.0.1:8000/health/ready >/dev/null || exit 1
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["./dim"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/eclipse-entrypoint"]

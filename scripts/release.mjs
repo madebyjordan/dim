@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -78,6 +78,7 @@ function execute(command, args, options = {}) {
     encoding: "utf8",
     stdio: options.capture ? "pipe" : "inherit",
     env: process.env,
+    shell: process.platform === "win32" && command !== "git",
   });
   if (result.error) throw result.error;
   if (result.status !== 0 && !options.allowFailure) {
@@ -93,8 +94,16 @@ function output(command, args) {
   return execute(command, args, { capture: true }).stdout.trim();
 }
 
+function canonicalPath(path) {
+  const canonical = realpathSync.native(path).replaceAll("\\", "/");
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
 function assertCommand(command) {
-  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
+  const result = spawnSync(command, ["--version"], {
+    stdio: "ignore",
+    shell: process.platform === "win32" && command !== "git",
+  });
   if (result.status !== 0)
     throw new Error(`Required command is unavailable: ${command}`);
 }
@@ -170,7 +179,14 @@ function waitForReleaseWorkflow(repository, tag, commit) {
         return;
       }
     }
-    if (pollSeconds > 0) execute("sleep", [String(pollSeconds)]);
+    if (pollSeconds > 0) {
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        pollSeconds * 1000,
+      );
+    }
   }
   throw new Error(
     `Timed out after ${timeoutSeconds}s waiting for the Release workflow for ${tag} at ${commit}. Check: https://github.com/${repository}/actions/workflows/release.yml`
@@ -246,7 +262,7 @@ function verifyWorkspaceVersions(expected) {
 }
 
 function validateRelease() {
-  execute("pnpm", ["release:validate"]);
+  execute("corepack", ["pnpm", "release:validate"]);
 }
 
 function pendingFiles() {
@@ -291,8 +307,8 @@ export function main(argv = process.argv.slice(2)) {
 
     assertCommand("git");
     assertCommand("gh");
-    assertCommand("pnpm");
-    if (output("git", ["rev-parse", "--show-toplevel"]) !== root) {
+    assertCommand("corepack");
+    if (canonicalPath(output("git", ["rev-parse", "--show-toplevel"])) !== canonicalPath(root)) {
       throw new Error(`Run the release from the repository root: ${root}`);
     }
     const currentBranch = output("git", ["branch", "--show-current"]);
@@ -387,7 +403,7 @@ export function main(argv = process.argv.slice(2)) {
     );
     console.log(`Workflow: ${RELEASE_WORKFLOW}`);
     console.log(
-      `Artifacts: dim-${tag}-linux-x86_64.tar.gz and dim-${tag}-linux-x86_64.tar.gz.sha256`
+      `Artifacts: eclipse-${tag}-linux-x86_64.tar.gz and eclipse-${tag}-linux-x86_64.tar.gz.sha256`
     );
     console.log(
       `Container: ghcr.io/${repository.toLowerCase()}:${targetVersion}`

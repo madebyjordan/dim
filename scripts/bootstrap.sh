@@ -2,18 +2,19 @@
 
 set -euo pipefail
 
-DIM_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ECLIPSE_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ECLIPSE_RELEASE_BUILD=false
-DIM_SKIP_UI=false
-DIM_SKIP_RUST=false
-DIM_WINDOWS=false
+ECLIPSE_SKIP_UI=false
+ECLIPSE_SKIP_RUST=false
+ECLIPSE_WINDOWS=false
+ECLIPSE_STAGE_FILE=""
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) DIM_WINDOWS=true ;;
+    MINGW*|MSYS*|CYGWIN*) ECLIPSE_WINDOWS=true ;;
 esac
 
 usage() {
-    echo "Usage: ./scripts/bootstrap.sh [--release] [--skip-ui] [--skip-rust]"
+    echo "Usage: ./scripts/bootstrap.sh [--release] [--skip-ui] [--skip-rust] [--stage-file PATH]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -22,10 +23,15 @@ while [[ $# -gt 0 ]]; do
             ECLIPSE_RELEASE_BUILD=true
             ;;
         --skip-ui)
-            DIM_SKIP_UI=true
+            ECLIPSE_SKIP_UI=true
             ;;
         --skip-rust)
-            DIM_SKIP_RUST=true
+            ECLIPSE_SKIP_RUST=true
+            ;;
+        --stage-file)
+            [[ $# -ge 2 ]] || { echo "--stage-file requires a path." >&2; exit 2; }
+            ECLIPSE_STAGE_FILE=$2
+            shift
             ;;
         -h|--help)
             usage
@@ -40,6 +46,11 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+set_stage() {
+    [[ -n "$ECLIPSE_STAGE_FILE" ]] || return 0
+    printf '%s\n' "$1" > "$ECLIPSE_STAGE_FILE"
+}
+
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "Missing required command: $1" >&2
@@ -51,7 +62,7 @@ require_command git
 require_command ffmpeg
 require_command ffprobe
 
-if [[ "$DIM_SKIP_UI" == false ]]; then
+if [[ "$ECLIPSE_SKIP_UI" == false ]]; then
     require_command node
     require_command corepack
 
@@ -59,17 +70,17 @@ if [[ "$DIM_SKIP_UI" == false ]]; then
         const [major, minor, patch] = process.versions.node.split(".").map(Number);
         process.exit(major === 24 && (minor > 19 || (minor === 19 && patch >= 0)) ? 0 : 1);
     '; then
-        echo "Dim requires Node.js 24.19.0 or newer in the 24.x line; found $(node --version)." >&2
+        echo "Eclipse requires Node.js 24.19.0 or newer in the 24.x line; found $(node --version)." >&2
         exit 1
     fi
 fi
 
-if [[ "$DIM_SKIP_RUST" == false ]]; then
+if [[ "$ECLIPSE_SKIP_RUST" == false ]]; then
     require_command cargo
     require_command rustc
 fi
 
-cd "$DIM_ROOT_DIR"
+cd "$ECLIPSE_ROOT_DIR"
 mkdir -p utils
 
 link_media_tool() {
@@ -84,7 +95,7 @@ link_media_tool() {
             exit 1
         fi
         echo "Using existing $destination"
-    elif [[ "$DIM_WINDOWS" == true ]]; then
+    elif [[ "$ECLIPSE_WINDOWS" == true ]]; then
         cp "$source_path" "$destination"
         chmod +x "$destination"
     else
@@ -92,47 +103,53 @@ link_media_tool() {
     fi
 }
 
-DIM_MEDIA_SUFFIX=""
-DIM_BINARY_SUFFIX=""
-if [[ "$DIM_WINDOWS" == true ]]; then
-    DIM_MEDIA_SUFFIX=".exe"
-    DIM_BINARY_SUFFIX=".exe"
+ECLIPSE_MEDIA_SUFFIX=""
+ECLIPSE_BINARY_SUFFIX=""
+if [[ "$ECLIPSE_WINDOWS" == true ]]; then
+    ECLIPSE_MEDIA_SUFFIX=".exe"
+    ECLIPSE_BINARY_SUFFIX=".exe"
 fi
 
-link_media_tool ffmpeg "utils/ffmpeg$DIM_MEDIA_SUFFIX"
-link_media_tool ffprobe "utils/ffprobe$DIM_MEDIA_SUFFIX"
+link_media_tool ffmpeg "utils/ffmpeg$ECLIPSE_MEDIA_SUFFIX"
+link_media_tool ffprobe "utils/ffprobe$ECLIPSE_MEDIA_SUFFIX"
 
-if [[ "$DIM_SKIP_UI" == false ]]; then
+if [[ "$ECLIPSE_SKIP_UI" == false ]]; then
+    set_stage "Installing frontend dependencies"
     echo "Installing locked Eclipse dependencies..."
     corepack pnpm --dir eclipse install --frozen-lockfile
+    set_stage "Building frontend"
     corepack pnpm --dir eclipse build
 fi
 
-if [[ "$DIM_SKIP_RUST" == false ]]; then
-    DIM_CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$DIM_ROOT_DIR/target"}
-    if [[ "$DIM_CARGO_TARGET_DIR" != /* ]]; then
-        DIM_CARGO_TARGET_DIR="$DIM_ROOT_DIR/$DIM_CARGO_TARGET_DIR"
+if [[ "$ECLIPSE_SKIP_RUST" == false ]]; then
+    ECLIPSE_CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ECLIPSE_ROOT_DIR/target"}
+    if [[ "$ECLIPSE_CARGO_TARGET_DIR" != /* ]]; then
+        ECLIPSE_CARGO_TARGET_DIR="$ECLIPSE_ROOT_DIR/$ECLIPSE_CARGO_TARGET_DIR"
     fi
-    export CARGO_TARGET_DIR="$DIM_CARGO_TARGET_DIR"
+    export CARGO_TARGET_DIR="$ECLIPSE_CARGO_TARGET_DIR"
 
-    DIM_CARGO_ARGS=(build --locked)
-    DIM_BINARY_PATH="$CARGO_TARGET_DIR/debug/dim$DIM_BINARY_SUFFIX"
-    DIM_RUN_SUFFIX=""
+    ECLIPSE_CARGO_ARGS=(build --locked)
+    ECLIPSE_BINARY_PATH="$CARGO_TARGET_DIR/debug/eclipse$ECLIPSE_BINARY_SUFFIX"
+    ECLIPSE_RUN_SUFFIX=""
     if [[ "$ECLIPSE_RELEASE_BUILD" == true ]]; then
-        DIM_CARGO_ARGS+=(--release)
-        DIM_BINARY_PATH="$CARGO_TARGET_DIR/release/dim$DIM_BINARY_SUFFIX"
-        DIM_RUN_SUFFIX=" --release"
+        ECLIPSE_CARGO_ARGS+=(--release)
+        ECLIPSE_BINARY_PATH="$CARGO_TARGET_DIR/release/eclipse$ECLIPSE_BINARY_SUFFIX"
+        ECLIPSE_RUN_SUFFIX=" --release"
     fi
 
-    echo "Building Dim..."
-    cargo "${DIM_CARGO_ARGS[@]}"
+    set_stage "Building Eclipse backend"
+    echo "Building Eclipse..."
+    cargo "${ECLIPSE_CARGO_ARGS[@]}"
 
+    set_stage "Preparing runtime"
     if [[ "$ECLIPSE_RELEASE_BUILD" == true ]]; then
         mkdir -p "$CARGO_TARGET_DIR/release/utils"
-        link_media_tool ffmpeg "$CARGO_TARGET_DIR/release/utils/ffmpeg$DIM_MEDIA_SUFFIX"
-        link_media_tool ffprobe "$CARGO_TARGET_DIR/release/utils/ffprobe$DIM_MEDIA_SUFFIX"
+        link_media_tool ffmpeg "$CARGO_TARGET_DIR/release/utils/ffmpeg$ECLIPSE_MEDIA_SUFFIX"
+        link_media_tool ffprobe "$CARGO_TARGET_DIR/release/utils/ffprobe$ECLIPSE_MEDIA_SUFFIX"
     fi
 
-    echo "Dim is ready at $DIM_BINARY_PATH"
-    echo "Run it with pnpm dev$DIM_RUN_SUFFIX"
+    echo "Eclipse is ready at $ECLIPSE_BINARY_PATH"
+    echo "Run it with corepack pnpm dev$ECLIPSE_RUN_SUFFIX"
 fi
+
+set_stage "Complete"

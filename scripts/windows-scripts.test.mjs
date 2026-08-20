@@ -16,6 +16,19 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
+const bash =
+  process.platform === "win32"
+    ? resolve(
+        process.env.ProgramFiles ?? "C:/Program Files",
+        "Git/bin/bash.exe",
+      )
+    : "/bin/bash";
+
+function bashPath(path) {
+  if (process.platform !== "win32") return path;
+  const normalized = path.replaceAll("\\", "/");
+  return `/${normalized[0].toLowerCase()}${normalized.slice(2)}`;
+}
 
 function executable(path, source = "#!/usr/bin/env bash\nexit 0\n") {
   writeFileSync(path, source);
@@ -60,25 +73,39 @@ function fixture() {
     bin,
     env: {
       ...process.env,
-      PATH: `${bin}:/usr/bin:/bin`,
-      WINDOWS_SCRIPT_FIXTURE: directory,
+      PATH: `${bashPath(bin)}:/usr/bin:/bin`,
+      WINDOWS_SCRIPT_FIXTURE: bashPath(directory),
+      WINDOWS_SCRIPT_BIN: bashPath(bin),
     },
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
   };
 }
 
+function runBash(item, args) {
+  return spawnSync(
+    bash,
+    [
+      "-c",
+      'export PATH="$WINDOWS_SCRIPT_BIN:$PATH"; exec "$@"',
+      "bash",
+      ...args,
+    ],
+    {
+      cwd: item.repository,
+      env: item.env,
+      encoding: "utf8",
+    },
+  );
+}
+
 test("Windows bootstrap copies media executables and preserves existing copies", () => {
   const item = fixture();
   try {
-    const first = spawnSync(
-      "/bin/bash",
-      ["./scripts/bootstrap.sh", "--skip-ui", "--skip-rust"],
-      {
-        cwd: item.repository,
-        env: item.env,
-        encoding: "utf8",
-      },
-    );
+    const first = runBash(item, [
+      "./scripts/bootstrap.sh",
+      "--skip-ui",
+      "--skip-rust",
+    ]);
     assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
 
     const ffmpeg = resolve(item.repository, "utils/ffmpeg.exe");
@@ -96,15 +123,11 @@ test("Windows bootstrap copies media executables and preserves existing copies",
 
     writeFileSync(ffmpeg, "preserved ffmpeg\n");
     chmodSync(ffmpeg, 0o755);
-    const second = spawnSync(
-      "/bin/bash",
-      ["./scripts/bootstrap.sh", "--skip-ui", "--skip-rust"],
-      {
-        cwd: item.repository,
-        env: item.env,
-        encoding: "utf8",
-      },
-    );
+    const second = runBash(item, [
+      "./scripts/bootstrap.sh",
+      "--skip-ui",
+      "--skip-rust",
+    ]);
     assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
     assert.equal(readFileSync(ffmpeg, "utf8"), "preserved ffmpeg\n");
   } finally {
@@ -112,33 +135,33 @@ test("Windows bootstrap copies media executables and preserves existing copies",
   }
 });
 
-test("Windows run script launches dim.exe from the release runtime directory", () => {
+test("Windows run script launches eclipse.exe from the release runtime directory", () => {
   const item = fixture();
   try {
     const release = resolve(item.repository, "target/release");
     mkdirSync(release, { recursive: true });
     executable(
-      resolve(release, "dim.exe"),
+      resolve(release, "eclipse.exe"),
       `#!/usr/bin/env bash
 pwd > "$WINDOWS_SCRIPT_FIXTURE/runtime.cwd"
 printf '%s\\n' "$*" > "$WINDOWS_SCRIPT_FIXTURE/runtime.args"
 `,
     );
 
-    const result = spawnSync(
-      "/bin/bash",
-      ["./scripts/run.sh", "--release", "--bind-address", "127.0.0.1"],
-      {
-        cwd: item.repository,
-        env: item.env,
-        encoding: "utf8",
-      },
-    );
+    const result = runBash(item, [
+      "./scripts/run.sh",
+      "--release",
+      "--bind-address",
+      "127.0.0.1",
+    ]);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.equal(
-      readFileSync(resolve(item.directory, "runtime.cwd"), "utf8").trim(),
-      realpathSync(release),
-    );
+    const runtimeCwd = readFileSync(
+      resolve(item.directory, "runtime.cwd"),
+      "utf8",
+    ).trim();
+    if (process.platform === "win32")
+      assert.match(runtimeCwd, /\/repo\/target\/release$/);
+    else assert.equal(runtimeCwd, realpathSync(release));
     assert.equal(
       readFileSync(resolve(item.directory, "runtime.args"), "utf8"),
       "--bind-address 127.0.0.1\n",
@@ -146,4 +169,13 @@ printf '%s\\n' "$*" > "$WINDOWS_SCRIPT_FIXTURE/runtime.args"
   } finally {
     item.cleanup();
   }
+});
+
+test("runtime scripts no longer assume a dim executable", () => {
+  const bootstrap = readFileSync(resolve(root, "scripts/bootstrap.sh"), "utf8");
+  const run = readFileSync(resolve(root, "scripts/run.sh"), "utf8");
+  assert.match(bootstrap, /release\/eclipse\$ECLIPSE_BINARY_SUFFIX/);
+  assert.match(run, /ECLIPSE_PROFILE\/eclipse\$ECLIPSE_BINARY_SUFFIX/);
+  assert.doesNotMatch(bootstrap, /release\/dim\$|release\/dim\.exe/);
+  assert.doesNotMatch(run, /\/dim\$DIM_BINARY_SUFFIX|\/dim\.exe/);
 });

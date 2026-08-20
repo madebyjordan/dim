@@ -474,6 +474,7 @@ mod tests {
             genres: vec!["Comedy".into()],
             rating: Some(0.0),
             duration: None,
+            ..Default::default()
         };
 
         const MATCHER: MovieMatcher = MovieMatcher;
@@ -679,6 +680,7 @@ mod tests {
             genres: vec!["Comedy".into()],
             rating: Some(0.0),
             duration: None,
+            ..Default::default()
         };
 
         let media_id = MATCHER
@@ -766,6 +768,7 @@ mod tests {
             genres: vec!["Comedy".into()],
             rating: Some(0.0),
             duration: None,
+            ..Default::default()
         };
 
         let media_id = MATCHER

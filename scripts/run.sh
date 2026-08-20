@@ -2,39 +2,39 @@
 
 set -euo pipefail
 
-DIM_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-DIM_PROFILE=debug
-DIM_RUNTIME_DIR="$DIM_ROOT_DIR"
-DIM_BINARY_SUFFIX=""
+ECLIPSE_ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ECLIPSE_PROFILE=debug
+ECLIPSE_RUNTIME_DIR="$ECLIPSE_ROOT_DIR"
+ECLIPSE_BINARY_SUFFIX=""
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) DIM_BINARY_SUFFIX=".exe" ;;
+    MINGW*|MSYS*|CYGWIN*) ECLIPSE_BINARY_SUFFIX=".exe" ;;
 esac
 
 if [[ "${1:-}" == "--release" ]]; then
-    DIM_PROFILE=release
+    ECLIPSE_PROFILE=release
     shift
 fi
 
-DIM_CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$DIM_ROOT_DIR/target"}
-if [[ "$DIM_CARGO_TARGET_DIR" != /* ]]; then
-    DIM_CARGO_TARGET_DIR="$DIM_ROOT_DIR/$DIM_CARGO_TARGET_DIR"
+ECLIPSE_CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ECLIPSE_ROOT_DIR/target"}
+if [[ "$ECLIPSE_CARGO_TARGET_DIR" != /* ]]; then
+    ECLIPSE_CARGO_TARGET_DIR="$ECLIPSE_ROOT_DIR/$ECLIPSE_CARGO_TARGET_DIR"
 fi
 
-DIM_BINARY="$DIM_CARGO_TARGET_DIR/$DIM_PROFILE/dim$DIM_BINARY_SUFFIX"
-if [[ "$DIM_PROFILE" == release ]]; then
-    DIM_RUNTIME_DIR="$DIM_CARGO_TARGET_DIR/release"
+ECLIPSE_BINARY="$ECLIPSE_CARGO_TARGET_DIR/$ECLIPSE_PROFILE/eclipse$ECLIPSE_BINARY_SUFFIX"
+if [[ "$ECLIPSE_PROFILE" == release ]]; then
+    ECLIPSE_RUNTIME_DIR="$ECLIPSE_CARGO_TARGET_DIR/release"
 fi
 
-if [[ ! -x "$DIM_BINARY" ]]; then
-    DIM_BOOTSTRAP_SUFFIX=""
-    if [[ "$DIM_PROFILE" == release ]]; then
-        DIM_BOOTSTRAP_SUFFIX=" --release"
+if [[ ! -x "$ECLIPSE_BINARY" ]]; then
+    ECLIPSE_BOOTSTRAP_SUFFIX=""
+    if [[ "$ECLIPSE_PROFILE" == release ]]; then
+        ECLIPSE_BOOTSTRAP_SUFFIX=" --release"
     fi
-    echo "Dim has not been built at $DIM_BINARY." >&2
-    echo "Run pnpm build$DIM_BOOTSTRAP_SUFFIX first." >&2
+    echo "Eclipse has not been built at $ECLIPSE_BINARY." >&2
+    echo "Run corepack pnpm build$ECLIPSE_BOOTSTRAP_SUFFIX first." >&2
     exit 1
 fi
 
-cd "$DIM_RUNTIME_DIR"
-exec "$DIM_BINARY" "$@"
+cd "$ECLIPSE_RUNTIME_DIR"
+exec "$ECLIPSE_BINARY" "$@"

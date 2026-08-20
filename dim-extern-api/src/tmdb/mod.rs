@@ -93,6 +93,9 @@ mod tests {
             title: "Letterkenny".into(),
             description: Some("Letterkenny follows Wayne, a good-ol’ country boy in Letterkenny, Ontario trying to protect his homegrown way of life on the farm, against a world that is constantly evolving around him. The residents of Letterkenny belong to one of three groups: Hicks, Skids, and Hockey Players. The three groups are constantly feuding with each other over seemingly trivial matters; often ending with someone getting their ass kicked.".into()),
             release_date: Some(dt),
+            end_date: None,
+            ongoing: None,
+            season_count: None,
             posters: vec!["https://image.tmdb.org/t/p/w600_and_h900_bestv2/yvQGoc9GGTfOyPty5ASShT9tPBD.jpg".into()], 
             backdrops: vec!["https://image.tmdb.org/t/p/original/wdHK7RZNIGfskbGCIusSKN3vto6.jpg".into()], 
             genres: vec!["Comedy".into()], 
@@ -205,6 +208,7 @@ mod tests {
             external_id: "1503262".into(), 
             title: Some("Abaddon's Gate".into()),
             description: Some("Holden and his allies must stop Ashford and his team from destroying the Ring, and perhaps all of humanity.".into()),
+            air_date: None,
             episode_number: 13,
             stills: vec!["https://image.tmdb.org/t/p/original/nE5kS7hHGmv3bTGVL1hlsVQKXo4.jpg".into()],
             duration: None

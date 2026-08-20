@@ -63,19 +63,19 @@ jobs:
       - name: Create Cargo target directory
         run: mkdir -p target
 
-      - name: Test Dim
+      - name: Test Eclipse
         run: cargo test --workspace --tests --locked
 
-      - name: Copy dim binaries
+      - name: Copy Eclipse binary
         run: |
-          cp target/release/dim release/dim
-          chmod +x release/dim
+          cp target/release/eclipse release/eclipse
+          chmod +x release/eclipse
 
       - name: Compress release dir
-        run: tar -zcvf release.tar.gz release
+        run: tar -zcvf eclipse-release.tar.gz release
 
       - name: Save artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release
-          path: release.tar.gz
+          name: eclipse-release
+          path: eclipse-release.tar.gz

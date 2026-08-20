@@ -1395,7 +1395,7 @@ pub async fn session_get_stderr(
     let public_errors = errors
         .iter()
         .map(|_| {
-            "Playback processing failed. See the local Dim logs for administrator diagnostics."
+            "Playback processing failed. See the local Eclipse logs for administrator diagnostics."
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({ "errors": public_errors })))

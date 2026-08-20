@@ -75,11 +75,11 @@ impl ScanRun {
         sqlx::query("UPDATE ingestion_scan_root SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP, error = COALESCE(error, 'scanner process restarted before traversal became authoritative') WHERE status = 'running' AND scan_id IN (SELECT id FROM ingestion_scan WHERE status IN ('queued', 'running'))")
             .execute(&mut *tx)
             .await?;
-        let running = sqlx::query("UPDATE ingestion_scan SET status = 'failed', stage = 'failed', finished_at = CURRENT_TIMESTAMP, last_progress_at = CURRENT_TIMESTAMP, error = COALESCE(error, 'Dim restarted before this scan finished; retry the scan') WHERE status = 'running'")
+        let running = sqlx::query("UPDATE ingestion_scan SET status = 'failed', stage = 'failed', finished_at = CURRENT_TIMESTAMP, last_progress_at = CURRENT_TIMESTAMP, error = COALESCE(error, 'Eclipse restarted before this scan finished; retry the scan') WHERE status = 'running'")
             .execute(&mut *tx)
             .await?
             .rows_affected();
-        let queued = sqlx::query("UPDATE ingestion_scan SET status = 'cancelled', stage = 'cancelled', finished_at = CURRENT_TIMESTAMP, last_progress_at = CURRENT_TIMESTAMP, error = COALESCE(error, 'Dim restarted before the scanner worker began; retry the scan') WHERE status = 'queued'")
+        let queued = sqlx::query("UPDATE ingestion_scan SET status = 'cancelled', stage = 'cancelled', finished_at = CURRENT_TIMESTAMP, last_progress_at = CURRENT_TIMESTAMP, error = COALESCE(error, 'Eclipse restarted before the scanner worker began; retry the scan') WHERE status = 'queued'")
             .execute(&mut *tx)
             .await?
             .rows_affected();

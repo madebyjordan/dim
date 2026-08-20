@@ -42,11 +42,11 @@ impl IntoResponse for FileBrowserError {
             Self::NotDirectory => (StatusCode::BAD_REQUEST, "That path is not a folder."),
             Self::PermissionDenied => (
                 StatusCode::FORBIDDEN,
-                "Dim does not have permission to read that folder.",
+                "Eclipse does not have permission to read that folder.",
             ),
             Self::Io => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Dim could not read that folder.",
+                "Eclipse could not read that folder.",
             ),
         };
 

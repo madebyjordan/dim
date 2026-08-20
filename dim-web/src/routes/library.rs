@@ -219,7 +219,7 @@ impl IntoResponse for CreateLibraryError {
             ),
             Self::PermissionDenied => (
                 StatusCode::FORBIDDEN,
-                "Dim does not have permission to read one or more selected folders.",
+                "Eclipse does not have permission to read one or more selected folders.",
             ),
             Self::InvalidMediaType => (
                 StatusCode::BAD_REQUEST,
@@ -231,7 +231,7 @@ impl IntoResponse for CreateLibraryError {
             ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Dim could not create the library.",
+                "Eclipse could not create the library.",
             ),
         };
 
@@ -451,7 +451,7 @@ pub async fn library_patch(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };
@@ -472,7 +472,7 @@ pub async fn library_patch(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not update the library.",
+                "Eclipse could not update the library.",
             );
         }
         if let Err(error) = tx.commit().await {
@@ -480,7 +480,7 @@ pub async fn library_patch(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not update the library.",
+                "Eclipse could not update the library.",
             );
         }
         drop(lock);
@@ -688,7 +688,7 @@ pub async fn library_get_all(State(state): State<AppState>) -> Response {
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };
@@ -709,7 +709,7 @@ pub async fn library_get_one(State(state): State<AppState>, Path(id): Path<i64>)
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };
@@ -746,7 +746,7 @@ pub async fn library_get_media(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };
@@ -786,7 +786,7 @@ pub async fn library_get_media(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };
@@ -822,7 +822,7 @@ pub async fn library_get_unmatched(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };
@@ -838,7 +838,7 @@ pub async fn library_get_unmatched(
             return crate::error::api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             );
         }
     };

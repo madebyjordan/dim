@@ -159,7 +159,7 @@ impl IntoResponse for DimErrorWrapper {
             DimError::DatabaseError { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             ),
             DimError::StreamingError(dim_core::errors::StreamingErrors::SessionDoesntExist) => (
                 StatusCode::NOT_FOUND,
@@ -199,7 +199,7 @@ impl IntoResponse for DimErrorWrapper {
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "Dim could not complete the request.",
+                "Eclipse could not complete the request.",
             ),
         };
         if status_code.is_server_error() {
