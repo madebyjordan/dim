@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -13,7 +14,7 @@ import { tmpdir } from "node:os";
 import { delimiter, resolve } from "node:path";
 import test from "node:test";
 
-import { build, parseBuildArgs } from "./build.mjs";
+import { build, parseBuildArgs, validateMediaTool } from "./build.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -25,9 +26,19 @@ function windowsFixture() {
   const stage = resolve(directory, "stage.txt");
   mkdirSync(bin, { recursive: true });
   mkdirSync(repository);
-  for (const command of ["git.exe", "ffmpeg.exe", "ffprobe.exe"]) {
-    writeFileSync(resolve(bin, command), `${command} fixture\n`);
-  }
+  writeFileSync(resolve(bin, "git.exe"), "git.exe fixture\n");
+  const mediaToolSource = resolve(directory, "media-tool.rs");
+  const mediaTool = resolve(directory, "media-tool.exe");
+  writeFileSync(
+    mediaToolSource,
+    'fn main() { if std::env::args().nth(1).as_deref() != Some("-version") { std::process::exit(2); } let executable = std::env::current_exe().unwrap(); let name = executable.file_name().unwrap().to_string_lossy().to_ascii_lowercase(); let command = if name.starts_with("ffprobe") { "ffprobe" } else { "ffmpeg" }; println!("{command} version fixture 1"); }\n',
+  );
+  const compiled = spawnSync("rustc.exe", [mediaToolSource, "-o", mediaTool], {
+    encoding: "utf8",
+  });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  copyFileSync(mediaTool, resolve(bin, "ffmpeg.exe"));
+  copyFileSync(mediaTool, resolve(bin, "ffprobe.exe"));
   writeFileSync(
     resolve(bin, "corepack.cmd"),
     '@echo off\r\necho %*>>"%BUILD_TEST_LOG%"\r\nif "%BUILD_TEST_FAIL%"=="1" exit /b 37\r\n',
@@ -35,6 +46,8 @@ function windowsFixture() {
   return {
     directory,
     repository,
+    bin,
+    mediaTool,
     log,
     stage,
     env: {
@@ -71,7 +84,7 @@ test("build arguments preserve debug, release, skip, and stage-file behavior", (
 });
 
 test(
-  "native Windows build uses CMD only for Corepack's shim and preserves media tools",
+  "native Windows build validates, reuses offline, and repairs media tools",
   { skip: process.platform !== "win32" },
   async () => {
     const item = windowsFixture();
@@ -92,8 +105,11 @@ test(
       const ffprobe = resolve(item.repository, "utils/ffprobe.exe");
       assert.equal(lstatSync(ffmpeg).isSymbolicLink(), false);
       assert.equal(lstatSync(ffprobe).isSymbolicLink(), false);
-      assert.equal(readFileSync(ffmpeg, "utf8"), "ffmpeg.exe fixture\n");
-      writeFileSync(ffmpeg, "preserved\n");
+      assert.equal(validateMediaTool(ffmpeg).ok, true);
+      assert.equal(validateMediaTool(ffprobe).ok, true);
+
+      rmSync(resolve(item.bin, "ffmpeg.exe"));
+      rmSync(resolve(item.bin, "ffprobe.exe"));
 
       await build({
         root: item.repository,
@@ -101,7 +117,56 @@ test(
         env: item.env,
         platform: "win32",
       });
-      assert.equal(readFileSync(ffmpeg, "utf8"), "preserved\n");
+      assert.equal(validateMediaTool(ffmpeg).ok, true);
+      assert.equal(validateMediaTool(ffprobe).ok, true);
+
+      copyFileSync(item.mediaTool, resolve(item.bin, "ffmpeg.exe"));
+      writeFileSync(ffmpeg, "broken cached executable\n");
+      await build({
+        root: item.repository,
+        args: ["--skip-ui", "--skip-rust"],
+        env: item.env,
+        platform: "win32",
+      });
+      assert.equal(validateMediaTool(ffmpeg).ok, true);
+    } finally {
+      rmSync(item.directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows provisioning follows Scoop shim metadata and copies the real executable",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const item = windowsFixture();
+    try {
+      for (const command of ["ffmpeg", "ffprobe"]) {
+        writeFileSync(
+          resolve(item.bin, `${command}.exe`),
+          "relocated shim cannot execute\n",
+        );
+        writeFileSync(
+          resolve(item.bin, `${command}.shim`),
+          `path = "${item.mediaTool}"\n`,
+        );
+      }
+
+      await build({
+        root: item.repository,
+        args: ["--skip-ui", "--skip-rust"],
+        env: item.env,
+        platform: "win32",
+      });
+
+      assert.equal(
+        validateMediaTool(resolve(item.repository, "utils/ffmpeg.exe")).ok,
+        true,
+      );
+      assert.equal(
+        validateMediaTool(resolve(item.repository, "utils/ffprobe.exe")).ok,
+        true,
+      );
     } finally {
       rmSync(item.directory, { recursive: true, force: true });
     }

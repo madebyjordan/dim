@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   accessSync,
   chmodSync,
@@ -6,10 +6,13 @@ import {
   copyFileSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, extname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -142,7 +145,145 @@ function writeStage(stageFile, stage) {
   if (stageFile) writeFileSync(stageFile, `${stage}\n`);
 }
 
-function ensureMediaTool(source, destination, platform) {
+export function validateMediaTool(
+  executable,
+  { command, env = process.env } = {},
+) {
+  const result = spawnSync(executable, ["-version"], {
+    encoding: "utf8",
+    env,
+    timeout: 15_000,
+    windowsHide: true,
+  });
+  if (result.error) {
+    const detail =
+      result.error.code === "ETIMEDOUT"
+        ? "version check timed out"
+        : result.error.message;
+    return { ok: false, detail };
+  }
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "no diagnostic output")
+      .trim()
+      .split(/\r?\n/, 1)[0];
+    return {
+      ok: false,
+      detail: `version check exited with ${result.status}: ${detail}`,
+    };
+  }
+  const expected = (
+    command ?? basename(executable).replace(/\..*$/, "")
+  ).toLowerCase();
+  const output = `${result.stdout}\n${result.stderr}`.toLowerCase();
+  if (!output.includes(`${expected} version`)) {
+    return {
+      ok: false,
+      detail: `version check did not identify itself as ${expected}`,
+    };
+  }
+  return { ok: true, detail: "" };
+}
+
+function windowsMediaToolCandidates(source) {
+  const candidates = [];
+  const shimFile = source.replace(/\.exe$/i, ".shim");
+  try {
+    const metadata = readFileSync(shimFile, "utf8");
+    const target = metadata.match(/^\s*path\s*=\s*"([^"]+)"\s*$/im)?.[1];
+    if (target) {
+      candidates.push(
+        isAbsolute(target) ? target : resolve(dirname(shimFile), target),
+      );
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  try {
+    candidates.push(realpathSync(source));
+  } catch {
+    candidates.push(source);
+  }
+  return [...new Set(candidates.map((candidate) => resolve(candidate)))];
+}
+
+function provisionWindowsMediaTool(source, destination, { command, env }) {
+  const existing = validateMediaTool(destination, { command, env });
+  if (existing.ok) {
+    console.log(`Using existing ${destination}`);
+    return destination;
+  }
+
+  let discovered = source;
+  if (!discovered) {
+    try {
+      discovered = findExecutable(command, { env, platform: "win32" });
+    } catch (error) {
+      throw new Error(
+        `${destination} is not usable (${existing.detail}) and no replacement ${command} was found. ${error.message}`,
+      );
+    }
+  }
+
+  if (exists(destination)) {
+    console.warn(`Repairing invalid ${destination}: ${existing.detail}`);
+  }
+  mkdirSync(dirname(destination), { recursive: true });
+  const failures = [];
+  for (const candidate of windowsMediaToolCandidates(discovered)) {
+    const temporary = resolve(
+      dirname(destination),
+      `${basename(destination, ".exe")}.provision-${process.pid}-${Date.now()}.exe`,
+    );
+    try {
+      copyFileSync(candidate, temporary);
+      chmodSync(temporary, 0o755);
+      const staged = validateMediaTool(temporary, { command, env });
+      if (!staged.ok) {
+        failures.push(`${candidate}: ${staged.detail}`);
+        continue;
+      }
+      copyFileSync(temporary, destination);
+      const installed = validateMediaTool(destination, { command, env });
+      if (!installed.ok) {
+        throw new Error(
+          `Copied ${command} failed its installed version check: ${installed.detail}`,
+        );
+      }
+      console.log(`Provisioned ${destination} from ${candidate}`);
+      return destination;
+    } catch (error) {
+      failures.push(`${candidate}: ${error.message}`);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  }
+
+  throw new Error(
+    `Could not provision a relocatable ${command} at ${destination}. ${failures.join("; ")}`,
+  );
+}
+
+function exists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function ensureMediaTool(
+  source,
+  destination,
+  platform,
+  { command, env = process.env },
+) {
+  if (platform === "win32") {
+    return provisionWindowsMediaTool(source, destination, { command, env });
+  }
+
   let destinationExists = false;
   try {
     lstatSync(destination);
@@ -163,7 +304,7 @@ function ensureMediaTool(source, destination, platform) {
       );
     }
     console.log(`Using existing ${destination}`);
-    return;
+    return source;
   }
 
   mkdirSync(dirname(destination), { recursive: true });
@@ -173,6 +314,7 @@ function ensureMediaTool(source, destination, platform) {
   } else {
     symlinkSync(source, destination);
   }
+  return source;
 }
 
 export async function build({
@@ -190,8 +332,6 @@ export async function build({
   }
 
   findExecutable("git", { env, platform });
-  const ffmpeg = findExecutable("ffmpeg", { env, platform });
-  const ffprobe = findExecutable("ffprobe", { env, platform });
   const mediaSuffix = platform === "win32" ? ".exe" : "";
   const binarySuffix = platform === "win32" ? ".exe" : "";
 
@@ -219,15 +359,21 @@ export async function build({
   }
 
   mkdirSync(resolve(root, "utils"), { recursive: true });
-  ensureMediaTool(
-    ffmpeg,
+  const ffmpeg = ensureMediaTool(
+    platform === "win32"
+      ? undefined
+      : findExecutable("ffmpeg", { env, platform }),
     resolve(root, `utils/ffmpeg${mediaSuffix}`),
     platform,
+    { command: "ffmpeg", env },
   );
-  ensureMediaTool(
-    ffprobe,
+  const ffprobe = ensureMediaTool(
+    platform === "win32"
+      ? undefined
+      : findExecutable("ffprobe", { env, platform }),
     resolve(root, `utils/ffprobe${mediaSuffix}`),
     platform,
+    { command: "ffprobe", env },
   );
 
   if (!options.skipUi) {
@@ -268,11 +414,13 @@ export async function build({
         ffmpeg,
         resolve(targetDir, `release/utils/ffmpeg${mediaSuffix}`),
         platform,
+        { command: "ffmpeg", env },
       );
       ensureMediaTool(
         ffprobe,
         resolve(targetDir, `release/utils/ffprobe${mediaSuffix}`),
         platform,
+        { command: "ffprobe", env },
       );
     }
 

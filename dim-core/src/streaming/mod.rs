@@ -48,6 +48,10 @@ pub fn ffcheck() -> Vec<Result<Box<str>, &'static str>> {
 
     for program in [*FFMPEG_BIN, *FFPROBE_BIN].iter() {
         if let Ok(output) = Command::new(program).arg("-version").output() {
+            if !output.status.success() {
+                results.push(Err(*program));
+                continue;
+            }
             let stdout = String::from_utf8(output.stdout)
                 .expect("Failed to decode subprocess stdout.")
                 .into_boxed_str();
