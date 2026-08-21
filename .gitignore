@@ -18,7 +18,7 @@ transcoding
 benches/bench_1.mkv
 benches/bench_1.txt
 .env
-
+AGENTS.md
 # UI
 node_modules
 ui/.yarn/install-state.gz

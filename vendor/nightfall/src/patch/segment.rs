@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::BufReader;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -220,7 +218,7 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!(
             "nightfall-sidx-{}.m4s",
-            uuid::Uuid::new_v4().to_hyphenated()
+            uuid::Uuid::new_v4().hyphenated()
         ));
         segment
             .write(&mut File::create(&path).expect("temporary segment should be created"))
@@ -249,41 +247,39 @@ mod tests {
 ///
 /// # Returns
 /// This function will return the index of the current segment.
-pub async fn patch_segment(file: impl AsRef<Path> + Send + 'static, mut seq: u32) -> Result<u32> {
-    spawn_blocking(move || {
-        let f = File::open(&file)?;
-        let size = f.metadata()?.len();
-        let mut reader = BufReader::new(f);
-
-        let mut segments = VecDeque::new();
-        let mut current = reader.stream_position()?;
-
-        while current < size {
-            let (segment, new_position) = Segment::from_reader(&mut reader, size)?;
-            segments.push_back(segment);
-            current = new_position;
+pub async fn patch_segment(file: impl AsRef<Path> + Send + 'static, seq: u32) -> Result<u32> {
+    let file = file.as_ref().to_path_buf();
+    let replacement = super::replacement_path(&file);
+    let result = patch_segment_to(file.clone(), replacement.clone(), seq).await;
+    match result {
+        Ok(next_sequence) => {
+            let replace_result = spawn_blocking(move || {
+                let result = super::replace_atomically(&replacement, &file);
+                if result.is_err() {
+                    let _ = std::fs::remove_file(replacement);
+                }
+                result
+            })
+            .await
+            .map_err(|error| NightfallError::SegmentPatchError(error.to_string()))?;
+            replace_result?;
+            Ok(next_sequence)
         }
-
-        // Sometimes we get partial segments, ie empty segments where the data is actually in the
-        // init segment. This is a problem when hard seeking as we lose out on ~5s of data, thus we
-        // fix by patching the init segment and moving the data over.
-        if segments.len() == 1 && segments[0].is_empty_segment() {
-            return Err(NightfallError::PartialSegment(
-                segments.pop_front().unwrap(),
-            ));
+        Err(error) => {
+            let _ = std::fs::remove_file(replacement);
+            Err(error)
         }
+    }
+}
 
-        let mut f = File::create(&file)?;
-        while let Some(segment) = segments.pop_front() {
-            // Here we normalize the DTS to be equal to the EPT/PTS and we also set the corrent
-            // segment number.
-            segment.gen_styp().set_segno(seq).write(&mut f)?;
-
-            seq += 1;
-        }
-
-        Ok(seq)
-    })
-    .await
-    .unwrap()
+pub async fn patch_segment_to(
+    input: impl AsRef<Path> + Send + 'static,
+    output: impl AsRef<Path> + Send + 'static,
+    seq: u32,
+) -> Result<u32> {
+    let input = input.as_ref().to_path_buf();
+    let output = output.as_ref().to_path_buf();
+    spawn_blocking(move || super::engine::patch_media(&input, &output, seq))
+        .await
+        .map_err(|error| NightfallError::SegmentPatchError(error.to_string()))?
 }

@@ -1654,7 +1654,7 @@ mod tests {
         PlannedTrack {
             manifest: VirtualManifest::new("track".into(), ContentType::Video)
                 .set_duration(Some(60)),
-            context: ProfileContext::default(),
+            context: video_context("h264"),
             profile: PlannedProfile::Video,
         }
     }
@@ -1664,29 +1664,53 @@ mod tests {
             manifest: VirtualManifest::new("track".into(), ContentType::Video)
                 .set_duration(Some(60))
                 .set_segment_durations(vec![5.0, 5.0, 5.0, 5.0]),
-            context: ProfileContext::default(),
+            context: video_context("h264"),
             profile: PlannedProfile::Video,
         }
     }
 
     fn direct_video(id: &str) -> PlannedTrack {
-        let mut context = ProfileContext::default();
-        context.input_ctx.codec = "h264".into();
-        context.output_ctx.codec = "h264".into();
         PlannedTrack {
             manifest: VirtualManifest::new(id.into(), ContentType::Video).set_duration(Some(60)),
-            context,
+            context: video_context("h264"),
             profile: PlannedProfile::DirectVideo,
         }
     }
 
     fn audio_track(id: &str) -> PlannedTrack {
-        let mut context = ProfileContext::default();
-        context.output_ctx.codec = "aac".into();
         PlannedTrack {
             manifest: VirtualManifest::new(id.into(), ContentType::Audio).set_duration(Some(60)),
-            context,
+            context: ProfileContext {
+                file: "unused-test-input".into(),
+                input_ctx: nightfall::profiles::InputCtx {
+                    codec: "aac".into(),
+                    audio_channels: 2,
+                    ..Default::default()
+                },
+                output_ctx: nightfall::profiles::OutputCtx {
+                    codec: "aac".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             profile: PlannedProfile::Audio,
+        }
+    }
+
+    fn video_context(codec: &str) -> ProfileContext {
+        ProfileContext {
+            file: "unused-test-input".into(),
+            input_ctx: nightfall::profiles::InputCtx {
+                codec: codec.into(),
+                pix_fmt: "yuv420p".into(),
+                fps: 24.0,
+                ..Default::default()
+            },
+            output_ctx: nightfall::profiles::OutputCtx {
+                codec: codec.into(),
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
     #[test]
@@ -2139,7 +2163,7 @@ mod tests {
 
     #[tokio::test]
     async fn video_replacement_uses_post_swap_admission_and_retires_the_old_recipe() {
-        nightfall::profiles::profiles_init("/bin/false".into());
+        nightfall::profiles::profiles_init();
         let tracking = StreamTracking::with_policy(TranscodePolicy {
             global_limit: 2,
             per_user_limit: 2,
@@ -2183,7 +2207,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_video_replacement_keeps_the_current_recipe_active() {
-        nightfall::profiles::profiles_init("/bin/false".into());
+        nightfall::profiles::profiles_init();
         let tracking = StreamTracking::with_policy(TranscodePolicy {
             global_limit: 2,
             per_user_limit: 2,
@@ -2225,7 +2249,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_init_replaces_video_without_consuming_another_admission_slot() {
-        nightfall::profiles::profiles_init("/bin/false".into());
+        nightfall::profiles::profiles_init();
         let tracking = StreamTracking::with_policy(TranscodePolicy {
             global_limit: 2,
             per_user_limit: 2,
@@ -2277,7 +2301,7 @@ mod tests {
 
     #[tokio::test]
     async fn wireless_handoff_transfers_matching_local_admission_capacity() {
-        nightfall::profiles::profiles_init("/bin/false".into());
+        nightfall::profiles::profiles_init();
         let tracking = StreamTracking::with_policy(TranscodePolicy {
             global_limit: 1,
             per_user_limit: 1,

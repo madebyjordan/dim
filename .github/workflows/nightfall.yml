@@ -59,7 +59,7 @@ jobs:
           - platform: Linux (CUDA, VAAPI, SSA)
             os: ubuntu-latest
             feature_flags: --all-features
-          - platform: macOS (CUDA, SSA)
+          - platform: macOS (CUDA feature gated off, SSA)
             os: macos-latest
             feature_flags: --no-default-features --features cuda,ssa_transmux
           - platform: Windows (AMF, SSA)

@@ -1,5 +1,6 @@
 use super::ProfileContext;
 use super::ProfileType;
+use super::Representation;
 use super::StreamType;
 use super::TranscodingProfile;
 
@@ -21,17 +22,16 @@ impl TranscodingProfile for H264TransmuxProfile {
         "H264TransmuxProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("video transmux must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
 
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -50,55 +50,15 @@ impl TranscodingProfile for H264TransmuxProfile {
         ]);
         append_video_fps_mode(&mut args, false);
 
-        args.append(&mut vec![
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num,
-        ]);
-
-        // needed so that in progress segments are named `tmp` and then renamed after the data is
-        // on disk.
-        // This in theory practically prevents the web server from returning a segment that is
-        // in progress.
-        args.append(&mut vec![
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
-        ]);
-
-        // args needed so we can distinguish between init fragments for new streams.
-        // Basically on the web seeking works by reloading the entire video because of
-        // discontinuity issues that browsers seem to not ignore like mpv.
-        args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
-
-        args.append(&mut vec![
-            "-hls_time".into(),
-            format!("{:.9}", ctx.output_ctx.segment_duration()),
-        ]);
-
-        args.append(&mut get_discont_flags(&ctx));
-
-        args.append(&mut vec![
-            "-force_key_frames".into(),
-            format!(
-                "expr:gte(t,n_forced*{:.9})",
-                ctx.output_ctx.segment_duration()
-            ),
-        ]);
-
-        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
-        args.append(&mut vec![
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-        ]);
-        args.append(&mut vec!["-hls_segment_filename".into(), seg_name]);
-        args.push(outdir);
-
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions {
+                force_key_frames: true,
+                ..Default::default()
+            },
+        );
+        args
     }
 
     /// This profile technically could work on any codec since the codec is just `copy` here, but
@@ -145,17 +105,16 @@ impl TranscodingProfile for H264TranscodeProfile {
         "H264TranscodeProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("H.264 transcode must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
 
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -167,15 +126,15 @@ impl TranscodingProfile for H264TranscodeProfile {
             "veryfast".into(),
         ];
 
-        if let Some(duration) = ctx.output_ctx.media_duration {
+        if let Some(duration) = hls.window_seconds() {
             args.push("-t".into());
-            args.push(format!("{duration:.6}"));
+            args.push(duration);
         }
         if ctx.output_ctx.force_cfr {
             args.extend(["-r".into(), format!("{:.12}", ctx.input_ctx.fps)]);
         }
 
-        if let Some(filter) = browser_h264_filter(&ctx) {
+        if let Some(filter) = browser_h264_filter(ctx) {
             args.push("-vf".into());
             args.push(filter);
         }
@@ -221,9 +180,9 @@ impl TranscodingProfile for H264TranscodeProfile {
                 // and MSE append even though later segments meet the requested rate.
                 // Keep the same average/quality target while bounding startup bursts.
                 args.push("-maxrate".into());
-                args.push(bitrate.saturating_mul(3).div_ceil(2).to_string());
+                args.push((bitrate * 3).div_ceil(2).to_string());
                 args.push("-bufsize".into());
-                args.push(bitrate.saturating_mul(2).to_string());
+                args.push((bitrate * 2).to_string());
             }
         }
 
@@ -235,53 +194,15 @@ impl TranscodingProfile for H264TranscodeProfile {
         ]);
         append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
 
-        args.append(&mut vec![
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num,
-        ]);
-
-        args.append(&mut get_discont_flags(&ctx));
-
-        // needed so that in progress segments are named `tmp` and then renamed after the data is
-        // on disk.
-        // This in theory practically prevents the web server from returning a segment that is
-        // in progress.
-        args.append(&mut vec![
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
-        ]);
-
-        // args needed so we can distinguish between init fragments for new streams.
-        // Basically on the web seeking works by reloading the entire video because of
-        // discontinuity issues that browsers seem to not ignore like mpv.
-        args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
-        args.append(&mut vec![
-            "-hls_time".into(),
-            format!("{:.9}", ctx.output_ctx.segment_duration()),
-        ]);
-        args.append(&mut vec![
-            "-force_key_frames".into(),
-            format!(
-                "expr:gte(t,n_forced*{:.9})",
-                ctx.output_ctx.segment_duration()
-            ),
-        ]);
-
-        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
-        args.append(&mut vec![
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-        ]);
-        args.append(&mut vec!["-hls_segment_filename".into(), seg_name]);
-        args.push(outdir);
-
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions {
+                force_key_frames: true,
+                ..Default::default()
+            },
+        );
+        args
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
@@ -434,6 +355,7 @@ fn bt709_oetf(sample: f64) -> f64 {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub(crate) fn hardware_h264_contract_supported(ctx: &ProfileContext) -> Result<(), NightfallError> {
     if ctx.output_ctx.codec != "h264" {
         return Err(NightfallError::ProfileNotSupported(
@@ -454,6 +376,7 @@ pub(crate) fn hardware_h264_contract_supported(ctx: &ProfileContext) -> Result<(
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) fn append_h264_output_signalling(args: &mut Vec<String>, ctx: &ProfileContext) {
     if let Some(profile) = ctx.output_ctx.video_profile.as_ref() {
         args.extend(["-profile:v".into(), profile.clone()]);
@@ -499,7 +422,7 @@ impl TranscodingProfile for RawVideoTranscodeProfile {
         "RawVideoTranscodeProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
+    fn build_args(&self, ctx: &ProfileContext, _: &Representation) -> Vec<String> {
         let mut args = vec!["-y".into()];
 
         if let Some(seek) = ctx.input_ctx.seek {
@@ -533,13 +456,13 @@ impl TranscodingProfile for RawVideoTranscodeProfile {
 
             args.append(&mut vec![
                 "-vf".into(),
-                format!("scale={}:{}", height, width),
+                format!("scale={}:{}", width, height),
             ]);
         }
 
         args.append(&mut vec!["-f".into(), "data".into(), "-".into()]);
 
-        Some(args)
+        args
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
@@ -560,22 +483,9 @@ impl TranscodingProfile for RawVideoTranscodeProfile {
     fn is_stdio_stream(&self) -> bool {
         true
     }
-}
 
-pub(super) fn get_discont_flags(ctx: &ProfileContext) -> Vec<String> {
-    // these args are needed if we start a new stream in the middle of a old one, such as when
-    // seeking. These args will reset the base decode ts to equal the earliest presentation
-    // timestamp.
-    if ctx.output_ctx.start_num > 0 {
-        vec![
-            "-hls_segment_options".into(),
-            "movflags=frag_custom+dash+delay_moov+frag_discont".into(),
-        ]
-    } else {
-        vec![
-            "-hls_segment_options".into(),
-            "movflags=frag_custom+dash+delay_moov".into(),
-        ]
+    fn output_container(&self, _: &ProfileContext) -> super::OutputContainer {
+        super::OutputContainer::RawVideo
     }
 }
 
@@ -591,10 +501,12 @@ mod tests {
                 codec: "av1".into(),
                 pix_fmt: "yuv420p10le".into(),
                 profile: "Main".into(),
+                fps: 24.0,
                 ..Default::default()
             },
             output_ctx: super::super::OutputCtx {
                 codec: "h264".into(),
+                outdir: "output".into(),
                 bitrate: Some(10_000_000),
                 width: Some(1920),
                 height: Some(1080),

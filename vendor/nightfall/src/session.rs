@@ -1,31 +1,37 @@
+use crate::event::{
+    ProgressPhase, SessionEventKind, SessionEvents, SessionLifecycle, SessionOutput,
+    SessionProgress,
+};
+use crate::patch::init_segment::patch_init_segment_to;
+use crate::patch::segment::patch_segment_to;
 use crate::profiles::ProfileContext;
 use crate::profiles::StreamType;
 use crate::profiles::TranscodingProfile;
+use crate::NightfallError;
+use crate::Result as NightfallResult;
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::io::Read;
-use std::io::Write;
 use std::path::Path;
-use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
 
-use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Child;
+use tokio::process::ChildStderr;
 use tokio::process::ChildStdout;
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
-
-use tokio_stream::wrappers::LinesStream;
-use tokio_stream::StreamExt;
 
 use tracing::{debug, info};
 
@@ -33,15 +39,9 @@ use tracing::{debug, info};
 /// Basically if within MAX_CHUNKS_AHEAD we do not get a timeout reset we kill the stream.
 /// This can be tuned
 const MAX_CHUNKS_AHEAD: u32 = 15;
-
-// FIXME: This lazy static should be removed in favour of adding a new stats field to a session and
-// sharing it between two threads at max rather than per whole lib.
-lazy_static::lazy_static! {
-    /// This static contains stats about each stream. It is a Map of maps containing k/v pairs
-    /// parsed from the ffmpeg stdout. Each Map is keyed by a session id.
-    pub static ref STREAMING_SESSION: Arc<RwLock<HashMap<String, HashMap<String, String>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-}
+const DIAGNOSTIC_CAPACITY: usize = 64 * 1024;
+const RETAINED_PUBLICATION_GENERATIONS: u64 = 4;
+const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct Session {
     /// Id of a stream in the form of a UUID.
@@ -56,8 +56,6 @@ pub struct Session {
     /// The profile context for this session. This struct contains important information like
     /// target bitrate and container.
     pub profile_ctx: ProfileContext,
-    /// The exit status of the underlying ffmpeg process.
-    pub exit_status: Option<ExitStatus>,
     pub real_segment: u32,
     /// How many chunks have we returned so far since init.mp4 was returned.
     pub chunks_since_init: u32,
@@ -67,9 +65,54 @@ pub struct Session {
     last_chunk: u32,
     hard_timeout: Instant,
     child_pid: Option<u32>,
-    real_process: Option<Child>,
+    process: Option<ManagedProcess>,
+    process_state: ProcessState,
+    publication_generation: u64,
+    diagnostics: Arc<Mutex<DiagnosticRing>>,
+    progress: Arc<RwLock<SessionProgress>>,
+    events: SessionEvents,
+    hard_seeked_at: u32,
+    last_hard_seek: Instant,
+}
 
-    _process: Option<JoinHandle<()>>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProcessState {
+    NotStarted,
+    Running,
+    ExitedSuccessfully,
+    ExitedWithFailure(String),
+    Cancelled,
+}
+
+impl ProcessState {
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::ExitedSuccessfully | Self::ExitedWithFailure(_) | Self::Cancelled
+        )
+    }
+
+    fn lifecycle(&self) -> Option<SessionLifecycle> {
+        match self {
+            Self::NotStarted | Self::Running => None,
+            Self::ExitedSuccessfully => Some(SessionLifecycle::ExitedSuccessfully),
+            Self::ExitedWithFailure(reason) => {
+                Some(SessionLifecycle::ExitedWithFailure(reason.clone()))
+            }
+            Self::Cancelled => Some(SessionLifecycle::Cancelled),
+        }
+    }
+}
+
+enum ProcessCommand {
+    Cancel,
+}
+
+struct ManagedProcess {
+    commands: mpsc::UnboundedSender<ProcessCommand>,
+    state: watch::Receiver<ProcessState>,
+    monitor: JoinHandle<()>,
+    stdout: Option<ChildStdout>,
 }
 
 impl Session {
@@ -79,6 +122,7 @@ impl Session {
         profile_ctx: ProfileContext,
     ) -> Self {
         let profile = profile_chain.pop().expect("Profile chain is empty.");
+        let events = SessionEvents::new();
 
         Self {
             id,
@@ -88,43 +132,53 @@ impl Session {
             chunk_size: profile_ctx.output_ctx.target_gop,
             profile_ctx,
             last_chunk: 0,
-            _process: None,
             is_throttled: false,
             has_started: false,
             child_pid: None,
-            real_process: None,
+            process: None,
+            process_state: ProcessState::NotStarted,
+            publication_generation: 0,
+            diagnostics: Arc::new(Mutex::new(DiagnosticRing::default())),
+            progress: Arc::new(RwLock::new(SessionProgress::default())),
+            events,
             hard_timeout: Instant::now() + Duration::from_secs(30 * 60),
             chunks_since_init: 0,
-            exit_status: None,
+            hard_seeked_at: 0,
+            last_hard_seek: Instant::now(),
         }
     }
 
-    pub async fn start(&mut self) -> Result<(), io::Error> {
+    #[cfg(all(test, unix))]
+    pub fn subscribe(&self) -> crate::event::SessionSubscription {
+        self.events.subscribe()
+    }
+
+    pub(crate) fn event_source(&self) -> SessionEvents {
+        self.events.clone()
+    }
+
+    pub fn notify_removed(&self) {
+        self.events
+            .emit(SessionEventKind::Lifecycle(SessionLifecycle::Removed));
+    }
+
+    pub async fn start(&mut self) -> NightfallResult<()> {
+        if self.process.is_some() {
+            return Err(NightfallError::InvalidContext(
+                "FFmpeg process is already assigned to this session".into(),
+            ));
+        }
         let started_at = Instant::now();
+        let command = self.profile.build(self.profile_ctx.clone())?;
         std::fs::create_dir_all(&self.profile_ctx.output_ctx.outdir)?;
         crate::profiles::video::prepare_hdr_luts(&self.profile_ctx)?;
-        let args = self
-            .profile
-            .build(self.profile_ctx.clone())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "FFmpeg profile rejected the source",
-                )
-            })?;
-
-        let log_file = format!(
-            "{}/ffmpeg_{}.log",
-            &self.profile_ctx.output_ctx.outdir,
-            self.profile.tag()
-        );
-
-        let mut stderr = File::create(log_file)?;
-        let _ = stderr.write(args.as_slice().join(" ").as_ref());
-        let _ = stderr.write(b"\n");
-        let _ = stderr.flush();
-
-        let stderr: Stdio = stderr.into();
+        let args = command.args();
+        let diagnostics = Arc::new(Mutex::new(DiagnosticRing::default()));
+        diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .append(format!("{} {}\n", command.executable(), args.join(" ")).as_bytes());
+        self.diagnostics = diagnostics.clone();
 
         let stdout: Stdio = if self.profile.stream_type() == StreamType::Subtitle {
             File::create(format!("{}/stream", &self.profile_ctx.output_ctx.outdir))?.into()
@@ -132,46 +186,82 @@ impl Session {
             Stdio::piped()
         };
 
-        let mut process = Command::new(self.profile_ctx.ffmpeg_bin.clone())
+        let mut process = Command::new(command.executable())
             .kill_on_drop(true)
             .stdout(stdout)
-            .stderr(stderr)
+            .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .args(args.as_slice())
+            .args(args)
             .spawn()?;
 
-        self.child_pid = process.id();
-        self.exit_status = None;
+        let pid = process.id().ok_or_else(|| {
+            io::Error::other("spawned FFmpeg process did not expose a process id")
+        })?;
+        self.child_pid = Some(pid);
         self.has_started = true;
         self.is_throttled = false;
+        self.process_state = ProcessState::Running;
 
         info!(
             process_id = self.id,
             pid = self.child_pid,
             profile = self.profile.tag(),
             start_segment = self.start_num(),
-            start_seconds = self.start_num() * self.chunk_size,
+            start_seconds = u64::from(self.start_num()) * u64::from(self.chunk_size),
             elapsed_ms = started_at.elapsed().as_millis(),
             ffmpeg = %self.profile_ctx.ffmpeg_bin,
             "Nightfall FFmpeg process started"
         );
         debug!(pid = self.child_pid, ffmpeg = %self.profile_ctx.ffmpeg_bin, ?args, "Started ffmpeg");
 
-        if !self.profile.is_stdio_stream() {
-            if let (Some(stdout), Some(pid)) = (process.stdout.take(), self.child_pid) {
-                let stdout_parser_thread = StdoutParser::new(self.id.clone(), stdout, pid);
-
-                self._process = Some(tokio::spawn(stdout_parser_thread.handle()));
-            }
-        }
-        self.real_process = Some(process);
+        let stdout = process.stdout.take();
+        let stderr_parser = process
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(capture_stderr(stderr, diagnostics)));
+        let (stdout, progress_parser) = if self.profile.is_stdio_stream() {
+            (stdout, None)
+        } else {
+            let parser = stdout.map(|stdout| {
+                tokio::spawn(
+                    StdoutParser::new(stdout, self.progress.clone(), self.events.clone()).handle(),
+                )
+            });
+            (None, parser)
+        };
+        let (commands, command_receiver) = mpsc::unbounded_channel();
+        let (state_sender, state) = watch::channel(ProcessState::Running);
+        let monitor_events = self.events.clone();
+        let monitor = tokio::spawn(async move {
+            monitor_process(
+                process,
+                command_receiver,
+                state_sender,
+                monitor_events,
+                progress_parser,
+                stderr_parser,
+            )
+            .await;
+        });
+        self.process = Some(ManagedProcess {
+            commands,
+            state,
+            monitor,
+            stdout,
+        });
+        self.events
+            .emit(SessionEventKind::Lifecycle(SessionLifecycle::Running {
+                pid,
+            }));
 
         Ok(())
     }
 
     // NOTE: This will only work for RawVideo streams.
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.real_process.as_mut().and_then(|x| x.stdout.take())
+        self.process
+            .as_mut()
+            .and_then(|process| process.stdout.take())
     }
 
     pub fn start_num(&self) -> u32 {
@@ -183,76 +273,90 @@ impl Session {
         Some(self.profile.tag())
     }
 
-    pub async fn join(&mut self) {
-        if let Some(mut process) = self.real_process.take() {
-            let _ = process.kill().await;
-            self.exit_status = process.wait().await.ok();
-        }
-        self.child_pid = None;
-        if let Some(process) = self._process.take() {
-            process.abort();
-            let _ = process.await;
-        }
-        if let Ok(mut stats) = STREAMING_SESSION.write() {
-            stats.remove(&self.id);
-        }
-    }
-
-    pub fn stderr(&mut self) -> Option<String> {
-        let file = format!(
-            "{}/ffmpeg_{}.log",
-            &self.profile_ctx.output_ctx.outdir,
-            self.profile.tag()
-        );
-
-        let mut buf = String::new();
-        let _ = File::open(file).ok()?.read_to_string(&mut buf);
-
-        if buf.len() <= 1000 {
-            return Some(buf);
-        }
-
-        Some(
-            buf.chars()
-                .rev()
-                .take(1000)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect(),
-        )
-    }
-
-    pub fn try_wait(&mut self) -> bool {
-        if let Some(ref mut x) = self.real_process {
-            if let Ok(Some(status)) = x.try_wait() {
-                self.exit_status = Some(status);
-                return true;
+    pub async fn join(&mut self) -> NightfallResult<()> {
+        let Some(mut process) = self.process.take() else {
+            if self.process_state == ProcessState::NotStarted {
+                self.process_state = ProcessState::Cancelled;
+                self.events
+                    .emit(SessionEventKind::Lifecycle(SessionLifecycle::Cancelled));
             }
-            self.exit_status = None;
-        }
+            self.child_pid = None;
+            return Ok(());
+        };
 
-        false
+        if *process.state.borrow() == ProcessState::Running {
+            let _ = process.commands.send(ProcessCommand::Cancel);
+        }
+        while !process.state.borrow().is_terminal() {
+            process
+                .state
+                .changed()
+                .await
+                .map_err(|_| NightfallError::Aborted)?;
+        }
+        self.process_state = process.state.borrow().clone();
+        self.child_pid = None;
+
+        if process.monitor.await.is_err() {
+            return Err(NightfallError::Aborted);
+        }
+        Ok(())
+    }
+
+    pub async fn reap_terminal(&mut self) -> NightfallResult<()> {
+        self.refresh_process_state();
+        if self.process_state.is_terminal() {
+            self.join().await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn stderr(&self) -> Option<String> {
+        let diagnostics = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (!diagnostics.is_empty()).then(|| diagnostics.to_string_lossy())
+    }
+
+    pub fn refresh_process_state(&mut self) {
+        if let Some(process) = &self.process {
+            self.process_state = process.state.borrow().clone();
+            if self.process_state.is_terminal() {
+                self.child_pid = None;
+            }
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        matches!(self.process_state, ProcessState::ExitedWithFailure(_))
+    }
+
+    pub fn terminal_output_error(&self, path: &str) -> Option<NightfallError> {
+        match &self.process_state {
+            ProcessState::ExitedSuccessfully => Some(NightfallError::MissingOutput(path.into())),
+            ProcessState::ExitedWithFailure(reason) => {
+                Some(NightfallError::TranscodeFailed(reason.clone()))
+            }
+            ProcessState::Cancelled => Some(NightfallError::TranscodeCancelled),
+            ProcessState::NotStarted | ProcessState::Running => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.process.as_ref().map_or_else(
+            || self.process_state.is_terminal(),
+            |process| process.state.borrow().is_terminal(),
+        )
     }
 
     pub fn is_hard_timeout(&self) -> bool {
         Instant::now() > self.hard_timeout
     }
 
-    pub fn set_timeout(&mut self) {
-        self.hard_timeout = Instant::now();
-    }
-
     pub fn delete_tmp(&self) {
         let _ = fs::remove_dir_all(&self.profile_ctx.output_ctx.outdir);
-    }
-
-    pub fn is_dead(&self) -> bool {
-        if let Some(x) = self.child_pid {
-            return crate::utils::is_process_effectively_dead(x);
-        }
-
-        true
     }
 
     pub fn pause(&mut self) {
@@ -260,6 +364,10 @@ impl Session {
             if !self.is_throttled {
                 crate::utils::pause_proc(x as i32);
                 self.is_throttled = true;
+                self.events
+                    .emit(SessionEventKind::Lifecycle(SessionLifecycle::Paused {
+                        pid: x,
+                    }));
             }
         }
     }
@@ -269,50 +377,40 @@ impl Session {
             if self.is_throttled {
                 crate::utils::cont_proc(x as i32);
                 self.is_throttled = false;
+                self.events
+                    .emit(SessionEventKind::Lifecycle(SessionLifecycle::Running {
+                        pid: x,
+                    }));
             }
         }
     }
 
-    pub fn get_key(&self, k: &str) -> Option<String> {
-        let session = STREAMING_SESSION.read().unwrap();
-        session.get(&self.id)?.get(k).cloned()
+    fn progress(&self) -> SessionProgress {
+        self.progress
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn current_chunk(&self) -> u32 {
         let frame_rate = self.profile_ctx.input_ctx.fps.max(1.0);
-        let frame = match self.profile.stream_type() {
-            StreamType::Audio => {
-                self.get_key("out_time_us")
-                    .map(|x| x.parse::<u64>().unwrap_or(0))
-                    .unwrap_or(0)
-                    / 1000
-                    / 1000
-                    * frame_rate as u64
-            }
-            StreamType::Video => self
-                .get_key("frame")
-                .map(|x| x.parse::<u64>().unwrap_or(0))
-                .unwrap_or(0),
-            _ => 0,
-        } as u32;
-
+        let progress = self.progress();
         match self.profile.stream_type() {
             StreamType::Audio => {
-                (frame / (self.chunk_size as f64 * frame_rate) as u32).max(self.last_chunk)
+                let seconds = progress.out_time_us.unwrap_or(0) as f64 / 1_000_000.0;
+                saturating_u32(seconds / f64::from(self.chunk_size.max(1))).max(self.last_chunk)
             }
             StreamType::Video => {
-                frame / (self.chunk_size as f64 * frame_rate) as u32
-                    + self.profile_ctx.output_ctx.start_num
+                let relative = progress.frame.unwrap_or(0) as f64
+                    / (f64::from(self.chunk_size.max(1)) * frame_rate);
+                saturating_u32(relative).saturating_add(self.profile_ctx.output_ctx.start_num)
             }
             _ => 0,
         }
     }
 
     pub fn raw_speed(&self) -> f64 {
-        self.get_key("speed")
-            .map(|x| x.trim_end_matches('x').to_string())
-            .and_then(|x| x.parse::<f64>().ok())
-            .unwrap_or(1.0)
+        self.progress().speed.unwrap_or(1.0)
     }
 
     pub fn effective_raw_speed(&self) -> f64 {
@@ -348,24 +446,44 @@ impl Session {
             return None;
         }
 
-        let file = format!("{}/{}", &self.profile_ctx.output_ctx.outdir, file);
+        let name = file;
+        let file = format!("{}/{}", &self.profile_ctx.output_ctx.outdir, name);
         let path = Path::new(&file);
 
         // NOTE: This will not check if the ffmpeg process is dead, thus this will return immediately
         if path.is_file() {
-            return path.to_str().map(ToString::to_string);
+            let path = path.to_str().map(ToString::to_string)?;
+            self.events
+                .emit(SessionEventKind::Output(SessionOutput::Subtitle {
+                    name,
+                    path: path.clone(),
+                }));
+            return Some(path);
         }
 
         None
     }
 
     pub fn is_timeout(&self) -> bool {
-        self.current_chunk() > self.last_chunk + MAX_CHUNKS_AHEAD
+        self.current_chunk() > self.last_chunk.saturating_add(MAX_CHUNKS_AHEAD)
     }
 
     pub fn reset_timeout(&mut self, last_requested: u32) {
         self.last_chunk = last_requested;
         self.hard_timeout = Instant::now() + Duration::from_secs(30 * 60);
+    }
+
+    pub fn hard_seeked_at(&self) -> u32 {
+        self.hard_seeked_at
+    }
+
+    pub fn last_hard_seek(&self) -> Instant {
+        self.last_hard_seek
+    }
+
+    pub fn record_hard_seek(&mut self, chunk: u32) {
+        self.hard_seeked_at = chunk;
+        self.last_hard_seek = Instant::now();
     }
 
     pub fn chunk_to_path(&self, chunk_num: u32) -> String {
@@ -387,18 +505,156 @@ impl Session {
         )
     }
 
+    fn publication_dir(&self) -> String {
+        format!(
+            "{}/published-{}",
+            self.profile_ctx.output_ctx.outdir, self.publication_generation
+        )
+    }
+
+    pub fn published_chunk(&self, chunk_num: u32) -> String {
+        format!("{}/{}.m4s", self.publication_dir(), chunk_num)
+    }
+
+    pub fn published_init(&self, start_num: u32) -> String {
+        format!("{}/{}_init.mp4", self.publication_dir(), start_num)
+    }
+
+    pub fn normalized_init(&self) -> String {
+        format!("{}/normalized_init.mp4", self.publication_dir())
+    }
+
+    pub async fn publish_init(&mut self, start_num: u32) -> NightfallResult<String> {
+        let published = self.published_init(start_num);
+        if Path::new(&published).is_file() {
+            self.chunks_since_init = 0;
+            return Ok(published);
+        }
+
+        let normalized = self.normalized_init();
+        let source = if Path::new(&normalized).is_file() {
+            normalized
+        } else {
+            self.custom_init_seg(start_num)
+        };
+        crate::patch::publish_copy(source, published.clone()).await?;
+        self.chunks_since_init = 0;
+        self.events
+            .emit(SessionEventKind::Output(SessionOutput::Init {
+                start_num,
+                path: published.clone(),
+            }));
+        Ok(published)
+    }
+
+    pub async fn publish_chunk(&mut self, chunk_num: u32) -> NightfallResult<String> {
+        let published = self.published_chunk(chunk_num);
+        if Path::new(&published).is_file() {
+            return Ok(published);
+        }
+
+        let raw = self.chunk_to_path(chunk_num);
+        let next_sequence =
+            match patch_segment_to(raw.clone(), published.clone(), self.real_segment).await {
+                Ok(next_sequence) => Some(next_sequence),
+                Err(NightfallError::PartialSegment(_)) if self.chunks_since_init >= 1 => Some(
+                    patch_init_segment_to(
+                        self.init_seg(),
+                        published.clone(),
+                        self.normalized_init(),
+                        self.real_segment,
+                    )
+                    .await?,
+                ),
+                Err(NightfallError::PartialSegment(_)) => {
+                    crate::patch::publish_copy(raw, published.clone()).await?;
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+
+        if let Some(next_sequence) = next_sequence {
+            self.real_segment = next_sequence;
+        }
+        self.reset_timeout(chunk_num);
+        self.chunks_since_init += 1;
+        self.events
+            .emit(SessionEventKind::Output(SessionOutput::Segment {
+                chunk: chunk_num,
+                path: published.clone(),
+            }));
+        Ok(published)
+    }
+
     pub fn has_started(&self) -> bool {
         self.has_started
     }
 
-    pub fn reset_to(&mut self, chunk: u32) {
+    pub fn reset_to(&mut self, chunk: u32) -> NightfallResult<()> {
+        if self.process.is_some() {
+            return Err(NightfallError::Aborted);
+        }
+        let next_generation = self.publication_generation.checked_add(1).ok_or_else(|| {
+            NightfallError::InvalidContext("publication generation overflow".into())
+        })?;
+        self.prune_oldest_publication(next_generation)?;
+        self.clear_unpublished_segments()?;
         self.profile_ctx.output_ctx.start_num = chunk;
-        self._process = None;
+        self.process = None;
         self.last_chunk = chunk;
         self.has_started = false;
         self.is_throttled = true;
         self.real_segment = chunk;
         self.child_pid = None;
+        self.process_state = ProcessState::NotStarted;
+        self.publication_generation = next_generation;
+        *self
+            .progress
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = SessionProgress::default();
+        self.events.emit(SessionEventKind::Reset {
+            generation: self.publication_generation,
+            start_num: chunk,
+        });
+        Ok(())
+    }
+
+    fn prune_oldest_publication(&self, next_generation: u64) -> NightfallResult<()> {
+        let Some(expired) = next_generation.checked_sub(RETAINED_PUBLICATION_GENERATIONS) else {
+            return Ok(());
+        };
+        let path =
+            Path::new(&self.profile_ctx.output_ctx.outdir).join(format!("published-{expired}"));
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn clear_unpublished_segments(&self) -> NightfallResult<()> {
+        let outdir = Path::new(&self.profile_ctx.output_ctx.outdir);
+        let entries = match fs::read_dir(outdir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".m4s")
+                || name.ends_with(".m4s.tmp")
+                || name.ends_with("_init.mp4")
+                || name == "playlist.m3u8"
+            {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -417,6 +673,16 @@ fn valid_raw_speed(raw_speed: f64) -> f64 {
     }
 }
 
+fn saturating_u32(value: f64) -> u32 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else if value >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        value.floor() as u32
+    }
+}
+
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
@@ -428,57 +694,184 @@ impl fmt::Debug for Session {
 }
 
 struct StdoutParser {
-    id: String,
     process_stdout: ChildStdout,
-    pid: u32,
+    progress: Arc<RwLock<SessionProgress>>,
+    events: SessionEvents,
 }
 
 impl StdoutParser {
-    fn new(id: String, process_stdout: ChildStdout, pid: u32) -> Self {
+    fn new(
+        process_stdout: ChildStdout,
+        progress: Arc<RwLock<SessionProgress>>,
+        events: SessionEvents,
+    ) -> Self {
         Self {
-            id,
             process_stdout,
-            pid,
+            progress,
+            events,
         }
     }
 
     async fn handle(self) {
-        let mut stdio = LinesStream::new(BufReader::new(self.process_stdout).lines());
-        let mut map: HashMap<String, String> = HashMap::new();
-
-        let interval = tokio::time::interval(Duration::from_millis(100));
-        tokio::pin!(interval);
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if crate::utils::is_process_effectively_dead(self.pid) {
-                        break;
-                    }
-                },
-
-                Some(Ok(v)) = stdio.next() => {
-                    let Some((key, value)) = v.split_once('=') else {
-                        debug!(line = %v, "Ignoring malformed FFmpeg progress output");
-                        continue;
+        let mut stdio = BufReader::new(self.process_stdout).lines();
+        let mut changed = false;
+        while let Ok(Some(line)) = stdio.next_line().await {
+            let Some((key, value)) = line.split_once('=') else {
+                debug!(line = %line, "Ignoring malformed FFmpeg progress output");
+                continue;
+            };
+            let value = value.trim();
+            let mut progress = self
+                .progress
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            changed |= match key {
+                "frame" => update_if_parsed(&mut progress.frame, value),
+                "out_time_us" => update_if_parsed(&mut progress.out_time_us, value),
+                "speed" => update_if_parsed(&mut progress.speed, value.trim_end_matches('x')),
+                "progress" => {
+                    let phase = match value {
+                        "continue" => Some(ProgressPhase::Continue),
+                        "end" => Some(ProgressPhase::End),
+                        _ => None,
                     };
-                    if key.is_empty() {
-                        continue;
+                    let changed = phase.is_some() && progress.phase != phase;
+                    if phase.is_some() {
+                        progress.phase = phase;
                     }
-                    map.insert(key.into(), value.trim().into());
+                    changed
+                }
+                _ => false,
+            };
+            if key == "progress" && changed {
+                let snapshot = progress.clone();
+                drop(progress);
+                self.events.emit(SessionEventKind::Progress(snapshot));
+                changed = false;
+            }
+        }
+        if changed {
+            let snapshot = self
+                .progress
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            self.events.emit(SessionEventKind::Progress(snapshot));
+        }
+    }
+}
 
-                    {
-                        let mut lock = STREAMING_SESSION.write().unwrap();
-                        let _ = lock.insert(self.id.clone(), map.clone());
-                    }
+fn update_if_parsed<T>(target: &mut Option<T>, value: &str) -> bool
+where
+    T: std::str::FromStr + PartialEq,
+{
+    let Ok(value) = value.parse() else {
+        return false;
+    };
+    if target.as_ref() == Some(&value) {
+        return false;
+    }
+    *target = Some(value);
+    true
+}
 
-                    continue;
+async fn monitor_process(
+    mut process: Child,
+    mut commands: mpsc::UnboundedReceiver<ProcessCommand>,
+    state: watch::Sender<ProcessState>,
+    events: SessionEvents,
+    progress_parser: Option<JoinHandle<()>>,
+    stderr_parser: Option<JoinHandle<()>>,
+) {
+    let mut cancelled = false;
+    let terminal = loop {
+        tokio::select! {
+            result = process.wait() => {
+                break match result {
+                    Ok(status) if cancelled => ProcessState::Cancelled,
+                    Ok(status) if status.success() => ProcessState::ExitedSuccessfully,
+                    Ok(status) => ProcessState::ExitedWithFailure(status.to_string()),
+                    Err(error) => ProcessState::ExitedWithFailure(error.to_string()),
+                };
+            }
+            command = commands.recv(), if !cancelled => {
+                cancelled = true;
+                if matches!(command, Some(ProcessCommand::Cancel) | None) {
+                    let _ = process.start_kill();
                 }
             }
         }
+    };
+    finish_pipe_reader(progress_parser).await;
+    finish_pipe_reader(stderr_parser).await;
+    state.send_replace(terminal.clone());
+    if let Some(lifecycle) = terminal.lifecycle() {
+        events.emit(SessionEventKind::Lifecycle(lifecycle));
+    }
+}
 
-        let mut lock = STREAMING_SESSION.write().unwrap();
-        let _ = lock.remove(&self.id);
+async fn finish_pipe_reader(parser: Option<JoinHandle<()>>) {
+    let Some(mut parser) = parser else { return };
+    if tokio::time::timeout(PIPE_DRAIN_TIMEOUT, &mut parser)
+        .await
+        .is_err()
+    {
+        parser.abort();
+        let _ = parser.await;
+    }
+}
+
+#[derive(Debug)]
+struct DiagnosticRing {
+    bytes: VecDeque<u8>,
+}
+
+impl Default for DiagnosticRing {
+    fn default() -> Self {
+        Self {
+            bytes: VecDeque::with_capacity(DIAGNOSTIC_CAPACITY),
+        }
+    }
+}
+
+impl DiagnosticRing {
+    fn append(&mut self, bytes: &[u8]) {
+        if bytes.len() >= DIAGNOSTIC_CAPACITY {
+            self.bytes.clear();
+            self.bytes
+                .extend(bytes[bytes.len() - DIAGNOSTIC_CAPACITY..].iter().copied());
+            return;
+        }
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(DIAGNOSTIC_CAPACITY);
+        self.bytes.drain(..overflow);
+        self.bytes.extend(bytes.iter().copied());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn to_string_lossy(&self) -> String {
+        let bytes = self.bytes.iter().copied().collect::<Vec<_>>();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+async fn capture_stderr(mut stderr: ChildStderr, diagnostics: Arc<Mutex<DiagnosticRing>>) {
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .append(&chunk[..read]);
     }
 }
 
@@ -515,6 +908,7 @@ mod tests {
     use super::*;
     use crate::error::NightfallError;
     use crate::profiles::{ProfileType, TranscodingProfile};
+    use std::io::Read;
 
     #[derive(Debug)]
     struct ShellProfile;
@@ -526,11 +920,12 @@ mod tests {
         fn stream_type(&self) -> StreamType {
             StreamType::Video
         }
-        fn build(&self, _: ProfileContext) -> Option<Vec<String>> {
-            Some(vec![
-                "-c".into(),
-                "echo malformed-progress; sleep 30".into(),
-            ])
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec!["-c".into(), "echo malformed-progress; sleep 30".into()]
         }
         fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
             Ok(())
@@ -554,8 +949,12 @@ mod tests {
         fn stream_type(&self) -> StreamType {
             StreamType::Video
         }
-        fn build(&self, _: ProfileContext) -> Option<Vec<String>> {
-            Some(vec!["-c".into(), "exit 7".into()])
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec!["-c".into(), "exit 7".into()]
         }
         fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
             Ok(())
@@ -569,15 +968,125 @@ mod tests {
     }
     static FAILING_PROFILE: FailingProfile = FailingProfile;
 
+    #[derive(Debug)]
+    struct SuccessfulProfile;
+    impl TranscodingProfile for SuccessfulProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec!["-c".into(), "exit 0".into()]
+        }
+        fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
+            Ok(())
+        }
+        fn tag(&self) -> &str {
+            "successful-shell"
+        }
+        fn name(&self) -> &str {
+            "successful-shell"
+        }
+    }
+    static SUCCESSFUL_PROFILE: SuccessfulProfile = SuccessfulProfile;
+
+    #[derive(Debug)]
+    struct ProgressProfile;
+    impl TranscodingProfile for ProgressProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec![
+                "-c".into(),
+                "printf 'frame=25\\nout_time_us=5000000\\nspeed=0.5x\\nprogress=continue\\n'; sleep 30".into(),
+            ]
+        }
+        fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
+            Ok(())
+        }
+        fn tag(&self) -> &str {
+            "progress-shell"
+        }
+        fn name(&self) -> &str {
+            "progress-shell"
+        }
+    }
+    static PROGRESS_PROFILE: ProgressProfile = ProgressProfile;
+
+    #[derive(Debug)]
+    struct LoudFailureProfile;
+    impl TranscodingProfile for LoudFailureProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec![
+                "-c".into(),
+                "head -c 131072 /dev/zero | tr '\\0' x >&2; printf TAIL >&2; exit 9".into(),
+            ]
+        }
+        fn supports(&self, _: &ProfileContext) -> Result<(), NightfallError> {
+            Ok(())
+        }
+        fn tag(&self) -> &str {
+            "loud-failure-shell"
+        }
+        fn name(&self) -> &str {
+            "loud-failure-shell"
+        }
+    }
+    static LOUD_FAILURE_PROFILE: LoudFailureProfile = LoudFailureProfile;
+
     fn context(outdir: &Path, binary: &str) -> ProfileContext {
         ProfileContext {
+            file: "unused-test-input".into(),
             ffmpeg_bin: binary.into(),
+            input_ctx: crate::profiles::InputCtx {
+                codec: "h264".into(),
+                pix_fmt: "yuv420p".into(),
+                fps: 24.0,
+                ..Default::default()
+            },
             output_ctx: crate::profiles::OutputCtx {
+                codec: "h264".into(),
                 outdir: outdir.to_string_lossy().into_owned(),
                 ..Default::default()
             },
-            ..Default::default()
         }
+    }
+
+    fn write_media_segment(path: &Path, payload: &[u8]) {
+        use mp4::mp4box::{MdatBox, MoofBox};
+
+        let mut segment = crate::patch::segment::Segment::default().gen_styp();
+        segment.moof = Some(MoofBox::default());
+        segment.mdat = Some(MdatBox {
+            data: payload.to_vec(),
+        });
+        segment
+            .write(&mut File::create(path).unwrap())
+            .expect("test segment should be written");
     }
 
     #[tokio::test]
@@ -590,7 +1099,7 @@ mod tests {
         );
         assert!(session.start().await.is_err());
         assert!(!session.has_started());
-        assert!(session.real_process.is_none());
+        assert!(session.process.is_none());
     }
 
     #[tokio::test]
@@ -601,12 +1110,50 @@ mod tests {
             vec![&SHELL_PROFILE],
             context(temp.path(), "/bin/sh"),
         );
+        let mut events = session.subscribe();
         session.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        session.join().await;
-        assert!(session.real_process.is_none());
+        let running = events.changed().await.unwrap();
+        assert!(matches!(
+            running.kind,
+            SessionEventKind::Lifecycle(SessionLifecycle::Running { .. })
+        ));
+        session.join().await.unwrap();
+        let cancelled = events.changed().await.unwrap();
+        assert!(matches!(
+            cancelled.kind,
+            SessionEventKind::Lifecycle(SessionLifecycle::Cancelled)
+        ));
+        assert!(cancelled.revision > running.revision);
+        assert!(session.process.is_none());
         assert!(session.child_pid.is_none());
-        assert!(STREAMING_SESSION.read().unwrap().get("cancel").is_none());
+        assert_eq!(session.process_state, ProcessState::Cancelled);
+        assert!(matches!(
+            session.terminal_output_error("missing.m4s"),
+            Some(NightfallError::TranscodeCancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn typed_progress_event_is_delivered_without_map_cloning_or_pid_polling() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "progress".into(),
+            vec![&PROGRESS_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        let mut events = session.subscribe();
+        session.start().await.unwrap();
+        let progress = loop {
+            let event = events.changed().await.unwrap();
+            if let SessionEventKind::Progress(progress) = event.kind {
+                break progress;
+            }
+        };
+        assert_eq!(progress.frame, Some(25));
+        assert_eq!(progress.out_time_us, Some(5_000_000));
+        assert_eq!(progress.speed, Some(0.5));
+        assert_eq!(progress.phase, Some(ProgressPhase::Continue));
+        session.join().await.unwrap();
     }
 
     #[tokio::test]
@@ -617,13 +1164,167 @@ mod tests {
             vec![&FAILING_PROFILE],
             context(temp.path(), "/bin/sh"),
         );
+        let mut events = session.subscribe();
         session.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(session.try_wait());
-        assert!(session
-            .exit_status
-            .as_ref()
-            .is_some_and(|status| !status.success()));
-        session.join().await;
+        while !matches!(
+            events.changed().await.unwrap().kind,
+            SessionEventKind::Lifecycle(SessionLifecycle::ExitedWithFailure(_))
+        ) {}
+        session.refresh_process_state();
+        assert!(session.failed());
+        assert!(session.child_pid.is_none());
+        assert!(matches!(
+            session.terminal_output_error("missing.m4s"),
+            Some(NightfallError::TranscodeFailed(_))
+        ));
+        session.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stderr_is_captured_incrementally_in_a_fixed_tail_ring() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "diagnostic-cap".into(),
+            vec![&LOUD_FAILURE_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        let mut events = session.subscribe();
+        session.start().await.unwrap();
+        while !matches!(
+            events.changed().await.unwrap().kind,
+            SessionEventKind::Lifecycle(SessionLifecycle::ExitedWithFailure(_))
+        ) {}
+        session.join().await.unwrap();
+        let diagnostic = session.stderr().unwrap();
+        assert!(diagnostic.len() <= DIAGNOSTIC_CAPACITY);
+        assert!(diagnostic.ends_with("TAIL"));
+        assert!(!diagnostic.contains("loud-failure-shell"));
+    }
+
+    #[tokio::test]
+    async fn successful_exit_with_missing_output_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "success-without-output".into(),
+            vec![&SUCCESSFUL_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        let mut events = session.subscribe();
+        session.start().await.unwrap();
+        while !matches!(
+            events.changed().await.unwrap().kind,
+            SessionEventKind::Lifecycle(SessionLifecycle::ExitedSuccessfully)
+        ) {}
+        session.refresh_process_state();
+        assert_eq!(session.process_state, ProcessState::ExitedSuccessfully);
+        assert!(matches!(
+            session.terminal_output_error("0.m4s"),
+            Some(NightfallError::MissingOutput(path)) if path == "0.m4s"
+        ));
+        assert!(session.is_terminal());
+        session.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_publication_is_idempotent_and_keeps_open_readers_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "publication".into(),
+            vec![&SUCCESSFUL_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        let raw_path = temp.path().join("0.m4s");
+        write_media_segment(&raw_path, b"first-payload");
+        let raw_before = fs::read(&raw_path).unwrap();
+
+        let published = session.publish_chunk(0).await.unwrap();
+        let published_before = fs::read(&published).unwrap();
+        assert_eq!(fs::read(&raw_path).unwrap(), raw_before);
+        assert_ne!(Path::new(&published), raw_path);
+        assert_eq!(session.real_segment, 1);
+
+        let mut open_reader = File::open(&published).unwrap();
+        write_media_segment(&raw_path, b"replacement-payload");
+        assert_eq!(session.publish_chunk(0).await.unwrap(), published);
+        assert_eq!(session.real_segment, 1);
+        assert_eq!(fs::read(&published).unwrap(), published_before);
+
+        let mut bytes_from_original_handle = Vec::new();
+        open_reader
+            .read_to_end(&mut bytes_from_original_handle)
+            .unwrap();
+        assert_eq!(bytes_from_original_handle, published_before);
+
+        session.reset_to(0).unwrap();
+        assert!(!raw_path.exists());
+        assert_eq!(fs::read(published).unwrap(), published_before);
+    }
+
+    #[tokio::test]
+    async fn patch_failure_is_returned_without_publishing_or_advancing_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "patch-failure".into(),
+            vec![&SUCCESSFUL_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        fs::write(temp.path().join("0.m4s"), b"x").unwrap();
+
+        assert!(session.publish_chunk(0).await.is_err());
+        assert!(!Path::new(&session.published_chunk(0)).exists());
+        assert_eq!(session.real_segment, 0);
+        assert_eq!(session.chunks_since_init, 0);
+    }
+
+    #[tokio::test]
+    async fn initialization_publication_is_immutable_and_generation_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "init-publication".into(),
+            vec![&SUCCESSFUL_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        let raw_init = temp.path().join("0_init.mp4");
+        fs::write(&raw_init, b"first-init").unwrap();
+
+        let first_path = session.publish_init(0).await.unwrap();
+        let first_bytes = fs::read(&first_path).unwrap();
+        fs::write(&raw_init, b"second-init").unwrap();
+        assert_eq!(session.publish_init(0).await.unwrap(), first_path);
+        assert_eq!(fs::read(&first_path).unwrap(), first_bytes);
+
+        session.reset_to(0).unwrap();
+        fs::write(&raw_init, b"second-init").unwrap();
+        let second_path = session.publish_init(0).await.unwrap();
+        assert_ne!(first_path, second_path);
+        assert_eq!(fs::read(second_path).unwrap(), b"second-init");
+        assert_eq!(fs::read(first_path).unwrap(), b"first-init");
+    }
+
+    #[test]
+    fn publication_generation_retention_is_fixed_and_overflow_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = Session::new(
+            "generation-retention".into(),
+            vec![&SUCCESSFUL_PROFILE],
+            context(temp.path(), "/bin/sh"),
+        );
+        fs::create_dir(temp.path().join("published-0")).unwrap();
+        for generation in 1..=6 {
+            session.reset_to(generation as u32).unwrap();
+            fs::create_dir(temp.path().join(format!("published-{generation}"))).unwrap();
+        }
+        for expired in 0..=2 {
+            assert!(!temp.path().join(format!("published-{expired}")).exists());
+        }
+        for retained in 3..=6 {
+            assert!(temp.path().join(format!("published-{retained}")).is_dir());
+        }
+
+        session.publication_generation = u64::MAX;
+        assert!(matches!(
+            session.reset_to(0),
+            Err(NightfallError::InvalidContext(message)) if message.contains("generation overflow")
+        ));
     }
 }

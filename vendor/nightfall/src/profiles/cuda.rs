@@ -1,5 +1,6 @@
 use super::ProfileContext;
 use super::ProfileType;
+use super::Representation;
 use super::StreamType;
 use super::TranscodingProfile;
 
@@ -10,11 +11,11 @@ use crate::NightfallError;
 /// automatically be enabled if any of your GPUs support encoding and decoding h264 with the
 /// profiles `Main`, `High` and `ConstrainedBaseline`. This profile will only transcode h264 input
 /// streams.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct CudaTranscodeProfile;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl TranscodingProfile for CudaTranscodeProfile {
     fn profile_type(&self) -> ProfileType {
         ProfileType::HardwareTranscode
@@ -33,12 +34,11 @@ impl TranscodingProfile for CudaTranscodeProfile {
         Ok(())
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("CUDA transcode must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
 
         // ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input -c:v h264_nvenc -preset slow output
         let mut args = vec![
@@ -48,7 +48,7 @@ impl TranscodingProfile for CudaTranscodeProfile {
             "cuda".into(),
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -73,6 +73,17 @@ impl TranscodingProfile for CudaTranscodeProfile {
             args.push(bitrate.to_string());
         }
 
+        let gop_frames = match hls.frame_alignment {
+            super::FrameAlignment::Passthrough {
+                nominal_frames_per_segment,
+                ..
+            }
+            | super::FrameAlignment::Constant {
+                frames_per_segment: nominal_frames_per_segment,
+                ..
+            } => nominal_frames_per_segment,
+            _ => unreachable!("video command has video frame alignment"),
+        };
         args.append(&mut vec![
             "-start_at_zero".into(),
             "-avoid_negative_ts".into(),
@@ -80,62 +91,23 @@ impl TranscodingProfile for CudaTranscodeProfile {
             "-max_muxing_queue_size".into(),
             "2048".into(),
             "-keyint_min".into(),
-            "120".into(),
+            gop_frames.to_string(),
             "-g".into(),
-            "120".into(),
+            gop_frames.to_string(),
             "-frag_duration".into(),
-            "5000000".into(),
+            (hls.segment_duration_nanos / 1_000).to_string(),
         ]);
         super::video::append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
-
-        args.append(&mut super::video::get_discont_flags(&ctx));
-
-        args.append(&mut vec![
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num,
-        ]);
-
-        // needed so that in progress segments are named `tmp` and then renamed after the data is
-        // on disk.
-        // This in theory practically prevents the web server from returning a segment that is
-        // in progress.
-        args.append(&mut vec![
-            "-hls_flags".into(),
-            "independent_segments".into(),
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
-        ]);
-
-        // args needed so we can distinguish between init fragments for new streams.
-        // Basically on the web seeking works by reloading the entire video because of
-        // discontinuity issues that browsers seem to not ignore like mpv.
-        args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
-
-        args.append(&mut vec![
-            "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
-        ]);
-
-        args.append(&mut vec![
-            "-force_key_frames".into(),
-            format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
-        ]);
-
-        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
-        args.append(&mut vec![
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-        ]);
-        args.append(&mut vec!["-hls_segment_filename".into(), seg_name]);
-        args.push(outdir);
-
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions {
+                force_key_frames: true,
+                independent_segments: true,
+                disable_scene_change: false,
+            },
+        );
+        args
     }
 
     /// This profile technically could work on any codec since the codec is just `copy` here, but

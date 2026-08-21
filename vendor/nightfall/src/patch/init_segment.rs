@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::BufReader;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -116,34 +115,77 @@ impl InitSegment {
 pub async fn patch_init_segment(
     init: impl AsRef<Path> + Send + 'static,
     segment_path: impl AsRef<Path> + Send + 'static,
-    mut seq: u32,
+    seq: u32,
 ) -> Result<u32> {
-    spawn_blocking(move || {
-        let f = File::open(&init)?;
-        let size = f.metadata()?.len();
-        let mut reader = BufReader::new(f);
-
-        let mut segment = InitSegment::from_reader(&mut reader, size)?;
-
-        let mut f = File::create(&segment_path)?;
-        while let Some(segment) = segment.segments.pop_front() {
-            // Here we normalize the DTS to be equal to the EPT/PTS and we also set the corrent
-            // segment number.
-            segment
-                .gen_styp()
-                .set_styp()
-                .normalize_dts()
-                .set_segno(seq)
-                .write(&mut f)?;
-
-            seq += 1;
+    let init = init.as_ref().to_path_buf();
+    let segment_path = segment_path.as_ref().to_path_buf();
+    let normalized_replacement = super::replacement_path(&init);
+    let segment_replacement = super::replacement_path(&segment_path);
+    let result = patch_init_segment_to(
+        init.clone(),
+        segment_replacement.clone(),
+        normalized_replacement.clone(),
+        seq,
+    )
+    .await;
+    match result {
+        Ok(next_sequence) => {
+            let replace_result = spawn_blocking(move || {
+                super::replace_atomically(&normalized_replacement, &init)?;
+                if let Err(error) = super::replace_atomically(&segment_replacement, &segment_path) {
+                    let _ = std::fs::remove_file(segment_replacement);
+                    return Err(error);
+                }
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            .map_err(|error| crate::NightfallError::SegmentPatchError(error.to_string()))?;
+            replace_result?;
+            Ok(next_sequence)
         }
+        Err(error) => {
+            let _ = std::fs::remove_file(normalized_replacement);
+            let _ = std::fs::remove_file(segment_replacement);
+            Err(error)
+        }
+    }
+}
 
-        let mut f = File::create(&init)?;
-        segment.normalize_and_dump(&mut f)?;
-
-        Ok(seq)
+pub async fn patch_init_segment_to(
+    init: impl AsRef<Path> + Send + 'static,
+    segment_path: impl AsRef<Path> + Send + 'static,
+    normalized_init_path: impl AsRef<Path> + Send + 'static,
+    seq: u32,
+) -> Result<u32> {
+    let init = init.as_ref().to_path_buf();
+    let segment_path = segment_path.as_ref().to_path_buf();
+    let normalized_init_path = normalized_init_path.as_ref().to_path_buf();
+    spawn_blocking(move || {
+        super::engine::patch_init(&init, &segment_path, &normalized_init_path, seq)
     })
     .await
-    .unwrap()
+    .map_err(|error| crate::NightfallError::SegmentPatchError(error.to_string()))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_embedded_media_is_not_published_as_an_empty_segment() {
+        let temp = tempfile::tempdir().unwrap();
+        let init = temp.path().join("0_init.mp4");
+        InitSegment::default()
+            .normalize_and_dump(&mut File::create(&init).unwrap())
+            .unwrap();
+        let media = temp.path().join("published/0.m4s");
+        let normalized = temp.path().join("published/normalized_init.mp4");
+
+        assert!(matches!(
+            patch_init_segment_to(init, media.clone(), normalized.clone(), 0).await,
+            Err(crate::NightfallError::MissingSegmentBox)
+        ));
+        assert!(!media.exists());
+        assert!(!normalized.exists());
+    }
 }

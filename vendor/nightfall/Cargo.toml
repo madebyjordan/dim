@@ -2,18 +2,15 @@
 name = "nightfall"
 version = "0.3.12-rc4"
 authors = ["Valerian G. <valerian.garleanu@pm.me>"]
-edition = "2018"
+edition = "2021"
 license = "GPL-2.0"
 description = "Nightfall is a library allowing on-demand video transcoding and streaming."
 repository = "https://github.com/vgarleanu/nightfall"
 documentation = "https://docs.rs/nightfall"
 
-# Keep new warnings from accumulating while preserving legacy API/runtime debt for a later
-# Nightfall milestone. `err-derive` generates the non-local impls, and shrinking the public error
-# type would be an API change.
+# Keep new warnings from accumulating across every advertised adapter feature set.
 [lints.rust]
 warnings = { level = "deny", priority = -1 }
-non_local_definitions = "allow"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -22,49 +19,41 @@ never_loop = "allow"
 result_large_err = "allow"
 
 [features]
-vaapi = ["rusty_vainfo"]
+vaapi = ["dep:rusty_vainfo"]
 cuda = []
 ssa_transmux = []
 
 default = ["cuda", "vaapi"]
 
 [dependencies]
-uuid = { version = "0.8.1", features = ["v4"] }
-lazy_static = "1.4.0"
-serde_json = "1.0.57"
-serde = { version = "1.0.115", features = ["derive"] }
-serde_derive = "1.0.115"
-cfg-if = "1.0.0"
-err-derive = "0.3.0"
-xtra = "0.5.1"
-async-trait = "0.1.49"
-xtra_proc = "0.1.0"
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
 mp4 = { git = "https://github.com/vgarleanu/mp4-rust", rev = "27f62343cdf4fc7fe94c455135d6210c77e17f9a" }
-once_cell = "1.8.0"
 
-tracing = "0.1.29"
-tokio-stream = { version = "0.1.5", features = ["io-util"] }
-tokio = { version = "1.5.0", features = [
+tracing = "0.1"
+tokio = { version = "1", features = [
     "process",
     "io-util",
     "io-std",
     "macros",
+    "sync",
     "time",
     "rt",
 ] }
 
 [target.'cfg(unix)'.dependencies]
-nix = "0.20.0"
-psutil = { version = "3.2.0", default-features = false, features = ["process"] }
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 rusty_vainfo = { version = "0.1.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-ntapi = "0.4.3"
-winapi = { version = "^0.3.9", features = [
-    "winerror",
-    "synchapi",
-    "minwinbase",
-    "processthreadsapi",
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

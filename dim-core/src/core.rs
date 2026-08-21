@@ -12,7 +12,10 @@ use tracing::{info, instrument};
 
 use std::sync::Arc;
 
-pub type StateManager = nightfall::StateManager;
+pub use nightfall::{
+    ProgressPhase, SessionEvent, SessionEventKind, SessionLifecycle, SessionOutput,
+    SessionProgress, SessionSubscription, StateManager,
+};
 pub type DbConnection = dim_database::DbConnection;
 pub type EventTx = Sender<String>;
 

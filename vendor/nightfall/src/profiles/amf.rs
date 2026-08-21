@@ -1,5 +1,6 @@
 use super::ProfileContext;
 use super::ProfileType;
+use super::Representation;
 use super::StreamType;
 use super::TranscodingProfile;
 
@@ -10,7 +11,7 @@ pub struct AmfTranscodeProfile;
 
 impl TranscodingProfile for AmfTranscodeProfile {
     fn profile_type(&self) -> ProfileType {
-        ProfileType::Transcode
+        ProfileType::HardwareTranscode
     }
 
     fn stream_type(&self) -> StreamType {
@@ -21,17 +22,16 @@ impl TranscodingProfile for AmfTranscodeProfile {
         "AmfTranscodeProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("AMF transcode must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
 
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -57,52 +57,15 @@ impl TranscodingProfile for AmfTranscodeProfile {
         ]);
         super::video::append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
 
-        args.append(&mut vec![
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num,
-        ]);
-
-        // needed so that in progress segments are named `tmp` and then renamed after the data is
-        // on disk.
-        // This in theory practically prevents the web server from returning a segment that is
-        // in progress.
-        args.append(&mut vec![
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
-        ]);
-
-        args.append(&mut super::video::get_discont_flags(&ctx));
-
-        // args needed so we can distinguish between init fragments for new streams.
-        // Basically on the web seeking works by reloading the entire video because of
-        // discontinuity issues that browsers seem to not ignore like mpv.
-        args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
-
-        args.append(&mut vec![
-            "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
-        ]);
-
-        args.append(&mut vec![
-            "-force_key_frames".into(),
-            format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
-        ]);
-
-        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
-        args.append(&mut vec![
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-        ]);
-        args.append(&mut vec!["-hls_segment_filename".into(), seg_name]);
-        args.push(outdir);
-
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions {
+                force_key_frames: true,
+                ..Default::default()
+            },
+        );
+        args
     }
 
     /// This profile technically could work on any codec since the codec is just `copy` here, but
@@ -113,5 +76,18 @@ impl TranscodingProfile for AmfTranscodeProfile {
 
     fn tag(&self) -> &str {
         "h264_amf"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn amf_is_classified_as_hardware_transcoding() {
+        assert_eq!(
+            AmfTranscodeProfile.profile_type(),
+            ProfileType::HardwareTranscode
+        );
     }
 }

@@ -1,5 +1,6 @@
 use super::ProfileContext;
 use super::ProfileType;
+use super::Representation;
 use super::StreamType;
 use super::TranscodingProfile;
 
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 /// automatically be enabled if any of your GPUs support encoding and decoding h264 with the
 /// profiles `Main`, `High` and `ConstrainedBaseline`. This profile will only transcode h264 input
 /// streams.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct VaapiTranscodeProfile {
     profiles: Vec<rusty_vainfo::Profile>,
@@ -22,6 +23,15 @@ pub struct VaapiTranscodeProfile {
 }
 
 impl VaapiTranscodeProfile {
+    const H264_ENCODE_PROFILES: [&'static str; 4] = [
+        "VAProfileH264ConstrainedBaseline",
+        "VAProfileH264Baseline",
+        "VAProfileH264Main",
+        "VAProfileH264High",
+    ];
+    const ENCODE_ENTRYPOINTS: [&'static str; 2] =
+        ["VAEntrypointEncSlice", "VAEntrypointEncSliceLP"];
+
     pub fn new() -> Option<Self> {
         let hw_targets = fs::read_dir("/dev/dri")
             .ok()?
@@ -48,27 +58,34 @@ impl VaapiTranscodeProfile {
     }
 
     fn hw_scaling_supported(&self) -> bool {
-        let required_profiles = ["VAProfileH264Main", "VAProfileH264High"];
+        self.supports_h264_encoding(None)
+    }
 
-        let enc_slice = "VAEntrypointEncSlice".to_string();
+    fn has_entrypoint(&self, profile: &str, entrypoints: &[&str]) -> bool {
+        self.profiles.iter().any(|candidate| {
+            candidate.name == profile
+                && candidate
+                    .entrypoints
+                    .iter()
+                    .any(|entrypoint| entrypoints.contains(&entrypoint.as_str()))
+        })
+    }
 
-        for profile in required_profiles {
-            let device_profile = if let Some(x) = self.profiles.iter().find(|x| x.name == profile) {
-                x
-            } else {
-                continue;
-            };
-
-            // NOTE: We should probably warn the client here that scaling wont work because they
-            // possibly have the free intel quicksync driver installed (if dri is a intel igpu).
-            return device_profile.entrypoints.contains(&enc_slice);
-        }
-
-        false
+    fn supports_h264_encoding(&self, requested_profile: Option<&str>) -> bool {
+        let candidates: &[&str] = match requested_profile.map(str::to_ascii_lowercase).as_deref() {
+            Some("baseline" | "constrained baseline") => &Self::H264_ENCODE_PROFILES[..2],
+            Some("main") => &Self::H264_ENCODE_PROFILES[2..3],
+            Some("high") => &Self::H264_ENCODE_PROFILES[3..],
+            Some(_) => return false,
+            None => &Self::H264_ENCODE_PROFILES,
+        };
+        candidates
+            .iter()
+            .any(|profile| self.has_entrypoint(profile, &Self::ENCODE_ENTRYPOINTS))
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl TranscodingProfile for VaapiTranscodeProfile {
     fn profile_type(&self) -> ProfileType {
         ProfileType::HardwareTranscode
@@ -83,70 +100,31 @@ impl TranscodingProfile for VaapiTranscodeProfile {
     }
 
     fn is_enabled(&self) -> Result<(), NightfallError> {
-        // Currently this profile only supports HW Encoding + decoding.
-        let required_features = [
-            "VAEntrypointEncSlice".to_string(),
-            "VAEntrypointVLD".to_string(),
-        ];
-
-        // NOTE: These could technically be less restrictive and we could match for them inside
-        // build. Although I doubt that there are actually any devices that dont support all three
-        // of these profiles.
-        // see: https://github.com/intel/libva/blob/6e86b4fb4dafa123b1e31821f61da88f10cfbe91/va/va.h#L493
-        let required_profiles = [
-            "VAProfileH264ConstrainedBaseline",
-            "VAProfileH264Main",
-            "VAProfileH264High",
-        ];
-
-        // FIXME: We want to enable this profile if any of the above profiles are enabled for those
-        // required features.
-        for profile in required_profiles {
-            let device_profile = self.profiles.iter().find(|x| x.name == profile).ok_or(
-                NightfallError::ProfileNotSupported(format!(
-                    "Device {} doesnt support profile {} (Supported profiles: {})",
-                    self.vendor,
-                    profile,
-                    self.profiles
-                        .iter()
-                        .map(|x| x.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                )),
-            )?;
-
-            for feature in required_features {
-                if !device_profile.entrypoints.contains(&feature) {
-                    continue;
-                }
-            }
-
-            // NOTE: We should probably warn the client here that scaling wont work because they
-            // possibly have the free intel quicksync driver installed (if dri is a intel igpu).
-            /*
-            if !device_profile.entrypoints.contains("VAEntrypointEncSlice") &&
-                device_profile.entrypoints.contains("VAEntrypointEncSliceLP") {
-                    return Ok(());
-            }
-            */
-
-            // we really only care if one of the profiles supports both enc+dec as this step only
-            // checks whether the device supports hw decoding in general.
-            return Ok(());
+        if !self.supports_h264_encoding(None) {
+            return Err(NightfallError::ProfileNotSupported(format!(
+                "Device {} has no H.264 slice-encoding entrypoint.",
+                self.vendor
+            )));
         }
-
-        Err(NightfallError::ProfileNotSupported(format!(
-            "Device {} doesnt seem to support hardware transcoding.",
-            self.vendor
-        )))
+        if !self.profiles.iter().any(|profile| {
+            profile
+                .entrypoints
+                .iter()
+                .any(|entrypoint| entrypoint == "VAEntrypointVLD")
+        }) {
+            return Err(NightfallError::ProfileNotSupported(format!(
+                "Device {} has no video decode entrypoint.",
+                self.vendor
+            )));
+        }
+        Ok(())
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("VAAPI transcode must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
 
         let mut args = vec![
             "-hwaccel".into(),
@@ -157,7 +135,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             "vaapi".into(),
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
             ctx.file.clone(),
             "-copyts".into(),
@@ -176,7 +154,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             let width = ctx.output_ctx.width.unwrap_or(-2); // defaults to scaling by 2
 
             if self.hw_scaling_supported() {
-                vfilter.push(format!("scale_vaapi={}:{}", height, width));
+                vfilter.push(format!("scale_vaapi={}:{}", width, height));
             }
 
             vfilter.push("hwdownload".into());
@@ -189,7 +167,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             vfilter.push("format=nv12".into());
 
             if !self.hw_scaling_supported() {
-                vfilter.push(format!("scale={}:{}", height, width));
+                vfilter.push(format!("scale={}:{}", width, height));
             }
 
             vfilter.push("hwupload".into());
@@ -214,125 +192,83 @@ impl TranscodingProfile for VaapiTranscodeProfile {
 
         super::video::append_h264_output_signalling(&mut args, &ctx);
 
+        let gop_frames = match hls.frame_alignment {
+            super::FrameAlignment::Passthrough {
+                nominal_frames_per_segment,
+                ..
+            }
+            | super::FrameAlignment::Constant {
+                frames_per_segment: nominal_frames_per_segment,
+                ..
+            } => nominal_frames_per_segment,
+            _ => unreachable!("video command has video frame alignment"),
+        };
         args.append(&mut vec![
             "-avoid_negative_ts".into(),
             "disabled".into(),
             "-max_muxing_queue_size".into(),
             "2048".into(),
             "-keyint_min".into(),
-            "120".into(),
+            gop_frames.to_string(),
             "-g".into(),
-            "120".into(),
+            gop_frames.to_string(),
             "-frag_duration".into(),
-            "5000000".into(),
+            (hls.segment_duration_nanos / 1_000).to_string(),
         ]);
         super::video::append_video_fps_mode(&mut args, ctx.output_ctx.force_cfr);
-
-        args.append(&mut super::video::get_discont_flags(&ctx));
-
-        args.append(&mut vec![
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num.clone(),
-        ]);
-
-        // needed so that in progress segments are named `tmp` and then renamed after the data is
-        // on disk.
-        // This in theory practically prevents the web server from returning a segment that is
-        // in progress.
-        args.append(&mut vec![
-            "-hls_flags".into(),
-            "independent_segments".into(),
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
-        ]);
-
-        // args needed so we can distinguish between init fragments for new streams.
-        // Basically on the web seeking works by reloading the entire video because of
-        // discontinuity issues that browsers seem to not ignore like mpv.
-        args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
-
-        args.append(&mut vec![
-            "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
-        ]);
-
-        args.append(&mut vec![
-            "-force_key_frames".into(),
-            // NOTE: This might fix the seeking bug
-            format!("expr:gte(t,n_forced*{})", ctx.output_ctx.target_gop),
-            "-sc_threshold:v:0".into(),
-            "0".into(),
-        ]);
-
-        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
-        args.append(&mut vec![
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-        ]);
-        args.append(&mut vec!["-hls_segment_filename".into(), seg_name]);
-        args.push(outdir);
-
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions {
+                force_key_frames: true,
+                independent_segments: true,
+                disable_scene_change: true,
+            },
+        );
+        args
     }
 
     /// This profile technically could work on any codec since the codec is just `copy` here, but
     /// the container doesnt support it, so we will be constricting it down.
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
         super::video::hardware_h264_contract_supported(ctx)?;
-        let decode_entrypoint = "VAEntrypointVLD".to_string();
-
         if !["h264", "hevc"].contains(&ctx.input_ctx.codec.as_str()) {
             return Err(NightfallError::ProfileNotSupported(
                 "Profile only supports decoding h264 or h265 video streams.".into(),
             ));
         }
 
-        // NOTE: Checks if the HWAccel device supports decoding HEVC content.
-        if ctx.input_ctx.codec == "hevc"
-            && self
-                .profiles
-                .iter()
-                .find(|x| {
-                    x.name == "VAProfileHEVCMain" && x.entrypoints.contains(&decode_entrypoint)
-                })
-                .is_none()
+        let decode_profiles: &[&str] =
+            match [ctx.input_ctx.codec.as_str(), ctx.input_ctx.profile.as_str()] {
+                ["h264", "High"] => &["VAProfileH264High"],
+                ["h264", "Main"] => &["VAProfileH264Main"],
+                ["h264", "Baseline" | "Constrained Baseline"] => {
+                    &["VAProfileH264Baseline", "VAProfileH264ConstrainedBaseline"]
+                }
+                ["hevc", "Main"] => &["VAProfileHEVCMain"],
+                ["hevc", "Main 10"] => &["VAProfileHEVCMain10"],
+                [codec, profile] => {
+                    return Err(NightfallError::ProfileNotSupported(format!(
+                        "Profile {} for {} not supported by device.",
+                        profile, codec
+                    )))
+                }
+            };
+
+        if !decode_profiles
+            .iter()
+            .any(|profile| self.has_entrypoint(profile, &["VAEntrypointVLD"]))
         {
-            return Err(NightfallError::ProfileNotSupported(
-                "HW Acceleration device doesnt support decoding hevc content.".into(),
-            ));
-        }
-
-        if ctx.output_ctx.codec != "h264" {
-            return Err(NightfallError::ProfileNotSupported(
-                "Profile only supports h264 output streams.".into(),
-            ));
-        }
-
-        let profile = match [ctx.input_ctx.codec.as_str(), ctx.input_ctx.profile.as_str()] {
-            ["h264", "High"] => "VAProfileH264High",
-            ["h264", "Main"] => "VAProfileH264Main",
-            ["h264", "Baseline"] => "VAProfileH264Baseline",
-            ["hevc", "Main"] => "VAProfileHEVCMain",
-            ["hevc", "Main 10"] => "VAProfileHEVCMain10",
-            [codec, profile] => {
-                return Err(NightfallError::ProfileNotSupported(format!(
-                    "Profile {} for {} not supported by device.",
-                    profile, codec
-                )))
-            }
-        };
-
-        if self.profiles.iter().find(|x| x.name == profile).is_none() {
             return Err(NightfallError::ProfileNotSupported(format!(
-                "Profile {} not supported by device.",
-                profile
+                "Device does not expose a decode entrypoint for {} {}.",
+                ctx.input_ctx.codec, ctx.input_ctx.profile
             )));
+        }
+
+        if !self.supports_h264_encoding(ctx.output_ctx.video_profile.as_deref()) {
+            return Err(NightfallError::ProfileNotSupported(
+                "Device does not expose the required H.264 encoding entrypoint.".into(),
+            ));
         }
 
         Ok(())
@@ -340,5 +276,86 @@ impl TranscodingProfile for VaapiTranscodeProfile {
 
     fn tag(&self) -> &str {
         "h264_vaapi"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusty_vainfo::Profile;
+
+    fn profile(name: &str, entrypoints: &[&str]) -> Profile {
+        Profile {
+            name: name.into(),
+            entrypoints: entrypoints.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn context() -> ProfileContext {
+        let mut context = ProfileContext::default();
+        context.file = "source.mp4".into();
+        context.input_ctx.codec = "h264".into();
+        context.input_ctx.profile = "High".into();
+        context.input_ctx.pix_fmt = "yuv420p".into();
+        context.input_ctx.fps = 24.0;
+        context.output_ctx.codec = "h264".into();
+        context.output_ctx.outdir = "output".into();
+        context.output_ctx.width = Some(1280);
+        context.output_ctx.height = Some(720);
+        context
+    }
+
+    fn vaapi(profiles: Vec<Profile>) -> VaapiTranscodeProfile {
+        VaapiTranscodeProfile {
+            profiles,
+            vendor: "test".into(),
+            dri: "/dev/dri/renderD128".into(),
+        }
+    }
+
+    #[test]
+    fn enablement_requires_real_encode_and_decode_entrypoints() {
+        let encode_only = vaapi(vec![profile(
+            "VAProfileH264High",
+            &["VAEntrypointEncSlice"],
+        )]);
+        assert!(encode_only.is_enabled().is_err());
+
+        let decode_only = vaapi(vec![profile("VAProfileH264High", &["VAEntrypointVLD"])]);
+        assert!(decode_only.is_enabled().is_err());
+    }
+
+    #[test]
+    fn support_requires_decode_entrypoint_for_the_input_profile() {
+        let profile_without_decode = vaapi(vec![
+            profile("VAProfileH264High", &["VAEntrypointEncSlice"]),
+            profile("VAProfileH264Main", &["VAEntrypointVLD"]),
+        ]);
+        assert!(profile_without_decode.supports(&context()).is_err());
+    }
+
+    #[test]
+    fn scale_filter_preserves_width_height_order() {
+        let profile = vaapi(vec![profile(
+            "VAProfileH264High",
+            &["VAEntrypointVLD", "VAEntrypointEncSlice"],
+        )]);
+        let args = profile.build(context()).unwrap();
+        let filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| pair[1].as_str())
+            .unwrap();
+        assert!(filter.contains("scale_vaapi=1280:720"));
+    }
+
+    #[test]
+    fn low_power_slice_encoding_is_a_valid_capability() {
+        let profile = vaapi(vec![profile(
+            "VAProfileH264High",
+            &["VAEntrypointVLD", "VAEntrypointEncSliceLP"],
+        )]);
+        assert!(profile.is_enabled().is_ok());
+        assert!(profile.supports(&context()).is_ok());
     }
 }

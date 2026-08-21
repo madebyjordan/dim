@@ -1,5 +1,6 @@
 use super::ProfileContext;
 use super::ProfileType;
+use super::Representation;
 use super::StreamType;
 use super::TranscodingProfile;
 
@@ -21,18 +22,17 @@ impl TranscodingProfile for AudioTransmuxProfile {
         "AudioTransmuxProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("audio transmux must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
-            ctx.file,
+            ctx.file.clone(),
             "-copyts".into(),
             "-map".into(),
             stream,
@@ -41,37 +41,13 @@ impl TranscodingProfile for AudioTransmuxProfile {
             "-start_at_zero".into(),
             "-avoid_negative_ts".into(),
             "disabled".into(),
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num,
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
         ];
-        args.push("-hls_segment_options".into());
-        args.push(if ctx.output_ctx.start_num > 0 {
-            "movflags=frag_custom+dash+delay_moov+frag_discont".into()
-        } else {
-            "movflags=frag_custom+dash+delay_moov".into()
-        });
-        args.extend([
-            "-hls_fmp4_init_filename".into(),
-            init_seg,
-            "-hls_time".into(),
-            ctx.output_ctx.target_gop.to_string(),
-            "-hls_segment_type".into(),
-            "fmp4".into(),
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-            "-hls_segment_filename".into(),
-            seg_name,
-            outdir,
-        ]);
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions::default(),
+        );
+        args
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
@@ -108,20 +84,19 @@ impl TranscodingProfile for AacTranscodeProfile {
         "AacTranscodeProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
-        let start_num = ctx.output_ctx.start_num.to_string();
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String> {
+        let Representation::Fmp4Hls(hls) = representation else {
+            unreachable!("AAC transcode must produce fMP4 HLS")
+        };
         let stream = format!("0:{}", ctx.input_ctx.stream);
-        let init_seg = format!("{}_init.mp4", &start_num);
-        let seg_name = format!("{}/%d.m4s", ctx.output_ctx.outdir);
-        let outdir = format!("{}/playlist.m3u8", ctx.output_ctx.outdir);
 
         // NOTE: might need flags -fflages +genpts if seeking breaks.
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
-            format!("{:.6}", ctx.output_ctx.start_time()),
+            hls.seek_seconds(),
             "-i".into(),
-            ctx.file,
+            ctx.file.clone(),
             "-copyts".into(),
             "-map".into(),
             stream,
@@ -129,9 +104,9 @@ impl TranscodingProfile for AacTranscodeProfile {
             "aac".into(),
         ];
 
-        if let Some(duration) = ctx.output_ctx.media_duration {
+        if let Some(duration) = hls.window_seconds() {
             args.push("-t".into());
-            args.push(format!("{duration:.6}"));
+            args.push(duration);
         }
 
         if let Some(filter) = ctx.output_ctx.audio_filter.as_ref() {
@@ -160,60 +135,12 @@ impl TranscodingProfile for AacTranscodeProfile {
             "make_non_negative".into(),
         ]);
 
-        args.append(&mut vec![
-            "-f".into(),
-            "hls".into(),
-            "-start_number".into(),
-            start_num,
-        ]);
-
-        // needed so that in progress segments are named `tmp` and then renamed after the data is
-        // on disk.
-        // This in theory practically prevents the web server from returning a segment that is
-        // in progress.
-        args.append(&mut vec![
-            "-hls_flags".into(),
-            "temp_file".into(),
-            "-max_delay".into(),
-            "5000000".into(),
-        ]);
-
-        // these args are needed if we start a new stream in the middle of a old one, such as when
-        // seeking. These args will reset the base decode ts to equal the earliest presentation
-        // timestamp.
-        if ctx.output_ctx.start_num > 0 {
-            args.append(&mut vec![
-                "-hls_segment_options".into(),
-                "movflags=frag_custom+dash+delay_moov+frag_discont".into(),
-            ]);
-        } else {
-            args.append(&mut vec![
-                "-hls_segment_options".into(),
-                "movflags=frag_custom+dash+delay_moov".into(),
-            ]);
-        }
-
-        // args needed so we can distinguish between init fragments for new streams.
-        // Basically on the web seeking works by reloading the entire video because of
-        // discontinuity issues that browsers seem to not ignore like mpv.
-        args.append(&mut vec!["-hls_fmp4_init_filename".into(), init_seg]);
-
-        args.append(&mut vec![
-            "-hls_time".into(),
-            format!("{:.9}", ctx.output_ctx.segment_duration()),
-        ]);
-
-        args.append(&mut vec!["-hls_segment_type".into(), "fmp4".into()]);
-        args.append(&mut vec![
-            "-loglevel".into(),
-            "info".into(),
-            "-progress".into(),
-            "pipe:1".into(),
-        ]);
-        args.append(&mut vec!["-hls_segment_filename".into(), seg_name]);
-        args.append(&mut vec![outdir]);
-
-        Some(args)
+        super::command::append_fmp4_hls_output(
+            &mut args,
+            representation,
+            super::command::HlsMuxOptions::default(),
+        );
+        args
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
@@ -235,6 +162,22 @@ impl TranscodingProfile for AacTranscodeProfile {
 mod tests {
     use super::*;
 
+    fn context(input_codec: &str, output_codec: &str) -> ProfileContext {
+        ProfileContext {
+            file: "source.mkv".into(),
+            input_ctx: super::super::InputCtx {
+                codec: input_codec.into(),
+                ..Default::default()
+            },
+            output_ctx: super::super::OutputCtx {
+                codec: output_codec.into(),
+                outdir: "output".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         args.windows(2)
             .find(|pair| pair[0] == flag)
@@ -243,9 +186,7 @@ mod tests {
 
     #[test]
     fn verified_eac3_is_copied_into_fragmented_mp4() {
-        let mut ctx = ProfileContext::default();
-        ctx.input_ctx.codec = "eac3".into();
-        ctx.output_ctx.codec = "eac3".into();
+        let ctx = context("eac3", "eac3");
         let args = AudioTransmuxProfile.build(ctx).unwrap();
         assert_eq!(value_after(&args, "-c:0"), Some("copy"));
         assert_eq!(value_after(&args, "-hls_segment_type"), Some("fmp4"));
@@ -253,8 +194,7 @@ mod tests {
 
     #[test]
     fn normalized_surround_contract_is_explicit_in_ffmpeg_arguments() {
-        let mut ctx = ProfileContext::default();
-        ctx.output_ctx.codec = "aac".into();
+        let mut ctx = context("aac", "aac");
         ctx.output_ctx.audio_channels = 6;
         ctx.output_ctx.audio_channel_layout = Some("5.1".into());
         ctx.output_ctx.audio_filter = Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR".into());
@@ -272,8 +212,7 @@ mod tests {
 
     #[test]
     fn standard_seven_one_contract_is_preserved_without_remapping() {
-        let mut ctx = ProfileContext::default();
-        ctx.output_ctx.codec = "aac".into();
+        let mut ctx = context("aac", "aac");
         ctx.output_ctx.audio_channels = 8;
         ctx.output_ctx.audio_channel_layout = Some("7.1".into());
         ctx.output_ctx.bitrate = Some(512_000);

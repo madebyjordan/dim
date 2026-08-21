@@ -2,6 +2,7 @@ use crate::error::NightfallError;
 
 use super::ProfileContext;
 use super::ProfileType;
+use super::Representation;
 use super::StreamType;
 use super::TranscodingProfile;
 
@@ -21,11 +22,11 @@ impl TranscodingProfile for WebvttTranscodeProfile {
         "WebvttTranscodeProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
+    fn build_args(&self, ctx: &ProfileContext, _: &Representation) -> Vec<String> {
         let args = vec![
             "-y".into(),
             "-i".into(),
-            ctx.file,
+            ctx.file.clone(),
             "-map".into(),
             format!("0:{}", ctx.input_ctx.stream),
             "-f".into(),
@@ -33,7 +34,7 @@ impl TranscodingProfile for WebvttTranscodeProfile {
             "-".into(),
         ];
 
-        Some(args)
+        args
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {
@@ -104,11 +105,11 @@ impl TranscodingProfile for AssExtractProfile {
         "AssExtractProfile"
     }
 
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
+    fn build_args(&self, ctx: &ProfileContext, _: &Representation) -> Vec<String> {
         let args = vec![
             "-y".into(),
             "-i".into(),
-            ctx.file,
+            ctx.file.clone(),
             "-map".into(),
             format!("0:{}", ctx.input_ctx.stream),
             "-f".into(),
@@ -116,7 +117,7 @@ impl TranscodingProfile for AssExtractProfile {
             "-".into(),
         ];
 
-        Some(args)
+        args
     }
 
     fn supports(&self, ctx: &ProfileContext) -> Result<(), NightfallError> {

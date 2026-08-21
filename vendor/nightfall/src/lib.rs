@@ -2,8 +2,8 @@
 
 /// Contains all the error types for this crate.
 pub mod error;
-/// Helper methods to probe a mediafile for metadata.
-pub mod ffprobe;
+/// Typed, retained per-session lifecycle, progress, and output events.
+pub mod event;
 /// Contains utils that patch segments to make them appear continuous.
 pub mod patch;
 /// Contains all profiles currently implemented.
@@ -14,145 +14,227 @@ mod session;
 pub mod utils;
 
 use crate::error::*;
-use crate::patch::init_segment::patch_init_segment;
-use crate::patch::segment::patch_segment;
 use crate::profiles::*;
 use crate::session::Session;
 
-use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::time::Duration;
-use std::time::Instant;
-use tracing::debug;
-use tracing::info;
-use tracing::warn;
-use xtra_proc::actor;
-use xtra_proc::handler;
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tracing::{debug, info};
 
+pub use event::{
+    ProgressPhase, SessionEvent, SessionEventKind, SessionLifecycle, SessionOutput,
+    SessionProgress, SessionSubscription,
+};
 pub use tokio::process::ChildStdout;
 
-pub struct StreamStat {
-    hard_seeked_at: u32,
-    last_hard_seek: Instant,
+const TERMINAL_HISTORY_LIMIT: usize = 64;
+const TERMINAL_DIAGNOSTIC_LIMIT: usize = 64 * 1024;
+
+struct SessionEntry {
+    session: Mutex<Session>,
+    events: event::SessionEvents,
 }
 
-impl Default for StreamStat {
-    fn default() -> Self {
-        Self {
-            hard_seeked_at: 0,
-            last_hard_seek: Instant::now(),
+#[derive(Default)]
+struct TerminalHistory {
+    entries: VecDeque<(String, String)>,
+}
+
+impl TerminalHistory {
+    fn insert(&mut self, id: String, mut stderr: String) {
+        if stderr.len() > TERMINAL_DIAGNOSTIC_LIMIT {
+            let mut start = stderr.len() - TERMINAL_DIAGNOSTIC_LIMIT;
+            while !stderr.is_char_boundary(start) {
+                start += 1;
+            }
+            stderr.drain(..start);
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(existing, _)| existing == &id)
+        {
+            self.entries.remove(index);
+        }
+        self.entries.push_back((id, stderr));
+        while self.entries.len() > TERMINAL_HISTORY_LIMIT {
+            self.entries.pop_front();
         }
     }
-}
 
-#[actor]
-pub struct StateManager {
-    /// The directory where we store stream artifacts
-    pub outdir: String,
-    /// Path to a `ffmpeg` binary.
-    pub ffmpeg: String,
-    /// Contains all of the sessions currently managed by this actor.
-    pub sessions: HashMap<String, Session>,
-    /// Contains some useful stream stats
-    pub stream_stats: HashMap<String, StreamStat>,
-    /// Contains the exit status of dead sessions
-    pub exit_statuses: HashMap<String, String>,
-}
-
-impl fmt::Debug for __ActorStateManager::StateManager {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StateManager")
-            .field("outdir", &self.outdir)
-            .field("ffmpeg", &self.ffmpeg)
-            .field("sessions", &self.sessions)
-            .field("exit_statuses", &self.exit_statuses)
-            .finish()
+    fn get(&self, id: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|(existing, stderr)| (existing == id).then(|| stderr.clone()))
     }
+}
+
+struct StateManagerInner {
+    outdir: String,
+    ffmpeg: String,
+    sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
+    exit_statuses: StdMutex<TerminalHistory>,
+}
+
+/// A cloneable registry of independently serialized transcoding sessions.
+///
+/// The registry lock is held only long enough to clone or remove a session entry. Process waits,
+/// publication, filesystem cleanup, and all other slow work run under that session's own mutex.
+#[derive(Clone)]
+pub struct StateManager {
+    inner: Arc<StateManagerInner>,
 }
 
 impl fmt::Debug for StateManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StateManagerActor").finish()
+        let session_count = self
+            .inner
+            .sessions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        f.debug_struct("StateManager")
+            .field("outdir", &self.inner.outdir)
+            .field("ffmpeg", &self.inner.ffmpeg)
+            .field("session_count", &session_count)
+            .finish()
     }
 }
 
-#[actor]
 impl StateManager {
-    pub fn new(outdir: String, ffmpeg: String) -> Self {
+    /// Preserve Nightfall's historical constructor shape while no longer creating a global actor.
+    pub fn new<S>(_spawner: &mut S, outdir: String, ffmpeg: String) -> Self {
         Self {
-            outdir,
-            ffmpeg,
-            sessions: HashMap::new(),
-            stream_stats: HashMap::new(),
-            exit_statuses: HashMap::new(),
+            inner: Arc::new(StateManagerInner {
+                outdir,
+                ffmpeg,
+                sessions: RwLock::new(HashMap::new()),
+                exit_statuses: StdMutex::new(TerminalHistory::default()),
+            }),
         }
     }
 
-    #[handler]
-    async fn create(
-        &mut self,
-        profile_chain: Vec<&'static dyn TranscodingProfile>,
-        profile_args: ProfileContext,
-    ) -> Result<String> {
-        let mut profile_args = profile_args;
+    fn session(&self, id: &str) -> Result<Arc<SessionEntry>> {
+        self.inner
+            .sessions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or(NightfallError::SessionDoesntExist)
+    }
 
-        let first_tag = if let Some(x) = profile_chain.first() {
-            x.tag()
+    fn remember_terminal(&self, id: String, stderr: String) {
+        self.inner
+            .exit_statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, stderr);
+    }
+
+    pub async fn create(
+        &self,
+        profile_chain: Vec<&'static dyn TranscodingProfile>,
+        mut profile_args: ProfileContext,
+    ) -> Result<String> {
+        let first_tag = if let Some(profile) = profile_chain.first() {
+            profile.tag()
         } else {
             tracing::error!(profile = ?profile_args, "Supplied profile chain is empty");
-
             return Err(NightfallError::ProfileChainExhausted);
         };
 
         let chain = profile_chain
             .iter()
-            .map(|x| x.tag())
+            .map(|profile| profile.tag())
             .collect::<Vec<_>>()
             .join(" -> ");
-
-        let session_id = uuid::Uuid::new_v4().to_hyphenated().to_string();
+        let session_id = uuid::Uuid::new_v4().hyphenated().to_string();
         let tag = if let Some(width) = profile_args.output_ctx.width {
             let bitrate = profile_args
                 .output_ctx
                 .bitrate
-                .map(|x| format!("@{}", x))
+                .map(|value| format!("@{}", value))
                 .unwrap_or_default();
             let height = profile_args.output_ctx.height.unwrap_or(-2);
-
-            format!("{} ({}x{}{})", &first_tag, width, height, bitrate)
+            format!("{} ({}x{}{})", first_tag, width, height, bitrate)
         } else {
             let bitrate = profile_args
                 .output_ctx
                 .bitrate
-                .map(|x| format!("@{}", x))
+                .map(|value| format!("@{}", value))
                 .unwrap_or_default();
-            format!("{}{}", &first_tag, bitrate)
+            format!("{}{}", first_tag, bitrate)
         };
 
         info!(
             "New session {} map {} -> {}",
             &session_id, profile_args.input_ctx.stream, tag
         );
-
-        profile_args.output_ctx.outdir = format!("{}/{}", &self.outdir, session_id);
-        profile_args.ffmpeg_bin = self.ffmpeg.clone();
-
+        if self.inner.outdir.is_empty() || self.inner.outdir.contains('\0') {
+            return Err(NightfallError::InvalidContext(
+                "Nightfall output root is empty or contains a NUL byte".into(),
+            ));
+        }
+        profile_args.output_ctx.outdir = std::path::Path::new(&self.inner.outdir)
+            .join(&session_id)
+            .to_str()
+            .ok_or_else(|| {
+                NightfallError::InvalidContext("Nightfall output path is not valid UTF-8".into())
+            })?
+            .to_owned();
+        profile_args.ffmpeg_bin = self.inner.ffmpeg.clone();
+        for (index, profile) in profile_chain.iter().enumerate() {
+            let command = profile.build(profile_args.clone())?;
+            if let FallbackSemantics::Hardware {
+                software_profile_tag,
+            } = profile.fallback_semantics()
+            {
+                let has_ordered_fallback = profile_chain[..index].iter().any(|fallback| {
+                    fallback.profile_type() == ProfileType::Transcode
+                        && fallback.tag() == software_profile_tag
+                });
+                if !has_ordered_fallback {
+                    return Err(NightfallError::InvalidContext(format!(
+                        "hardware profile {} requires earlier software fallback {}",
+                        profile.tag(),
+                        software_profile_tag
+                    )));
+                }
+            }
+            debug!(profile = profile.tag(), contract = ?command.representation(), "Validated Nightfall command contract");
+        }
         info!("Session {} chain {}", &session_id, chain);
 
-        let new_session = Session::new(session_id.clone(), profile_chain, profile_args);
-
-        self.sessions.insert(session_id.clone(), new_session);
-
+        let session = Session::new(session_id.clone(), profile_chain, profile_args);
+        let events = session.event_source();
+        self.inner
+            .sessions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                session_id.clone(),
+                Arc::new(SessionEntry {
+                    session: Mutex::new(session),
+                    events,
+                }),
+            );
         Ok(session_id)
     }
 
-    #[handler]
-    async fn chunk_init_request(&mut self, id: String, chunk: u32) -> Result<String> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
+    pub fn subscribe(&self, id: &str) -> Result<SessionSubscription> {
+        let entry = self.session(id)?;
+        Ok(entry.events.subscribe())
+    }
+
+    pub async fn chunk_init_request(&self, id: String, chunk: u32) -> Result<String> {
+        let entry = self.session(&id)?;
+        let mut session = entry.session.lock().await;
+        session.refresh_process_state();
         debug!(
             process_id = id,
             requested_segment = chunk,
@@ -162,31 +244,32 @@ impl StateManager {
             "Nightfall init demand received"
         );
 
-        // If ffmpeg abrupty closes we want to move down the profile chain and try other profiles
-        // until we get something that works or we exhaust all our profiles.
-        if let Some(status) = session.exit_status.take() {
-            if !status.success() {
-                session.join().await;
-                if let Some(x) = session.next_profile() {
-                    info!("Session {} chunk={} trying profile {}", &id, chunk, x);
-                    session.reset_to(session.start_num());
-                } else {
-                    return Err(NightfallError::ProfileChainExhausted);
-                }
+        let published_init = session.published_init(chunk);
+        if std::path::Path::new(&published_init).is_file() {
+            return session.publish_init(chunk).await;
+        }
+
+        if session.failed() {
+            if let Some(profile) = session.next_profile().map(str::to_owned) {
+                info!("Session {} chunk={} trying profile {}", &id, chunk, profile);
+                session.reap_terminal().await?;
+                let start_num = session.start_num();
+                session.reset_to(start_num)?;
+            } else {
+                return Err(NightfallError::ProfileChainExhausted);
             }
         }
 
         if !session.is_chunk_done(chunk) {
-            if session.start_num() != chunk {
-                session.join().await;
-                session.reset_to(chunk);
-                session.start().await?;
-
-                let stat = self.stream_stats.entry(id.clone()).or_default();
-                stat.hard_seeked_at = chunk;
-                stat.last_hard_seek = Instant::now();
+            if let Some(error) = session.terminal_output_error(&session.custom_init_seg(chunk)) {
+                return Err(error);
             }
-
+            if session.start_num() != chunk {
+                session.join().await?;
+                session.reset_to(chunk)?;
+                session.start().await?;
+                session.record_hard_seek(chunk);
+            }
             session.cont();
         }
 
@@ -195,9 +278,7 @@ impl StateManager {
         }
 
         if session.is_chunk_done(chunk) {
-            // reset chunk since init counter
-            session.chunks_since_init = 0;
-            let path = session.custom_init_seg(chunk);
+            let path = session.publish_init(chunk).await?;
             debug!(
                 process_id = id,
                 requested_segment = chunk,
@@ -206,16 +287,13 @@ impl StateManager {
             );
             return Ok(path);
         }
-
         Err(NightfallError::ChunkNotDone)
     }
 
-    #[handler]
-    async fn chunk_request(&mut self, id: String, chunk: u32) -> Result<String> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
+    pub async fn chunk_request(&self, id: String, chunk: u32) -> Result<String> {
+        let entry = self.session(&id)?;
+        let mut session = entry.session.lock().await;
+        session.refresh_process_state();
         debug!(
             process_id = id,
             requested_segment = chunk,
@@ -224,17 +302,16 @@ impl StateManager {
             segment_ready = session.is_chunk_done(chunk),
             "Nightfall segment demand received"
         );
-        let stats = self.stream_stats.entry(id.clone()).or_default();
 
-        if session.try_wait()
-            && session
-                .exit_status
-                .as_ref()
-                .is_some_and(|status| !status.success())
-        {
-            session.join().await;
+        let published_chunk = session.published_chunk(chunk);
+        if std::path::Path::new(&published_chunk).is_file() {
+            return session.publish_chunk(chunk).await;
+        }
+
+        if session.failed() {
             if session.next_profile().is_some() {
-                session.reset_to(chunk);
+                session.reap_terminal().await?;
+                session.reset_to(chunk)?;
             } else {
                 return Err(NightfallError::ProfileChainExhausted);
             }
@@ -245,22 +322,19 @@ impl StateManager {
         }
 
         if !session.is_chunk_done(chunk) {
+            if let Some(error) = session.terminal_output_error(&session.chunk_to_path(chunk)) {
+                return Err(error);
+            }
             let current_chunk = session.current_chunk();
             let raw_speed = session.raw_speed();
             let effective_raw_speed = session.effective_raw_speed();
             let eta = session.eta_for(chunk).as_millis() as f64;
             let eta_tol = (10_000.0 / effective_raw_speed).max(8_000.0);
-
-            // FIXME: When we hard seek and start a new ffmpeg session for some reason ffmpeg
-            // reports invalid speed but then evens out. The problem is that causes seeking
-            // multiple times in a row to be very slow.
-            // thus for like the first 10s after a hard seek we exclusively hard seek if the
-            // target is over 10 chunks into the future.
             let hard_seek_reason = if chunk < session.start_num() {
                 Some("backward-before-process-start")
-            } else if chunk > current_chunk + 15
-                && Instant::now() < stats.last_hard_seek + Duration::from_secs(15)
-                && chunk > stats.hard_seeked_at
+            } else if chunk > current_chunk.saturating_add(15)
+                && Instant::now() < session.last_hard_seek() + Duration::from_secs(15)
+                && chunk > session.hard_seeked_at()
             {
                 Some("forward-after-recent-hard-seek")
             } else if eta > eta_tol {
@@ -270,7 +344,6 @@ impl StateManager {
             };
 
             session.cont();
-
             if let Some(reason) = hard_seek_reason {
                 let restart_started = Instant::now();
                 let previous_start_segment = session.start_num();
@@ -287,14 +360,11 @@ impl StateManager {
                     hard_seek_threshold_ms = eta_tol as u64,
                     "Nightfall hard seek started"
                 );
-                session.join().await;
+                session.join().await?;
                 let stop_elapsed_ms = restart_started.elapsed().as_millis();
-                session.reset_to(chunk);
+                session.reset_to(chunk)?;
                 session.start().await?;
-
-                stats.last_hard_seek = Instant::now();
-                stats.hard_seeked_at = chunk;
-
+                session.record_hard_seek(chunk);
                 info!(
                     process_id = id,
                     reason,
@@ -305,282 +375,438 @@ impl StateManager {
                     "Nightfall hard seek completed"
                 );
             }
-
             Err(NightfallError::ChunkNotDone)
         } else {
             let chunk_path = session.chunk_to_path(chunk);
-            let path = chunk_path.clone();
             let real_segment = session.real_segment;
-
-            // hint that we should probably unpause ffmpeg for a bit
-            if chunk + 2 >= session.current_chunk() {
+            if chunk.saturating_add(2) >= session.current_chunk() {
                 session.cont();
             }
-
             let patch_started = Instant::now();
             debug!(
                 process_id = id,
                 requested_segment = chunk,
-                path,
+                path = chunk_path,
                 real_segment,
                 "Nightfall segment patch started"
             );
-            match patch_segment(path, real_segment).await {
-                Ok(seq) => session.real_segment = seq,
-                // Sometimes we get partial chunks, when playback goes linearly (no hard seeks have
-                // occured) we can ignore this, but when the user seeks, the player doesnt query
-                // `init.mp4` again, so we have to move the video data from `init.mp4` into
-                // `N.m4s`.
-                Err(NightfallError::PartialSegment(_)) => {
-                    if session.chunks_since_init >= 1 {
-                        debug!("Got a partial segment, patching because the user has most likely seeked.");
-
-                        match patch_init_segment(
-                            session.init_seg(),
-                            chunk_path.clone(),
-                            real_segment,
-                        )
-                        .await
-                        {
-                            Ok(seq) => session.real_segment = seq,
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    "Failed to patch init segment."
-                                )
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to patch segment.")
-                }
-            }
-
-            session.reset_timeout(chunk);
-            session.chunks_since_init += 1;
-
+            let published_path = session.publish_chunk(chunk).await?;
             debug!(
                 process_id = id,
                 requested_segment = chunk,
                 elapsed_ms = patch_started.elapsed().as_millis(),
-                path = chunk_path,
+                raw_path = chunk_path,
+                path = published_path,
                 "Nightfall segment demand resolved"
             );
-
-            Ok(chunk_path)
+            Ok(published_path)
         }
     }
 
-    #[handler]
-    async fn chunk_eta(&mut self, id: String, chunk: u32) -> Result<u64> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
+    pub async fn chunk_eta(&self, id: String, chunk: u32) -> Result<u64> {
+        let entry = self.session(&id)?;
+        let session = entry.session.lock().await;
         Ok(session.eta_for(chunk).as_secs())
     }
 
-    #[handler]
-    async fn should_hard_seek(&mut self, id: String, chunk: u32) -> Result<bool> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-
-        let stats = self.stream_stats.entry(id).or_default();
-
+    pub async fn should_hard_seek(&self, id: String, chunk: u32) -> Result<bool> {
+        let entry = self.session(&id)?;
+        let session = entry.session.lock().await;
         if !session.has_started() {
             return Ok(false);
         }
-        // if we are seeking backwards we always want to restart the stream
-        // This is because our init.mp4 gets overwritten if we seeked forward at some point
-        // Furthermore we want to hard seek anyway if the player is browser based.
         if chunk < session.start_num() {
             return Ok(true);
         }
-
-        // FIXME: When we hard seek and start a new ffmpeg session for some reason ffmpeg
-        // reports invalid speed but then evens out. The problem is that causes seeking
-        // multiple times in a row to be very slow.
-        // thus for like the first 10s after a hard seek we exclusively hard seek if the
-        // target is over 10 chunks into the future.
-        if chunk > session.current_chunk() + 15
-            && Instant::now() < stats.last_hard_seek + Duration::from_secs(15)
+        if chunk > session.current_chunk().saturating_add(15)
+            && Instant::now() < session.last_hard_seek() + Duration::from_secs(15)
         {
             return Ok(true);
         }
-
         Ok((session.eta_for(chunk).as_millis() as f64)
             > (10_000.0 / session.effective_raw_speed()).max(5_000.0))
     }
 
-    #[handler]
-    async fn die(&mut self, id: String) -> Result<()> {
-        let mut session = self
+    pub async fn die(&self, id: String) -> Result<()> {
+        let entry = self
+            .inner
             .sessions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&id)
             .ok_or(NightfallError::SessionDoesntExist)?;
         info!("Killing session {}", id);
-        session.join().await;
-        self.exit_statuses
-            .insert(id.clone(), session.stderr().unwrap_or_default());
-        self.stream_stats.remove(&id);
+        let mut session = entry.session.lock().await;
+        let join_result = session.join().await;
+        self.remember_terminal(id, session.stderr().unwrap_or_default());
+        session.notify_removed();
         session.delete_tmp();
-
-        Ok(())
+        join_result
     }
 
-    #[handler]
-    async fn die_ignore_gc(&mut self, id: String) -> Result<()> {
+    pub async fn die_ignore_gc(&self, id: String) -> Result<()> {
         self.die(id).await
     }
 
-    #[handler]
-    async fn get_sub(&mut self, id: String, name: String) -> Result<String> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-
+    pub async fn get_sub(&self, id: String, name: String) -> Result<String> {
+        let entry = self.session(&id)?;
+        let mut session = entry.session.lock().await;
+        session.refresh_process_state();
         if !session.has_started() {
             session.start().await?;
-            // Subtitle stdout is redirected to a file that exists as soon as the process starts.
-            // Existence is not readiness: make callers poll until FFmpeg closes the completed file.
             return Err(NightfallError::ChunkNotDone);
         }
 
-        if !session.try_wait() {
-            return Err(NightfallError::ChunkNotDone);
-        }
-
-        if session
-            .exit_status
-            .as_ref()
-            .is_some_and(|status| !status.success())
-        {
-            session.join().await;
+        if session.failed() {
             if session.next_profile().is_some() {
-                session.reset_to(0);
+                session.reap_terminal().await?;
+                session.reset_to(0)?;
                 return Err(NightfallError::ChunkNotDone);
             }
             return Err(NightfallError::ProfileChainExhausted);
         }
+        if !session.is_terminal() {
+            return Err(NightfallError::ChunkNotDone);
+        }
 
-        session.subtitle(name).ok_or(NightfallError::ChunkNotDone)
+        let expected_path = format!("{}/{}", session.profile_ctx.output_ctx.outdir, name);
+        session.subtitle(name).ok_or_else(|| {
+            session
+                .terminal_output_error(&expected_path)
+                .unwrap_or(NightfallError::ChunkNotDone)
+        })
     }
 
-    #[handler]
-    async fn get_stderr(&mut self, id: String) -> Result<String> {
-        if let Some(session) = self.sessions.get_mut(&id) {
+    pub async fn get_stderr(&self, id: String) -> Result<String> {
+        if let Ok(entry) = self.session(&id) {
+            let session = entry.session.lock().await;
             return session.stderr().ok_or(NightfallError::Aborted);
         }
-        self.exit_statuses
+        self.inner
+            .exit_statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&id)
-            .cloned()
             .ok_or(NightfallError::SessionDoesntExist)
     }
 
-    #[handler]
-    async fn garbage_collect(&mut self) -> Result<()> {
-        #[allow(clippy::ptr_arg)]
-        fn collect((_, session): &(&String, &Session)) -> bool {
-            session.is_hard_timeout()
-        }
+    pub async fn garbage_collect(&self) -> Result<()> {
+        let sessions = self
+            .inner
+            .sessions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.clone()))
+            .collect::<Vec<_>>();
+        let mut reaped = 0;
+        let mut paused = 0;
 
-        // we want to check whether any session's ffmpeg process has died unexpectedly.
-        for session in self.sessions.values_mut() {
-            session.try_wait();
-        }
-
-        // FIXME: This can be a drain_filter once #59618 hits stable.
-        let mut to_reap: HashMap<_, _> = {
-            let to_reap: Vec<_> = self
-                .sessions
-                .iter()
-                .filter(collect)
-                .map(|(k, _)| k.clone())
-                .collect();
-
-            to_reap
-                .into_iter()
-                .filter_map(|k| self.sessions.remove_entry(&k))
-                .collect()
-        };
-
-        if !to_reap.is_empty() {
-            info!("Reaping {} streams", to_reap.len());
-        }
-
-        for (k, v) in to_reap.iter_mut() {
-            self.exit_statuses
-                .insert(k.to_string(), v.stderr().unwrap_or_default());
-            v.join().await;
-            v.delete_tmp();
-        }
-
-        let mut cnt = 0;
-        for (_, v) in self.sessions.iter_mut() {
-            if v.is_timeout() && !v.is_throttled && !v.try_wait() {
-                v.pause();
-                cnt += 1;
+        for (id, entry) in sessions {
+            let mut session = entry.session.lock().await;
+            session.refresh_process_state();
+            if session.is_hard_timeout() {
+                let removed = {
+                    let mut sessions = self
+                        .inner
+                        .sessions
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if sessions
+                        .get(&id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                    {
+                        sessions.remove(&id);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if removed {
+                    let join_result = session.join().await;
+                    self.remember_terminal(id, session.stderr().unwrap_or_default());
+                    session.notify_removed();
+                    session.delete_tmp();
+                    if let Err(error) = join_result {
+                        tracing::warn!(%error, "Failed to reap Nightfall process");
+                    }
+                    reaped += 1;
+                }
+            } else if session.is_timeout() && !session.is_throttled && !session.is_terminal() {
+                session.pause();
+                paused += 1;
             }
         }
-
-        if cnt != 0 {
-            info!("Paused {} streams", cnt);
+        if reaped != 0 {
+            info!("Reaped {} streams", reaped);
         }
-
+        if paused != 0 {
+            info!("Paused {} streams", paused);
+        }
         Ok(())
     }
 
     /// Stop and reap every active transcoding process before application shutdown.
-    #[handler]
-    async fn shutdown_all(&mut self) -> Result<()> {
-        for session in self.sessions.values_mut() {
-            session.join().await;
-            session.delete_tmp();
+    pub async fn shutdown_all(&self) -> Result<()> {
+        let entries = self
+            .inner
+            .sessions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+            .collect::<Vec<_>>();
+        let mut tasks = Vec::with_capacity(entries.len());
+        for (id, entry) in entries {
+            let manager = self.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut session = entry.session.lock().await;
+                let result = session.join().await;
+                manager.remember_terminal(id, session.stderr().unwrap_or_default());
+                session.notify_removed();
+                session.delete_tmp();
+                result
+            }));
         }
-        self.sessions.clear();
-        self.stream_stats.clear();
-        Ok(())
+
+        let mut first_error = None;
+        for task in tasks {
+            match task.await {
+                Ok(Err(error)) => {
+                    first_error.get_or_insert(error);
+                }
+                Err(_) => {
+                    first_error.get_or_insert(NightfallError::Aborted);
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
-    #[handler]
-    async fn take_stdout(&mut self, id: String) -> Result<ChildStdout> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-
+    pub async fn take_stdout(&self, id: String) -> Result<ChildStdout> {
+        let entry = self.session(&id)?;
+        let mut session = entry.session.lock().await;
         session.take_stdout().ok_or(NightfallError::Aborted)
     }
 
-    #[handler]
-    async fn start(&mut self, id: String) -> Result<()> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-
-        session.start().await.map_err(|_| NightfallError::Aborted)
+    pub async fn start(&self, id: String) -> Result<()> {
+        let entry = self.session(&id)?;
+        let mut session = entry.session.lock().await;
+        session.start().await
     }
 
-    #[handler]
-    async fn is_done(&self, id: String) -> Result<bool> {
-        let session = self
-            .sessions
-            .get(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
-        Ok(session.is_dead())
+    pub async fn is_done(&self, id: String) -> Result<bool> {
+        let entry = self.session(&id)?;
+        let mut session = entry.session.lock().await;
+        session.refresh_process_state();
+        Ok(session.is_terminal())
     }
 
-    #[handler]
-    async fn has_started(&self, id: String) -> Result<bool> {
-        let session = self
-            .sessions
-            .get(&id)
-            .ok_or(NightfallError::SessionDoesntExist)?;
+    pub async fn has_started(&self, id: String) -> Result<bool> {
+        let entry = self.session(&id)?;
+        let session = entry.session.lock().await;
         Ok(session.has_started())
+    }
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+    use crate::profiles::{ProfileType, StreamType};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::oneshot;
+
+    #[derive(Debug)]
+    struct NoopProfile;
+
+    impl TranscodingProfile for NoopProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec!["-c".into(), "exit 0".into()]
+        }
+
+        fn supports(&self, _: &ProfileContext) -> Result<()> {
+            Ok(())
+        }
+
+        fn tag(&self) -> &str {
+            "noop"
+        }
+
+        fn name(&self) -> &str {
+            "noop"
+        }
+    }
+
+    static NOOP_PROFILE: NoopProfile = NoopProfile;
+
+    #[derive(Debug)]
+    struct HardwareNoopProfile;
+
+    impl TranscodingProfile for HardwareNoopProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::HardwareTranscode
+        }
+
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &crate::profiles::Representation,
+        ) -> Vec<String> {
+            vec!["-c".into(), "unused".into()]
+        }
+
+        fn supports(&self, _: &ProfileContext) -> Result<()> {
+            Ok(())
+        }
+
+        fn tag(&self) -> &str {
+            "hardware-noop"
+        }
+
+        fn name(&self) -> &str {
+            "hardware-noop"
+        }
+    }
+
+    static HARDWARE_NOOP_PROFILE: HardwareNoopProfile = HardwareNoopProfile;
+
+    async fn create_test_session(manager: &StateManager) -> String {
+        manager
+            .create(vec![&NOOP_PROFILE], valid_context())
+            .await
+            .unwrap()
+    }
+
+    fn valid_context() -> ProfileContext {
+        ProfileContext {
+            file: "unused-test-input".into(),
+            input_ctx: crate::profiles::InputCtx {
+                codec: "h264".into(),
+                pix_fmt: "yuv420p".into(),
+                fps: 24.0,
+                ..Default::default()
+            },
+            output_ctx: crate::profiles::OutputCtx {
+                codec: "h264".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn per_session_ordering_does_not_create_cross_session_contention() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = StateManager::new(
+            &mut (),
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/sh".into(),
+        );
+        let slow_id = create_test_session(&manager).await;
+        let fast_id = create_test_session(&manager).await;
+        let slow_entry = manager.session(&slow_id).unwrap();
+        let (locked, locked_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let _session = slow_entry.session.lock().await;
+            let _ = locked.send(());
+            let _ = release_rx.await;
+        });
+        locked_rx.await.unwrap();
+
+        let queued_manager = manager.clone();
+        let mut queued_same_session =
+            tokio::spawn(async move { queued_manager.has_started(slow_id).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut queued_same_session)
+                .await
+                .is_err(),
+            "an operation for the locked session must remain ordered behind it"
+        );
+
+        let fast_completed = Arc::new(AtomicBool::new(false));
+        let marker = fast_completed.clone();
+        let result = tokio::time::timeout(Duration::from_millis(100), async {
+            let result = manager.has_started(fast_id).await;
+            marker.store(true, Ordering::SeqCst);
+            result
+        })
+        .await;
+        assert!(!result.unwrap().unwrap());
+        assert!(fast_completed.load(Ordering::SeqCst));
+
+        let _ = release.send(());
+        holder.await.unwrap();
+        assert!(!queued_same_session.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn hardware_profile_requires_an_ordered_software_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = StateManager::new(
+            &mut (),
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/false".into(),
+        );
+        let error = manager
+            .create(vec![&HARDWARE_NOOP_PROFILE], valid_context())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            NightfallError::InvalidContext(message) if message.contains("software fallback h264")
+        ));
+
+        manager
+            .create(
+                vec![
+                    &crate::profiles::H264TranscodeProfile,
+                    &HARDWARE_NOOP_PROFILE,
+                ],
+                valid_context(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_history_is_bounded() {
+        let mut history = TerminalHistory::default();
+        for index in 0..(TERMINAL_HISTORY_LIMIT + 5) {
+            history.insert(index.to_string(), index.to_string());
+        }
+        assert_eq!(history.entries.len(), TERMINAL_HISTORY_LIMIT);
+        assert!(history.get("0").is_none());
+        let latest = (TERMINAL_HISTORY_LIMIT + 4).to_string();
+        assert_eq!(history.get(&latest), Some(latest));
+    }
+
+    #[test]
+    fn terminal_history_caps_each_diagnostic() {
+        let mut history = TerminalHistory::default();
+        history.insert(
+            "session".into(),
+            "x".repeat(TERMINAL_DIAGNOSTIC_LIMIT + 128),
+        );
+        assert_eq!(
+            history.get("session").unwrap().len(),
+            TERMINAL_DIAGNOSTIC_LIMIT
+        );
     }
 }

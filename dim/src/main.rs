@@ -145,7 +145,7 @@ async fn run(
     if let Some(limit) = fdlimit::raise_fd_limit() {
         tracing::info!(limit, "Raising fd limit");
     }
-    nightfall::profiles::profiles_init(crate::streaming::FFMPEG_BIN.to_string());
+    nightfall::profiles::profiles_init();
 
     let outbox_reactor = dim::reactor::handler::EventReactor::new(context.database.clone())
         .with_websocket(context.event_tx.clone());

@@ -1084,9 +1084,10 @@ pub async fn get_remote_init(
     )
     .await?;
     match timeout_segment(
+        &state,
+        &process_id,
         || state.chunk_init_request(process_id.clone(), 0),
-        Duration::from_millis(100),
-        100,
+        Duration::from_secs(10),
     )
     .await
     {
@@ -1122,9 +1123,10 @@ pub async fn get_remote_chunk(
     )
     .await?;
     match timeout_segment(
+        &state,
+        &process_id,
         || state.chunk_request(process_id.clone(), chunk_num),
-        Duration::from_millis(100),
-        100,
+        Duration::from_secs(10),
     )
     .await
     {
@@ -1206,20 +1208,28 @@ pub async fn return_manifest(
 }
 
 async fn timeout_segment<F, T>(
+    state: &StateManager,
+    id: &str,
     f: impl Fn() -> F,
-    tick_dur: Duration,
-    tick_limit: usize,
+    wait_limit: Duration,
 ) -> Result<T, NightfallError>
 where
     F: Future<Output = Result<T, NightfallError>>,
 {
-    for _ in 0..tick_limit {
+    let mut events = state.subscribe(id)?;
+    let deadline = tokio::time::Instant::now() + wait_limit;
+    loop {
         match f().await {
-            Err(NightfallError::ChunkNotDone) => tokio::time::sleep(tick_dur).await,
+            Err(NightfallError::ChunkNotDone) => {
+                match tokio::time::timeout_at(deadline, events.changed()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => return Err(NightfallError::ChunkNotDone),
+                }
+            }
             result => return result,
         }
     }
-    Err(NightfallError::ChunkNotDone)
 }
 
 async fn stop_failed_transcode(
@@ -1338,9 +1348,10 @@ pub async fn get_init(
         "Playback init demand started"
     );
     let file = timeout_segment(
+        &state,
+        &id,
         || state.chunk_init_request(id.clone(), start_num),
-        Duration::from_millis(100),
-        100,
+        Duration::from_secs(10),
     )
     .await;
     match file {
@@ -1404,9 +1415,10 @@ pub async fn get_chunk(
         "Playback segment demand started"
     );
     let file = timeout_segment(
+        &state,
+        &id,
         || state.chunk_request(id.clone(), chunk_num),
-        Duration::from_millis(100),
-        100,
+        Duration::from_secs(10),
     )
     .await;
     match file {
@@ -1455,9 +1467,10 @@ async fn subtitle_response(
     };
     let gid = tracking.owner_for_process(&process_id, owner).await?;
     let file = timeout_segment(
+        &state,
+        &process_id,
         || state.get_sub(process_id.clone(), "stream".into()),
-        Duration::from_millis(100),
-        200,
+        Duration::from_secs(20),
     )
     .await;
     match file {
@@ -1697,8 +1710,65 @@ async fn reply_with_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nightfall::profiles::{ProfileType, StreamType, TranscodingProfile};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct WaiterProfile;
+
+    impl TranscodingProfile for WaiterProfile {
+        fn profile_type(&self) -> ProfileType {
+            ProfileType::Transcode
+        }
+
+        fn stream_type(&self) -> StreamType {
+            StreamType::Video
+        }
+
+        fn build_args(
+            &self,
+            _: &ProfileContext,
+            _: &nightfall::profiles::Representation,
+        ) -> Vec<String> {
+            vec!["-c".into(), "sleep 30".into()]
+        }
+
+        fn supports(&self, _: &ProfileContext) -> std::result::Result<(), NightfallError> {
+            Ok(())
+        }
+
+        fn tag(&self) -> &str {
+            "waiter-shell"
+        }
+
+        fn name(&self) -> &str {
+            "waiter-shell"
+        }
+    }
+
+    static WAITER_PROFILE: WaiterProfile = WaiterProfile;
+
+    async fn waiter_manager() -> (tempfile::TempDir, StateManager, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = StateManager::new(
+            &mut (),
+            temp.path().to_string_lossy().into_owned(),
+            "/bin/sh".into(),
+        );
+        let mut context = ProfileContext::default();
+        context.file = "unused-test-input".into();
+        context.input_ctx.codec = "h264".into();
+        context.input_ctx.pix_fmt = "yuv420p".into();
+        context.input_ctx.fps = 24.0;
+        context.output_ctx.codec = "h264".into();
+        let id = manager
+            .create(vec![&WAITER_PROFILE], context)
+            .await
+            .unwrap();
+        (temp, manager, id)
+    }
 
     #[test]
     fn parses_standard_open_and_suffix_ranges() {
@@ -1958,18 +2028,76 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_transcode_errors_do_not_retry() {
+        let (_temp, manager, id) = waiter_manager().await;
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = attempts.clone();
         let result = timeout_segment(
+            &manager,
+            &id,
             move || {
                 counter.fetch_add(1, Ordering::SeqCst);
                 async { Err::<(), _>(NightfallError::ProfileChainExhausted) }
             },
             Duration::ZERO,
-            10,
         )
         .await;
         assert!(matches!(result, Err(NightfallError::ProfileChainExhausted)));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn completed_transcode_with_missing_output_does_not_retry() {
+        let (_temp, manager, id) = waiter_manager().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let result = timeout_segment(
+            &manager,
+            &id,
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(NightfallError::MissingOutput("published-0/7.m4s".into())) }
+            },
+            Duration::ZERO,
+        )
+        .await;
+        assert!(matches!(result, Err(NightfallError::MissingOutput(_))));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn session_event_wakes_waiter_without_a_polling_tick() {
+        let (_temp, manager, id) = waiter_manager().await;
+        let first_attempt = Arc::new(Notify::new());
+        let start_signal = first_attempt.clone();
+        let starter_manager = manager.clone();
+        let starter_id = id.clone();
+        let starter = tokio::spawn(async move {
+            start_signal.notified().await;
+            starter_manager.start(starter_id).await.unwrap();
+        });
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = attempts.clone();
+        let result = timeout_segment(
+            &manager,
+            &id,
+            move || {
+                let attempt = attempt_counter.fetch_add(1, Ordering::SeqCst);
+                let first_attempt = first_attempt.clone();
+                async move {
+                    if attempt == 0 {
+                        first_attempt.notify_one();
+                        Err(NightfallError::ChunkNotDone)
+                    } else {
+                        Ok("ready")
+                    }
+                }
+            },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result.unwrap(), "ready");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        starter.await.unwrap();
+        manager.die(id).await.unwrap();
     }
 }

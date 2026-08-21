@@ -1,17 +1,22 @@
 #[cfg(windows)]
 pub mod amf;
 pub mod audio;
-#[cfg(all(unix, feature = "cuda"))]
+mod command;
+#[cfg(all(target_os = "linux", feature = "cuda"))]
 pub mod cuda;
 pub mod subtitle;
-#[cfg(all(unix, feature = "vaapi"))]
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
 pub mod vaapi;
 pub mod video;
 
 #[cfg(windows)]
 pub use amf::AmfTranscodeProfile;
 pub use audio::{AacTranscodeProfile, AudioTransmuxProfile};
-#[cfg(all(unix, feature = "cuda"))]
+pub use command::{
+    CodecContract, FallbackSemantics, FfmpegCommand, Fmp4HlsRepresentation, FrameAlignment,
+    HlsOutputPaths, OutputContainer, Representation,
+};
+#[cfg(all(target_os = "linux", feature = "cuda"))]
 pub use cuda::CudaTranscodeProfile;
 #[cfg(feature = "ssa_transmux")]
 pub use subtitle::AssExtractProfile;
@@ -19,7 +24,7 @@ pub use subtitle::WebvttTranscodeProfile;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
-#[cfg(all(unix, feature = "vaapi"))]
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
 pub use vaapi::VaapiTranscodeProfile;
 pub use video::H264TranscodeProfile;
 pub use video::H264TransmuxProfile;
@@ -27,13 +32,11 @@ pub use video::RawVideoTranscodeProfile;
 
 use crate::NightfallError;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use once_cell::sync::OnceCell;
+static PROFILES: OnceLock<Vec<Box<dyn TranscodingProfile>>> = OnceLock::new();
 
-static PROFILES: OnceCell<Vec<Box<dyn TranscodingProfile>>> = OnceCell::new();
-
-pub fn profiles_init(_ffmpeg_bin: String) {
+pub fn profiles_init() {
     let profiles: Vec<Option<Box<dyn TranscodingProfile>>> = vec![
         Some(Box::new(AacTranscodeProfile)),
         Some(Box::new(AudioTransmuxProfile)),
@@ -43,9 +46,9 @@ pub fn profiles_init(_ffmpeg_bin: String) {
         Some(Box::new(WebvttTranscodeProfile)),
         #[cfg(feature = "ssa_transmux")]
         Some(Box::new(AssExtractProfile)),
-        #[cfg(all(unix, feature = "cuda"))]
+        #[cfg(all(target_os = "linux", feature = "cuda"))]
         Some(Box::new(CudaTranscodeProfile)),
-        #[cfg(all(unix, feature = "vaapi"))]
+        #[cfg(all(target_os = "linux", feature = "vaapi"))]
         VaapiTranscodeProfile::new().map(|x| Box::new(x) as _),
         #[cfg(windows)]
         Some(Box::new(AmfTranscodeProfile)),
@@ -161,10 +164,17 @@ pub trait TranscodingProfile: Debug + Send + Sync + 'static {
         Ok(())
     }
 
-    /// Function will build a list of arguments to be passed to ffmpeg for the profile which
-    /// implements this trait. The function will return `None` if the parameters supplied in the
-    /// context are invalid or cant be used here.
-    fn build(&self, ctx: ProfileContext) -> Option<Vec<String>>;
+    /// Build a typed FFmpeg command only after the profile and representation contracts have
+    /// accepted the complete context.
+    fn build(&self, ctx: ProfileContext) -> crate::Result<FfmpegCommand> {
+        self.supports(&ctx)?;
+        let representation = command::validate_command_context(self, &ctx)?;
+        let args = self.build_args(&ctx, &representation);
+        FfmpegCommand::new(ctx.ffmpeg_bin.clone(), args, representation)
+    }
+
+    /// Render the profile-specific portion of an already validated command.
+    fn build_args(&self, ctx: &ProfileContext, representation: &Representation) -> Vec<String>;
 
     /// Function will return whether the conversion to `codec_out` is possible. Some
     /// implementations of this function (HWAccelerated profiles) will also check whether
@@ -181,13 +191,33 @@ pub trait TranscodingProfile: Debug + Send + Sync + 'static {
     fn is_stdio_stream(&self) -> bool {
         false
     }
+
+    /// Declare the output container before raw FFmpeg arguments are assembled.
+    fn output_container(&self, ctx: &ProfileContext) -> OutputContainer {
+        match self.stream_type() {
+            StreamType::Video | StreamType::Audio => OutputContainer::FragmentedMp4Hls,
+            StreamType::Subtitle if ctx.output_ctx.codec == "ass" => OutputContainer::Ass,
+            StreamType::Subtitle => OutputContainer::WebVtt,
+        }
+    }
+
+    /// Hardware commands must name the verified software profile that remains in their fallback
+    /// chain. Software and copy profiles carry explicit non-hardware semantics.
+    fn fallback_semantics(&self) -> FallbackSemantics {
+        match self.profile_type() {
+            ProfileType::HardwareTranscode => FallbackSemantics::Hardware {
+                software_profile_tag: "h264",
+            },
+            ProfileType::Transcode => FallbackSemantics::Software,
+            ProfileType::Transmux => FallbackSemantics::NotApplicable,
+        }
+    }
 }
 
 /// A context which contains information we may need when building the ffmpeg arguments.
 #[derive(Clone, Debug)]
 pub struct ProfileContext {
     pub file: String,
-    pub pre_args: Vec<String>,
     pub input_ctx: InputCtx,
     pub output_ctx: OutputCtx,
     pub ffmpeg_bin: String,
@@ -286,19 +316,6 @@ impl Default for OutputCtx {
 }
 
 impl OutputCtx {
-    pub fn start_time(&self) -> f64 {
-        self.segment_durations
-            .as_deref()
-            .map(|durations| {
-                durations
-                    .iter()
-                    .take(self.start_num as usize)
-                    .copied()
-                    .sum()
-            })
-            .unwrap_or_else(|| self.start_num as f64 * self.target_gop as f64)
-    }
-
     pub fn segment_duration(&self) -> f64 {
         self.hls_segment_duration.unwrap_or(self.target_gop as f64)
     }
@@ -308,7 +325,6 @@ impl Default for ProfileContext {
     fn default() -> Self {
         Self {
             file: String::new(),
-            pre_args: Vec::new(),
             input_ctx: Default::default(),
             output_ctx: Default::default(),
             ffmpeg_bin: "ffmpeg".into(),
@@ -331,17 +347,15 @@ pub enum StreamType {
     Subtitle,
 }
 
-#[cfg(test)]
-mod output_context_tests {
+#[cfg(all(test, target_os = "macos", feature = "cuda"))]
+mod macos_profile_tests {
     use super::*;
 
     #[test]
-    fn hard_seek_uses_the_advertised_representation_timeline() {
-        let context = OutputCtx {
-            start_num: 2,
-            segment_durations: Some(Arc::new(vec![5.005, 5.005, 2.0])),
-            ..Default::default()
-        };
-        assert!((context.start_time() - 10.01).abs() < 0.000_001);
+    fn enabling_the_cuda_feature_does_not_register_cuda_on_macos() {
+        profiles_init();
+        assert!(get_active_profiles()
+            .iter()
+            .all(|profile| profile.name() != "CudaTranscodeProfile"));
     }
 }

@@ -4,14 +4,9 @@ pub mod planner;
 
 use cfg_if::cfg_if;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
-
 use crate::utils::ffpath;
 
 lazy_static::lazy_static! {
-    pub static ref STREAMING_SESSION: Arc<RwLock<HashMap<String, HashMap<String, String>>>> = Arc::new(RwLock::new(HashMap::new()));
     pub static ref FFMPEG_BIN: &'static str = Box::leak(ffpath(if cfg!(windows) { "utils/ffmpeg.exe" } else { "utils/ffmpeg" }).into_boxed_str());
     pub static ref FFPROBE_BIN: &'static str = {
         cfg_if! {
@@ -293,6 +288,17 @@ mod compatibility_tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    fn command_context(input_codec: &str, output_codec: &str) -> ProfileContext {
+        let mut context = ProfileContext::default();
+        context.file = "source.mp4".into();
+        context.input_ctx.codec = input_codec.into();
+        context.input_ctx.pix_fmt = "yuv420p".into();
+        context.input_ctx.fps = 24.0;
+        context.output_ctx.codec = output_codec.into();
+        context.output_ctx.outdir = "output".into();
+        context
+    }
+
     #[test]
     fn runtime_rejects_legacy_ffmpeg_and_accepts_the_supported_baseline() {
         assert_eq!(
@@ -311,10 +317,10 @@ mod compatibility_tests {
     fn generated_profiles_use_ffmpeg_9_output_scoping() {
         let video_profiles = [
             H264TransmuxProfile
-                .build(ProfileContext::default())
+                .build(command_context("h264", "h264"))
                 .unwrap(),
             H264TranscodeProfile
-                .build(ProfileContext::default())
+                .build(command_context("h264", "h264"))
                 .unwrap(),
         ];
         for args in video_profiles {
@@ -327,10 +333,10 @@ mod compatibility_tests {
 
         let audio_profiles = [
             AudioTransmuxProfile
-                .build(ProfileContext::default())
+                .build(command_context("aac", "aac"))
                 .unwrap(),
             AacTranscodeProfile
-                .build(ProfileContext::default())
+                .build(command_context("aac", "aac"))
                 .unwrap(),
         ];
         for args in audio_profiles {
@@ -346,7 +352,7 @@ mod compatibility_tests {
     #[test]
     fn windows_amf_profile_uses_ffmpeg_9_output_scoping() {
         let args = AmfTranscodeProfile
-            .build(ProfileContext::default())
+            .build(command_context("h264", "h264"))
             .unwrap();
         assert!(!args.iter().any(|arg| arg == "-vsync"));
         assert!(args
@@ -570,10 +576,10 @@ mod compatibility_tests {
     fn nightfall_uses_the_supported_hls_segment_option() {
         for args in [
             H264TranscodeProfile
-                .build(ProfileContext::default())
+                .build(command_context("h264", "h264"))
                 .expect("H264 profile should generate FFmpeg arguments"),
             AacTranscodeProfile
-                .build(ProfileContext::default())
+                .build(command_context("aac", "aac"))
                 .expect("AAC profile should generate FFmpeg arguments"),
         ] {
             assert!(!args.iter().any(|arg| arg == "-hls_ts_options"));
@@ -586,7 +592,7 @@ mod compatibility_tests {
 
     #[test]
     fn preserves_discontinuity_flags_used_for_seeking() {
-        let mut ctx = ProfileContext::default();
+        let mut ctx = command_context("h264", "h264");
         ctx.output_ctx.start_num = 4;
 
         let args = H264TranscodeProfile
@@ -600,8 +606,7 @@ mod compatibility_tests {
 
     #[test]
     fn h264_scale_filter_uses_width_then_height() {
-        let mut ctx = ProfileContext::default();
-        ctx.output_ctx.codec = "h264".into();
+        let mut ctx = command_context("h264", "h264");
         ctx.output_ctx.width = Some(1920);
         ctx.output_ctx.height = Some(1080);
 
@@ -616,9 +621,7 @@ mod compatibility_tests {
 
     #[test]
     fn verified_av1_can_use_the_existing_fragmented_mp4_remux_profile() {
-        let mut ctx = ProfileContext::default();
-        ctx.input_ctx.codec = "av1".into();
-        ctx.output_ctx.codec = "av1".into();
+        let ctx = command_context("av1", "av1");
 
         assert!(H264TransmuxProfile.supports(&ctx).is_ok());
         let args = H264TransmuxProfile
