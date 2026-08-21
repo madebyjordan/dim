@@ -261,6 +261,7 @@ export type RemotePlaybackState =
 export type RemoteRequestAttribution =
   | 'sender_preflight'
   | 'sender_or_local_proxy'
+  | 'webkit_route_proxy_candidate'
   | 'apple_media_intermediary_candidate'
   | 'remote_network_candidate'
   | 'origin_unresolved'
@@ -280,6 +281,10 @@ export type RemotePlaybackStatus = {
   successful_remote_segments: number;
   last_request_attribution?: RemoteRequestAttribution | null;
   last_request_stage?: RemoteHlsStage | null;
+  last_remote_segment_path?: string | null;
+  last_remote_segment_elapsed_ms?: number | null;
+  delivery_evidence_remaining_ms?: number | null;
+  route_loss_reported: boolean;
 };
 
 export type PlaybackSession = {

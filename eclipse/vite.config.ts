@@ -6,8 +6,15 @@ const backendProxy = (): ProxyOptions => ({
   target: backend,
   changeOrigin: true,
   configure(proxy) {
-    proxy.on('proxyReq', (request) => {
+    proxy.on('proxyReq', (request, incoming) => {
       if (request.getHeader('origin')) request.setHeader('origin', backend);
+      // Preserve client origin across the loopback development proxy. The backend accepts these
+      // private headers only from loopback and uses them to distinguish Safari from an AirPlay
+      // receiver without relying on device-specific user agents.
+      const clientIp = incoming.socket.remoteAddress?.replace(/^::ffff:/, '');
+      if (clientIp) request.setHeader('x-eclipse-proxy-client-ip', clientIp);
+      if (incoming.headers.host)
+        request.setHeader('x-eclipse-proxy-origin-host', incoming.headers.host);
     });
   }
 });

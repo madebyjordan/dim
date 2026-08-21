@@ -14,10 +14,17 @@ use uuid::Uuid;
 
 fn classify_hls_request_origin(
     playback_state: Option<RemotePlaybackState>,
-    peer_ip: Option<std::net::IpAddr>,
-    host_ip: Option<std::net::IpAddr>,
+    client_ip: Option<std::net::IpAddr>,
+    origin_host_ip: Option<std::net::IpAddr>,
+    client_origin_preserved: bool,
     user_agent: &str,
 ) -> RemoteRequestAttribution {
+    let is_webkit_safari = user_agent.contains("AppleWebKit/")
+        && user_agent.contains("Safari/")
+        && !user_agent.contains("Chrome/")
+        && !user_agent.contains("Chromium/")
+        && !user_agent.contains("CriOS/")
+        && !user_agent.contains("Edg/");
     match playback_state {
         Some(RemotePlaybackState::Prepared | RemotePlaybackState::HandoffRequested) | None => {
             RemoteRequestAttribution::SenderPreflight
@@ -30,7 +37,7 @@ fn classify_hls_request_origin(
         Some(
             RemotePlaybackState::WirelessRouteReported
             | RemotePlaybackState::MediaDeliveryConfirmed,
-        ) => match (peer_ip, host_ip) {
+        ) => match (client_ip, origin_host_ip) {
             (Some(peer), Some(host)) if peer != host => {
                 RemoteRequestAttribution::RemoteNetworkCandidate
             }
@@ -39,10 +46,57 @@ fn classify_hls_request_origin(
             {
                 RemoteRequestAttribution::AppleMediaIntermediaryCandidate
             }
+            (Some(_), Some(_)) if is_webkit_safari && !client_origin_preserved => {
+                // macOS WebKit can proxy an active AirPlay receiver's media requests through the
+                // sender without preserving the original client address. Only use this weaker
+                // signature after WebKit has reported a wireless route. When a trusted proxy has
+                // preserved the address, same-host Safari traffic remains sender traffic.
+                RemoteRequestAttribution::WebKitRouteProxyCandidate
+            }
             (Some(_), Some(_)) => RemoteRequestAttribution::SenderOrLocalProxy,
             _ => RemoteRequestAttribution::OriginUnresolved,
         },
     }
+}
+
+fn parse_host_ip(value: &str) -> Option<std::net::IpAddr> {
+    value.parse::<std::net::IpAddr>().ok().or_else(|| {
+        value
+            .parse::<axum::http::uri::Authority>()
+            .ok()
+            .and_then(|authority| authority.host().parse().ok())
+    })
+}
+
+fn hls_transport_origin(
+    headers: &axum::http::HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> (Option<std::net::IpAddr>, Option<std::net::IpAddr>, bool) {
+    let trusted_local_proxy = peer.is_some_and(|value| value.ip().is_loopback());
+    let proxy_client_ip = trusted_local_proxy
+        .then(|| {
+            headers
+                .get("x-eclipse-proxy-client-ip")
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_host_ip)
+        })
+        .flatten();
+    let proxy_origin_host_ip = trusted_local_proxy
+        .then(|| {
+            headers
+                .get("x-eclipse-proxy-origin-host")
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_host_ip)
+        })
+        .flatten();
+    let client_ip = proxy_client_ip.or_else(|| peer.map(|value| value.ip()));
+    let host_ip = proxy_origin_host_ip.or_else(|| {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_host_ip)
+    });
+    (client_ip, host_ip, proxy_client_ip.is_some())
 }
 
 pub async fn trace_remote_playback<B>(
@@ -55,6 +109,9 @@ pub async fn trace_remote_playback<B>(
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|connect| connect.0);
+    // Vite overwrites these private headers from its accepted client socket and original Host.
+    // Never accept caller-provided values across a non-loopback backend connection.
+    let (client_ip, host_ip, client_origin_preserved) = hls_transport_origin(req.headers(), peer);
     let user_agent = req
         .headers()
         .get(axum::http::header::USER_AGENT)
@@ -67,12 +124,6 @@ pub async fn trace_remote_playback<B>(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("none")
         .to_owned();
-    let host_ip = req
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(':').next())
-        .and_then(|value| value.parse::<std::net::IpAddr>().ok());
     let session_id = path
         .strip_prefix("/api/v1/remote/")
         .and_then(|rest| rest.split('/').next())
@@ -83,8 +134,9 @@ pub async fn trace_remote_playback<B>(
     };
     let request_attribution = classify_hls_request_origin(
         remote_playback_state,
-        peer.map(|value| value.ip()),
+        client_ip,
         host_ip,
+        client_origin_preserved,
         &user_agent,
     );
     let stage = if path.ends_with("/master.m3u8") {
@@ -113,6 +165,9 @@ pub async fn trace_remote_playback<B>(
         remote_playback_state = ?remote_playback_state,
         request_attribution = ?request_attribution,
         peer = ?peer,
+        client_ip = ?client_ip,
+        origin_host_ip = ?host_ip,
+        client_origin_preserved,
         user_agent = %user_agent,
         range = %range,
         "HLS transport request started"
@@ -127,6 +182,9 @@ pub async fn trace_remote_playback<B>(
         remote_playback_state = ?remote_playback_state,
         request_attribution = ?request_attribution,
         peer = ?peer,
+        client_ip = ?client_ip,
+        origin_host_ip = ?host_ip,
+        client_origin_preserved,
         status = %response.status(),
         elapsed_ms = started_at.elapsed().as_millis(),
         "HLS transport request finished"
@@ -153,6 +211,7 @@ mod remote_playback_tests {
                 Some(RemotePlaybackState::Prepared),
                 Some(receiver),
                 Some(sender),
+                true,
                 "AppleCoreMedia"
             ),
             RemoteRequestAttribution::SenderPreflight
@@ -168,7 +227,8 @@ mod remote_playback_tests {
                 Some(RemotePlaybackState::WirelessRouteReported),
                 Some(sender),
                 Some(sender),
-                "Mozilla/5.0 Safari/605.1.15"
+                true,
+                "Mozilla/5.0 Chrome/140.0 Safari/537.36"
             ),
             RemoteRequestAttribution::SenderOrLocalProxy
         );
@@ -177,6 +237,7 @@ mod remote_playback_tests {
                 Some(RemotePlaybackState::WirelessRouteReported),
                 Some(receiver),
                 Some(sender),
+                true,
                 "AppleCoreMedia/1.0"
             ),
             RemoteRequestAttribution::RemoteNetworkCandidate
@@ -186,10 +247,93 @@ mod remote_playback_tests {
                 Some(RemotePlaybackState::WirelessRouteReported),
                 Some(sender),
                 Some(sender),
+                true,
                 "AppleCoreMedia/1.0"
             ),
             RemoteRequestAttribution::AppleMediaIntermediaryCandidate
         );
+    }
+
+    #[test]
+    fn post_route_webkit_sender_proxy_is_receiver_delivery_evidence() {
+        let sender = "192.168.1.160".parse().unwrap();
+        let safari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+            AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15";
+
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::Prepared),
+                Some(sender),
+                Some(sender),
+                false,
+                safari,
+            ),
+            RemoteRequestAttribution::SenderPreflight
+        );
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::WirelessRouteReported),
+                Some(sender),
+                Some(sender),
+                false,
+                safari,
+            ),
+            RemoteRequestAttribution::WebKitRouteProxyCandidate
+        );
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::WirelessRouteReported),
+                Some(sender),
+                Some(sender),
+                true,
+                safari,
+            ),
+            RemoteRequestAttribution::SenderOrLocalProxy
+        );
+    }
+
+    #[test]
+    fn proxy_address_parsing_preserves_ipv4_and_authority_hosts() {
+        assert_eq!(
+            parse_host_ip("192.168.1.80"),
+            Some("192.168.1.80".parse().unwrap())
+        );
+        assert_eq!(
+            parse_host_ip("192.168.1.160:5173"),
+            Some("192.168.1.160".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn loopback_dev_proxy_preserves_receiver_origin_but_remote_spoofing_cannot() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::HOST, "127.0.0.1:8000".parse().unwrap());
+        headers.insert("x-eclipse-proxy-client-ip", "192.168.1.80".parse().unwrap());
+        headers.insert(
+            "x-eclipse-proxy-origin-host",
+            "192.168.1.160:5173".parse().unwrap(),
+        );
+        let loopback = "127.0.0.1:55000".parse().unwrap();
+        let (client, host, preserved) = hls_transport_origin(&headers, Some(loopback));
+        assert_eq!(client, Some("192.168.1.80".parse().unwrap()));
+        assert_eq!(host, Some("192.168.1.160".parse().unwrap()));
+        assert!(preserved);
+        assert_eq!(
+            classify_hls_request_origin(
+                Some(RemotePlaybackState::WirelessRouteReported),
+                client,
+                host,
+                preserved,
+                "Mozilla/5.0 SmartTV",
+            ),
+            RemoteRequestAttribution::RemoteNetworkCandidate
+        );
+
+        let remote = "10.0.0.5:55000".parse().unwrap();
+        let (client, host, preserved) = hls_transport_origin(&headers, Some(remote));
+        assert_eq!(client, Some("10.0.0.5".parse().unwrap()));
+        assert_eq!(host, Some("127.0.0.1".parse().unwrap()));
+        assert!(!preserved);
     }
 }
 

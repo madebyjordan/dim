@@ -15,6 +15,10 @@
     type BrowserCapabilities
   } from './capabilities';
   import {
+    isAmbiguousAirPlayPlayRejection,
+    shouldDeferAirPlayRouteLoss
+  } from './airplay-state';
+  import {
     clearStoredPlayback,
     createPlaybackInstanceId,
     createPlaybackOwnership,
@@ -96,8 +100,13 @@
   let remoteVideo: WebKitAirPlayVideo | null = null;
   let remoteEventCleanup: (() => void) | null = null;
   let airPlayStatusTimer: number | null = null;
+  let airPlayMonitorGeneration = 0;
   let airPlayAttempt: { id: string; startedAt: number } | null = null;
   let airPlayHandoffTime = 0;
+  let airPlayDeliveryConfirmed = false;
+  let airPlayAwaitingDeliveryEvidence = false;
+  let airPlayRouteUncertain = false;
+  let localPlaybackRestorePromise: Promise<void> | null = null;
   let airPlayTargetAvailability: 'unknown' | 'available' | 'not-available' =
     'unknown';
   let airPlayState = $state<
@@ -160,15 +169,24 @@
     }
   }
 
+  function playbackControlTarget(): HTMLVideoElement {
+    return remoteVideo &&
+      (airPlayState === 'route-selected' || airPlayState === 'active')
+      ? remoteVideo
+      : video;
+  }
+
   function togglePlayback() {
-    if (video.paused) void video.play();
-    else video.pause();
+    const target = playbackControlTarget();
+    if (target.paused) void target.play();
+    else target.pause();
     showControls();
   }
 
   function toggleMute() {
-    video.muted = !video.muted;
-    muted = video.muted;
+    const target = playbackControlTarget();
+    target.muted = !target.muted;
+    muted = target.muted;
     showControls();
   }
 
@@ -195,11 +213,13 @@
       togglePlayback();
     } else if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      beginSeek(Math.max(0, video.currentTime - 10), 'keyboard-arrow-left');
+      const target = playbackControlTarget();
+      beginSeek(Math.max(0, target.currentTime - 10), 'keyboard-arrow-left');
     } else if (event.key === 'ArrowRight') {
       event.preventDefault();
+      const target = playbackControlTarget();
       beginSeek(
-        Math.min(video.duration || Infinity, video.currentTime + 10),
+        Math.min(target.duration || Infinity, target.currentTime + 10),
         'keyboard-arrow-right'
       );
     } else if (event.key.toLowerCase() === 'm') toggleMute();
@@ -279,7 +299,7 @@
   function beginSeek(
     target: number,
     reason: string,
-    from = video.currentTime,
+    from = playbackControlTarget().currentTime,
     inputCount?: number
   ) {
     const trace: SeekTrace = {
@@ -291,18 +311,29 @@
       inputCount
     };
     activeSeek = trace;
-    reportPlayerEvent(
-      'seek-committed',
-      inputCount === undefined
-        ? undefined
-        : JSON.stringify({ scrub_input_count: inputCount }),
-      trace
-    );
-    video.currentTime = target;
+    const controlled = playbackControlTarget();
+    if (controlled === remoteVideo) {
+      logAirPlayStage('remote-seek-requested', { from, target, reason });
+      reportRemotePlayerEvent('seek-committed', {
+        from,
+        target,
+        reason,
+        inputCount
+      });
+    } else {
+      reportPlayerEvent(
+        'seek-committed',
+        inputCount === undefined
+          ? undefined
+          : JSON.stringify({ scrub_input_count: inputCount }),
+        trace
+      );
+    }
+    controlled.currentTime = target;
   }
 
   const timelineSeek = createSeekCommitter(
-    () => video.currentTime,
+    () => playbackControlTarget().currentTime,
     (target) => {
       if (timeOutput) timeOutput.value = formatTime(target);
     },
@@ -418,12 +449,13 @@
       reason,
       caller
     });
-    await session.api.delete(
-      `stream/${gid}/state/kill`,
-      sessionOwnership.instanceId
+    await session.api.request<void>(`stream/${gid}/state/kill`, {
+      method: 'DELETE',
+      keepalive: true,
+      query: sessionOwnership.instanceId
         ? teardownQuery(sessionOwnership, reason, caller)
         : { teardown_reason: reason, teardown_caller: caller }
-    );
+    });
   }
 
   async function activate() {
@@ -568,6 +600,20 @@
 
   async function prepareAirPlay() {
     if (
+      (airPlayState === 'route-selected' || airPlayState === 'active') &&
+      remoteVideo?.webkitShowPlaybackTargetPicker
+    ) {
+      try {
+        remoteVideo.webkitShowPlaybackTargetPicker();
+        logAirPlayStage('route-picker-reopened', remoteMediaState(remoteVideo));
+      } catch (cause) {
+        logAirPlayStage('route-picker-reopen-failed', {
+          failure: cause instanceof Error ? cause.message : String(cause)
+        });
+      }
+      return;
+    }
+    if (
       airPlayState === 'ready' &&
       remoteVideo?.webkitShowPlaybackTargetPicker
     ) {
@@ -623,6 +669,7 @@
       remoteAirPlayHost.append(element);
       const onWirelessChanged = () => void handleWirelessTargetChanged(element);
       const onAvailabilityChanged = (event: Event) => {
+        if (remoteVideo !== element) return;
         const availability = (event as WebKitPlaybackTargetAvailabilityEvent)
           .availability;
         airPlayTargetAvailability = availability ?? 'unknown';
@@ -649,9 +696,30 @@
         'waiting'
       ] as const;
       const onRemoteMediaEvent = (event: Event) => {
+        if (remoteVideo !== element) return;
         const details = remoteMediaState(element);
+        if (event.type === 'play' || event.type === 'playing') paused = false;
+        else if (event.type === 'pause') paused = true;
         logAirPlayStage(`media-${event.type}`, details);
         reportRemotePlayerEvent(event.type, details);
+        if (
+          airPlayDeliveryConfirmed &&
+          (event.type === 'error' ||
+            ((event.type === 'stalled' || event.type === 'waiting') &&
+              !element.paused))
+        )
+          void reportEstablishedRouteUncertainty(
+            'failed',
+            `remote-media-${event.type}`
+          );
+      };
+      const onRemoteTime = () => {
+        if (remoteVideo !== element) return;
+        if (Number.isFinite(element.currentTime))
+          airPlayHandoffTime = element.currentTime;
+        if (timeOutput) timeOutput.value = formatTime(element.currentTime);
+        if (seekInput && !timelineSeek.isPreviewing())
+          seekInput.value = String(element.currentTime);
       };
       element.addEventListener(
         'webkitcurrentplaybacktargetiswirelesschanged',
@@ -663,6 +731,7 @@
       );
       for (const event of diagnosticEvents)
         element.addEventListener(event, onRemoteMediaEvent);
+      element.addEventListener('timeupdate', onRemoteTime);
       remoteEventCleanup = () => {
         element.removeEventListener(
           'webkitcurrentplaybacktargetiswirelesschanged',
@@ -674,6 +743,7 @@
         );
         for (const event of diagnosticEvents)
           element.removeEventListener(event, onRemoteMediaEvent);
+        element.removeEventListener('timeupdate', onRemoteTime);
       };
       remoteVideo = element;
       element.src = new URL(remote.remote.url, window.location.origin).href;
@@ -774,6 +844,29 @@
     );
   }
 
+  function logAirPlayFailureDecision(
+    trigger: string,
+    status: RemotePlaybackStatus,
+    whyEvidenceIsSufficient: string
+  ) {
+    logAirPlayStage('failure-decision', {
+      eventTrigger: trigger,
+      webkitRouteState:
+        remoteVideo?.webkitCurrentPlaybackTargetIsWireless === true
+          ? 'wireless'
+          : 'local',
+      deliveryConfirmed: airPlayDeliveryConfirmed,
+      lastConfirmedReceiverOrProxySegment:
+        status.last_remote_segment_path ?? null,
+      expectedBufferedCoverageRemainingMs:
+        status.delivery_evidence_remaining_ms ?? 0,
+      remoteOwnershipState: airPlayState,
+      backendState: status.state,
+      evidenceSufficientToFail: true,
+      whyEvidenceIsSufficient
+    });
+  }
+
   function reportRemotePlayerEvent(
     event: string,
     details: Record<string, unknown> = {}
@@ -803,6 +896,7 @@
   }
 
   function stopAirPlayStatusMonitor() {
+    airPlayMonitorGeneration += 1;
     if (airPlayStatusTimer !== null) window.clearTimeout(airPlayStatusTimer);
     airPlayStatusTimer = null;
   }
@@ -811,20 +905,35 @@
     stopAirPlayStatusMonitor();
     const sessionId = remoteSessionId;
     if (!sessionId) return;
+    const monitorGeneration = airPlayMonitorGeneration;
+    const isCurrentMonitor = () =>
+      airPlayMonitorGeneration === monitorGeneration &&
+      remoteSessionId === sessionId;
+    const scheduleNextPoll = () => {
+      if (!isCurrentMonitor()) return;
+      airPlayStatusTimer = window.setTimeout(poll, 500);
+    };
     const poll = async () => {
-      if (remoteSessionId !== sessionId) return;
+      if (!isCurrentMonitor()) return;
       try {
         const status = await session.api.get<RemotePlaybackStatus>(
           `stream/${sessionId}/state/remote-route`
         );
+        if (!isCurrentMonitor()) return;
         logAirPlayStage('delivery-status', status);
         if (status.state === 'media_delivery_confirmed') {
           airPlayState = 'active';
           error = null;
-          logAirPlayStage('remote-delivery-established', status);
+          if (!airPlayDeliveryConfirmed)
+            logAirPlayStage('remote-delivery-established', status);
+          airPlayDeliveryConfirmed = true;
+          airPlayAwaitingDeliveryEvidence = false;
+          airPlayRouteUncertain = status.route_loss_reported;
+          scheduleNextPoll();
           return;
         }
         if (status.state === 'handoff_stalled' || status.state === 'failed') {
+          airPlayAwaitingDeliveryEvidence = false;
           airPlayState = 'failed';
           error =
             status.last_request_stage === 'init_fragment'
@@ -832,43 +941,160 @@
               : status.last_request_stage === 'media_segment'
                 ? 'The AirPlay receiver began fetching media, but delivery stopped before playback was established.'
                 : 'Safari selected an AirPlay receiver, but Eclipse did not observe remote media delivery.';
+          logAirPlayFailureDecision(
+            status.state === 'handoff_stalled'
+              ? 'backend-handoff-deadline'
+              : 'backend-delivery-evidence-expired',
+            status,
+            status.state === 'handoff_stalled'
+              ? 'WebKit reported a wireless route, but the backend did not observe two distinct attributed media segments before the route-selection delivery deadline.'
+              : 'Previously confirmed receiver delivery stopped, and the backend-observed segment coverage plus its playlist-derived grace interval has expired.'
+          );
           logAirPlayStage('remote-delivery-failed', {
             ...status,
             failure: error
           });
+          await disposeRemotePlayback(`airplay-${status.state}`);
+          airPlayState = 'failed';
           await restoreLocalPlayback();
           return;
         }
-        airPlayStatusTimer = window.setTimeout(poll, 500);
+        if (status.state === 'disconnected') {
+          logAirPlayStage('remote-termination-decision', {
+            eventTrigger: 'backend-confirmed-disconnect',
+            webkitRouteState:
+              remoteVideo?.webkitCurrentPlaybackTargetIsWireless === true
+                ? 'wireless'
+                : 'local',
+            deliveryConfirmed: airPlayDeliveryConfirmed,
+            lastConfirmedReceiverOrProxySegment:
+              status.last_remote_segment_path ?? null,
+            expectedBufferedCoverageRemainingMs:
+              status.delivery_evidence_remaining_ms ?? 0,
+            remoteOwnershipState: airPlayState,
+            backendState: status.state,
+            whyEvidenceIsSufficient:
+              'The backend accepted the disconnect only before delivery or after attributed receiver coverage expired.'
+          });
+          airPlayDeliveryConfirmed = false;
+          airPlayAwaitingDeliveryEvidence = false;
+          airPlayRouteUncertain = false;
+          airPlayAttempt = null;
+          airPlayState = 'ready';
+          error = null;
+          logAirPlayStage('remote-delivery-ended', status);
+          await disposeRemotePlayback('airplay-disconnected');
+          airPlayState = 'available';
+          await restoreLocalPlayback();
+          void prepareAirPlay();
+          return;
+        }
+        scheduleNextPoll();
       } catch (cause) {
-        airPlayState = 'failed';
-        error =
-          cause instanceof Error
-            ? cause.message
-            : 'AirPlay delivery status could not be read.';
-        logAirPlayStage('status-failed', { failure: error });
-        await restoreLocalPlayback();
+        if (!isCurrentMonitor()) return;
+        // A failed status read is absence of evidence, not evidence that receiver delivery ended.
+        // Keep remote ownership and local suspension until the backend can make an evidence-backed
+        // terminal decision.
+        airPlayRouteUncertain = true;
+        logAirPlayStage('delivery-status-uncertain', {
+          webkitRouteState:
+            remoteVideo?.webkitCurrentPlaybackTargetIsWireless === true
+              ? 'wireless'
+              : 'local',
+          deliveryConfirmed: airPlayDeliveryConfirmed,
+          remoteOwnershipState: airPlayState,
+          failure: cause instanceof Error ? cause.message : String(cause),
+          terminalDecision: 'deferred-no-delivery-evidence'
+        });
+        scheduleNextPoll();
       }
     };
     void poll();
   }
 
+  async function reportEstablishedRouteUncertainty(
+    state: 'failed' | 'disconnected',
+    reason: string
+  ) {
+    if (!airPlayDeliveryConfirmed) return false;
+    airPlayRouteUncertain = true;
+    logAirPlayStage('established-route-uncertain', {
+      reportedState: state,
+      reason
+    });
+    await updateRemoteRouteState(state).catch((cause) =>
+      logAirPlayStage('route-state-report-failed', {
+        routeState: state,
+        failure: cause instanceof Error ? cause.message : String(cause)
+      })
+    );
+    monitorAirPlayDelivery();
+    return true;
+  }
+
   async function handleWirelessTargetChanged(element: WebKitAirPlayVideo) {
+    if (remoteVideo !== element) {
+      logAirPlayStage('stale-wireless-target-callback-ignored', {
+        callbackWirelessState:
+          element.webkitCurrentPlaybackTargetIsWireless === true,
+        callbackSource: element.currentSrc || element.src
+      });
+      return;
+    }
     const wireless = element.webkitCurrentPlaybackTargetIsWireless === true;
+    if (Number.isFinite(element.currentTime))
+      airPlayHandoffTime = element.currentTime;
     if (
       wireless &&
       (airPlayState === 'route-selected' || airPlayState === 'active')
-    )
+    ) {
+      if (airPlayState === 'active' && airPlayRouteUncertain) {
+        airPlayRouteUncertain = false;
+        logAirPlayStage('established-route-recovered');
+        void updateRemoteRouteState('wireless_route_reported').catch(
+          () => undefined
+        );
+      }
       return;
+    }
     logAirPlayStage('wireless-target-changed', {
       wireless,
       ...remoteMediaState(element)
     });
     if (!wireless) {
-      stopAirPlayStatusMonitor();
-      if (airPlayAttempt) {
-        await updateRemoteRouteState('disconnected').catch(() => undefined);
-        logAirPlayStage('receiver-disconnected');
+      if (
+        await reportEstablishedRouteUncertainty(
+          'disconnected',
+          'webkit-wireless-route-false'
+        )
+      )
+        return;
+      if (
+        shouldDeferAirPlayRouteLoss(
+          airPlayDeliveryConfirmed,
+          airPlayAwaitingDeliveryEvidence
+        )
+      ) {
+        airPlayRouteUncertain = true;
+        logAirPlayStage('handoff-route-signal-uncertain', {
+          awaitingDeliveryEvidence: airPlayAwaitingDeliveryEvidence
+        });
+        monitorAirPlayDelivery();
+        return;
+      }
+      if (airPlayAttempt && remoteSessionId) {
+        airPlayRouteUncertain = true;
+        await updateRemoteRouteState('disconnected').catch((cause) =>
+          logAirPlayStage('route-state-report-failed', {
+            routeState: 'disconnected',
+            failure: cause instanceof Error ? cause.message : String(cause)
+          })
+        );
+        logAirPlayStage('pre-delivery-route-ended');
+        // Let the correlated backend state decide ownership. This also closes the race
+        // where receiver traffic confirms delivery between frontend status polls.
+        monitorAirPlayDelivery();
+        return;
       }
       airPlayAttempt = null;
       airPlayState = 'ready';
@@ -877,10 +1103,20 @@
     }
 
     airPlayState = 'route-selected';
+    airPlayDeliveryConfirmed = false;
+    airPlayAwaitingDeliveryEvidence = true;
+    airPlayRouteUncertain = false;
     airPlayHandoffTime = video.currentTime;
     logAirPlayStage('receiver-selected', { localTime: airPlayHandoffTime });
+    const selectedSessionId = remoteSessionId;
+    const selectedAttemptId = airPlayAttempt?.id;
+    const isCurrentSelection = () =>
+      remoteVideo === element &&
+      remoteSessionId === selectedSessionId &&
+      airPlayAttempt?.id === selectedAttemptId;
     try {
       await updateRemoteRouteState('wireless_route_reported');
+      if (!isCurrentSelection()) return;
       video.pause();
       dashErrorCleanup?.();
       dashErrorCleanup = null;
@@ -888,49 +1124,82 @@
       dashTelemetryCleanup = null;
       dashPlayer?.destroy();
       dashPlayer = null;
-      await element.play();
-      logAirPlayStage(
-        'remote-play-request-accepted',
-        remoteMediaState(element)
-      );
+      // Delivery monitoring starts before play() settles. WebKit can resolve, reject, or leave the
+      // promise pending while the receiver independently fetches HLS; none of those outcomes is an
+      // authoritative ownership signal.
       monitorAirPlayDelivery();
+      const playRequest = element.play();
+      void playRequest.then(
+        () => {
+          if (!isCurrentSelection()) return;
+          logAirPlayStage(
+            'remote-play-request-accepted-advisory',
+            remoteMediaState(element)
+          );
+        },
+        (cause: unknown) => {
+          if (!isCurrentSelection()) return;
+          airPlayRouteUncertain = true;
+          error = null;
+          logAirPlayStage('remote-play-request-rejected-advisory', {
+            ambiguousAbort:
+              cause instanceof DOMException &&
+              isAmbiguousAirPlayPlayRejection(cause),
+            exceptionName:
+              cause instanceof DOMException ? cause.name : undefined,
+            failure: cause instanceof Error ? cause.message : String(cause),
+            terminalDecision: 'deferred-to-receiver-delivery-evidence',
+            ...remoteMediaState(element)
+          });
+        }
+      );
     } catch (cause) {
-      airPlayState = 'failed';
-      error =
-        cause instanceof Error
-          ? cause.message
-          : 'Safari rejected the AirPlay playback handoff.';
-      await updateRemoteRouteState('failed').catch(() => undefined);
-      logAirPlayStage('remote-play-request-failed', { failure: error });
-      await restoreLocalPlayback();
+      if (!isCurrentSelection()) return;
+      airPlayRouteUncertain = true;
+      error = null;
+      logAirPlayStage('route-selection-processing-uncertain', {
+        failure: cause instanceof Error ? cause.message : String(cause),
+        terminalDecision: 'deferred-to-backend-delivery-evidence',
+        ...remoteMediaState(element)
+      });
+      monitorAirPlayDelivery();
     }
   }
 
-  async function restoreLocalPlayback() {
-    if (!playbackSession || dashPlayer || phase !== 'ready') return;
-    try {
-      await activate();
-      if (airPlayHandoffTime > 0) {
-        if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
-          await new Promise<void>((resolve) =>
-            video.addEventListener('loadedmetadata', () => resolve(), {
-              once: true
-            })
-          );
+  function restoreLocalPlayback() {
+    if (localPlaybackRestorePromise) return localPlaybackRestorePromise;
+    const restore = (async () => {
+      if (!playbackSession || dashPlayer || phase !== 'ready') return;
+      try {
+        await activate();
+        if (airPlayHandoffTime > 0) {
+          if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+            await new Promise<void>((resolve) =>
+              video.addEventListener('loadedmetadata', () => resolve(), {
+                once: true
+              })
+            );
+          }
+          video.currentTime = airPlayHandoffTime;
         }
-        video.currentTime = airPlayHandoffTime;
+        await video.play();
+        logAirPlayStage('local-playback-restored', {
+          currentTime: video.currentTime
+        });
+      } catch (cause) {
+        error =
+          cause instanceof Error
+            ? cause.message
+            : 'Local playback could not be restored.';
+        logAirPlayStage('local-playback-restore-failed', { failure: error });
       }
-      await video.play();
-      logAirPlayStage('local-playback-restored', {
-        currentTime: video.currentTime
-      });
-    } catch (cause) {
-      error =
-        cause instanceof Error
-          ? cause.message
-          : 'Local playback could not be restored.';
-      logAirPlayStage('local-playback-restore-failed', { failure: error });
-    }
+    })();
+    const pending = restore.finally(() => {
+      if (localPlaybackRestorePromise === pending)
+        localPlaybackRestorePromise = null;
+    });
+    localPlaybackRestorePromise = pending;
+    return pending;
   }
 
   async function disposeRemotePlayback(reason: string) {
@@ -943,6 +1212,9 @@
     remoteVideo?.remove();
     remoteVideo = null;
     airPlayAttempt = null;
+    airPlayDeliveryConfirmed = false;
+    airPlayAwaitingDeliveryEvidence = false;
+    airPlayRouteUncertain = false;
     const gid = remoteSessionId;
     remoteSessionId = null;
     if (gid) {
@@ -967,13 +1239,17 @@
     dashTelemetryCleanup = null;
     dashPlayer?.destroy();
     dashPlayer = null;
-    await disposeRemotePlayback(reason);
     const ids = [playbackSession?.gid].filter(Boolean) as string[];
     playbackSession = null;
     for (const gid of ids) clearStoredPlayback(gid);
-    await Promise.allSettled(
-      ids.map((gid) => teardownSession(gid, reason, caller))
-    );
+    // Dispatch both remote and local keepalive teardowns before yielding. Page closure can stop
+    // unmount work after the first await; serial cleanup left a restored local transcoder behind
+    // and poisoned the next AirPlay preparation at the admission boundary.
+    const remoteCleanup = disposeRemotePlayback(reason);
+    await Promise.allSettled([
+      remoteCleanup,
+      ...ids.map((gid) => teardownSession(gid, reason, caller))
+    ]);
   }
 
   onMount(() => {
@@ -1224,9 +1500,10 @@
           step="0.05"
           value="1"
           oninput={(event) => {
-            video.volume = Number(event.currentTarget.value);
-            video.muted = video.volume === 0;
-            muted = video.muted;
+            const target = playbackControlTarget();
+            target.volume = Number(event.currentTarget.value);
+            target.muted = target.volume === 0;
+            muted = target.muted;
           }}
         />
 

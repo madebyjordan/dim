@@ -37,6 +37,8 @@ pub enum RemotePlaybackState {
 pub enum RemoteRequestAttribution {
     SenderPreflight,
     SenderOrLocalProxy,
+    #[serde(rename = "webkit_route_proxy_candidate")]
+    WebKitRouteProxyCandidate,
     AppleMediaIntermediaryCandidate,
     RemoteNetworkCandidate,
     OriginUnresolved,
@@ -61,6 +63,10 @@ pub struct RemotePlaybackStatus {
     pub successful_remote_segments: usize,
     pub last_request_attribution: Option<RemoteRequestAttribution>,
     pub last_request_stage: Option<RemoteHlsStage>,
+    pub last_remote_segment_path: Option<String>,
+    pub last_remote_segment_elapsed_ms: Option<u128>,
+    pub delivery_evidence_remaining_ms: Option<u128>,
+    pub route_loss_reported: bool,
 }
 
 impl std::fmt::Display for ContentType {
@@ -414,7 +420,47 @@ struct Session {
     successful_remote_segments: HashSet<String>,
     last_request_attribution: Option<RemoteRequestAttribution>,
     last_request_stage: Option<RemoteHlsStage>,
+    last_successful_remote_segment_path: Option<String>,
+    last_successful_remote_segment_at: Option<Instant>,
+    remote_delivery_coverage_until: HashMap<String, Instant>,
+    pending_remote_terminal_state: Option<RemotePlaybackState>,
 }
+
+fn remote_segment_evidence(session: &Session, path: &str) -> Option<(String, f64)> {
+    let mut components = path.trim_matches('/').rsplit('/');
+    let segment = components.next()?.strip_suffix(".m4s")?;
+    let segment_index = segment.parse::<usize>().ok()?;
+    let track_id = components.next()?;
+    let duration = session
+        .tracks
+        .iter()
+        .find(|track| track.plan.manifest.id == track_id)?
+        .plan
+        .manifest
+        .segment_durations
+        .get(segment_index)
+        .copied()?;
+    (duration.is_finite() && duration > 0.0).then(|| (track_id.to_owned(), duration))
+}
+
+fn remote_delivery_evidence_deadline(session: &Session) -> Option<Instant> {
+    let buffered_until = session
+        .remote_delivery_coverage_until
+        .values()
+        .copied()
+        .max()?;
+    // Permit one advertised segment interval beyond the receiver's demonstrated buffered
+    // coverage. This derives the loss threshold from the exact playlist rather than a fixed
+    // post-handoff timeout.
+    let grace = session
+        .tracks
+        .iter()
+        .flat_map(|track| track.plan.manifest.segment_durations.iter().copied())
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .fold(0.0_f64, f64::max);
+    Some(buffered_until + Duration::from_secs_f64(grace))
+}
+
 #[derive(Debug)]
 struct Inner {
     sessions: HashMap<Uuid, Session>,
@@ -490,6 +536,10 @@ impl StreamTracking {
                 successful_remote_segments: HashSet::new(),
                 last_request_attribution: None,
                 last_request_stage: None,
+                last_successful_remote_segment_path: None,
+                last_successful_remote_segment_at: None,
+                remote_delivery_coverage_until: HashMap::new(),
+                pending_remote_terminal_state: None,
             },
         );
     }
@@ -523,6 +573,46 @@ impl StreamTracking {
         }
         if session.remote_playback_state == state {
             return Ok(());
+        }
+        // Once receiver traffic has proven delivery, a WebKit route-loss callback is only
+        // advisory. Safari can briefly report a local route while the receiver continues to
+        // consume already-buffered or newly requested HLS media. Preserve remote ownership
+        // until the server's segment-duration evidence expires.
+        if session.remote_playback_state == RemotePlaybackState::MediaDeliveryConfirmed {
+            if matches!(
+                state,
+                RemotePlaybackState::Failed | RemotePlaybackState::Disconnected
+            ) {
+                session.pending_remote_terminal_state = Some(state);
+                session.last_activity = Instant::now();
+                let evidence_remaining_ms =
+                    remote_delivery_evidence_deadline(session).map(|deadline| {
+                        deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or_default()
+                            .as_millis()
+                    });
+                tracing::warn!(
+                    session_id = %gid,
+                    owner,
+                    reported_state = ?state,
+                    event_trigger = "webkit-terminal-route-report",
+                    webkit_route_state = ?state,
+                    delivery_confirmed = true,
+                    last_confirmed_remote_segment = ?session.last_successful_remote_segment_path,
+                    expected_buffered_coverage_remaining_ms = ?evidence_remaining_ms,
+                    remote_ownership_state = ?session.remote_playback_state,
+                    failure_evidence = "advisory only; receiver delivery evidence has not expired",
+                    "AirPlay route became uncertain after confirmed delivery"
+                );
+                return Ok(());
+            }
+            if state == RemotePlaybackState::WirelessRouteReported {
+                session.pending_remote_terminal_state = None;
+                session.last_activity = Instant::now();
+                tracing::info!(session_id = %gid, owner, "AirPlay WebKit route signal recovered");
+                return Ok(());
+            }
         }
         // A picker request and WebKit's route callback are reported independently. Ignore a late
         // intent update after the stronger route signal, but reject client attempts to claim
@@ -559,14 +649,19 @@ impl StreamTracking {
         if !transition_allowed {
             return Err(TrackingError::InvalidSelection);
         }
-        if matches!(
-            state,
-            RemotePlaybackState::HandoffRequested | RemotePlaybackState::WirelessRouteReported
-        ) && session.handoff_started_at.is_none()
+        // Picker intent has no delivery deadline. Start the handoff clock only after WebKit says a
+        // receiver was selected; time spent in the native picker must not consume the delivery
+        // window.
+        if state == RemotePlaybackState::WirelessRouteReported
+            && session.handoff_started_at.is_none()
         {
             session.handoff_started_at = Some(Instant::now());
             session.successful_remote_inits.clear();
             session.successful_remote_segments.clear();
+            session.last_successful_remote_segment_path = None;
+            session.last_successful_remote_segment_at = None;
+            session.remote_delivery_coverage_until.clear();
+            session.pending_remote_terminal_state = None;
         }
         session.remote_playback_state = state;
         session.last_activity = Instant::now();
@@ -594,18 +689,53 @@ impl StreamTracking {
             return Err(TrackingError::NotOwner);
         }
         let elapsed = session.handoff_started_at.map(|started| started.elapsed());
-        if matches!(
-            session.remote_playback_state,
-            RemotePlaybackState::HandoffRequested | RemotePlaybackState::WirelessRouteReported
-        ) && elapsed.is_some_and(|value| value >= Self::HANDOFF_STALL_AFTER)
+        if session.remote_playback_state == RemotePlaybackState::WirelessRouteReported
+            && elapsed.is_some_and(|value| value >= Self::HANDOFF_STALL_AFTER)
         {
+            let ownership_before_failure = session.remote_playback_state;
             session.remote_playback_state = RemotePlaybackState::HandoffStalled;
             tracing::warn!(
                 session_id = %gid,
                 owner,
+                event_trigger = "remote-status-poll-handoff-deadline",
+                webkit_route_state = ?ownership_before_failure,
+                delivery_confirmed = false,
+                last_confirmed_remote_segment = ?session.last_successful_remote_segment_path,
+                expected_buffered_coverage_remaining_ms = 0_u128,
+                remote_ownership_state = ?ownership_before_failure,
                 successful_remote_inits = session.successful_remote_inits.len(),
                 successful_remote_segments = session.successful_remote_segments.len(),
+                failure_evidence = "wireless route was reported but fewer than two distinct attributed media segments arrived before the handoff deadline",
                 "AirPlay handoff stalled without confirmed remote media delivery"
+            );
+        }
+        let now = Instant::now();
+        let evidence_deadline = remote_delivery_evidence_deadline(session);
+        if session.remote_playback_state == RemotePlaybackState::MediaDeliveryConfirmed
+            && session.pending_remote_terminal_state.is_some()
+            && evidence_deadline.is_some_and(|deadline| now >= deadline)
+        {
+            let ownership_before_failure = session.remote_playback_state;
+            let reported_route_state = session.pending_remote_terminal_state;
+            session.remote_playback_state = session
+                .pending_remote_terminal_state
+                .take()
+                .expect("terminal evidence was checked above");
+            tracing::warn!(
+                session_id = %gid,
+                owner,
+                event_trigger = "remote-status-poll-delivery-evidence-expired",
+                webkit_route_state = ?reported_route_state,
+                delivery_confirmed = true,
+                last_confirmed_remote_segment = ?session.last_successful_remote_segment_path,
+                expected_buffered_coverage_remaining_ms = 0_u128,
+                remote_ownership_state = ?ownership_before_failure,
+                remote_playback_state = ?session.remote_playback_state,
+                last_remote_segment_elapsed_ms = ?session
+                    .last_successful_remote_segment_at
+                    .map(|last| last.elapsed().as_millis()),
+                failure_evidence = "advertised segment coverage plus one playlist-derived segment interval expired without continued attributed receiver demand",
+                "AirPlay delivery evidence expired without continued receiver demand"
             );
         }
         session.last_activity = Instant::now();
@@ -616,6 +746,17 @@ impl StreamTracking {
             successful_remote_segments: session.successful_remote_segments.len(),
             last_request_attribution: session.last_request_attribution,
             last_request_stage: session.last_request_stage,
+            last_remote_segment_path: session.last_successful_remote_segment_path.clone(),
+            last_remote_segment_elapsed_ms: session
+                .last_successful_remote_segment_at
+                .map(|last| last.elapsed().as_millis()),
+            delivery_evidence_remaining_ms: evidence_deadline.map(|deadline| {
+                deadline
+                    .checked_duration_since(now)
+                    .unwrap_or_default()
+                    .as_millis()
+            }),
+            route_loss_reported: session.pending_remote_terminal_state.is_some(),
         })
     }
 
@@ -634,10 +775,15 @@ impl StreamTracking {
         session.last_request_attribution = Some(attribution);
         session.last_request_stage = Some(stage);
         if !successful
-            || session.remote_playback_state != RemotePlaybackState::WirelessRouteReported
+            || !matches!(
+                session.remote_playback_state,
+                RemotePlaybackState::WirelessRouteReported
+                    | RemotePlaybackState::MediaDeliveryConfirmed
+            )
             || !matches!(
                 attribution,
-                RemoteRequestAttribution::AppleMediaIntermediaryCandidate
+                RemoteRequestAttribution::WebKitRouteProxyCandidate
+                    | RemoteRequestAttribution::AppleMediaIntermediaryCandidate
                     | RemoteRequestAttribution::RemoteNetworkCandidate
             )
         {
@@ -648,18 +794,47 @@ impl StreamTracking {
                 session.successful_remote_inits.insert(path.to_owned());
             }
             RemoteHlsStage::MediaSegment => {
-                session.successful_remote_segments.insert(path.to_owned());
+                let is_new = session.successful_remote_segments.insert(path.to_owned());
+                let now = Instant::now();
+                session.last_successful_remote_segment_path = Some(path.to_owned());
+                session.last_successful_remote_segment_at = Some(now);
+                session.pending_remote_terminal_state = None;
+                if let Some((track_id, duration)) = remote_segment_evidence(session, path) {
+                    let duration = Duration::from_secs_f64(duration);
+                    let coverage = session
+                        .remote_delivery_coverage_until
+                        .entry(track_id)
+                        .or_insert(now);
+                    *coverage = if is_new && *coverage > now {
+                        *coverage + duration
+                    } else {
+                        (*coverage).max(now + duration)
+                    };
+                }
             }
             _ => {}
         }
         // Two distinct successful post-route segments demonstrate sustained remote-bound media
         // delivery. This is intentionally not called proof that a physical display rendered it.
-        if session.successful_remote_segments.len() >= 2 {
+        if session.successful_remote_segments.len() >= 2
+            && session.remote_playback_state != RemotePlaybackState::MediaDeliveryConfirmed
+        {
             session.remote_playback_state = RemotePlaybackState::MediaDeliveryConfirmed;
+            let evidence_remaining_ms =
+                remote_delivery_evidence_deadline(session).map(|deadline| {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .unwrap_or_default()
+                        .as_millis()
+                });
             tracing::info!(
                 session_id = %gid,
                 owner = session.owner,
                 attribution = ?attribution,
+                event_trigger = "second-distinct-attributed-media-segment",
+                last_confirmed_remote_segment = ?session.last_successful_remote_segment_path,
+                expected_buffered_coverage_remaining_ms = ?evidence_remaining_ms,
+                remote_ownership_state = ?session.remote_playback_state,
                 successful_remote_inits = session.successful_remote_inits.len(),
                 successful_remote_segments = session.successful_remote_segments.len(),
                 "AirPlay remote media delivery confirmed"
@@ -1484,6 +1659,16 @@ mod tests {
         }
     }
 
+    fn remote_planned_track() -> PlannedTrack {
+        PlannedTrack {
+            manifest: VirtualManifest::new("track".into(), ContentType::Video)
+                .set_duration(Some(60))
+                .set_segment_durations(vec![5.0, 5.0, 5.0, 5.0]),
+            context: ProfileContext::default(),
+            profile: PlannedProfile::Video,
+        }
+    }
+
     fn direct_video(id: &str) -> PlannedTrack {
         let mut context = ProfileContext::default();
         context.input_ctx.codec = "h264".into();
@@ -1671,6 +1856,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_delivery_accepts_sustained_webkit_route_proxy_traffic() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking.create_session(gid, 7, vec![planned_track()]).await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+
+        for path in ["/video/0.m4s", "/video/1.m4s"] {
+            tracking
+                .observe_remote_hls_response(
+                    &gid,
+                    RemoteHlsStage::MediaSegment,
+                    RemoteRequestAttribution::WebKitRouteProxyCandidate,
+                    path,
+                    true,
+                )
+                .await;
+        }
+
+        assert_eq!(
+            tracking.remote_playback_state(&gid).await,
+            Some(RemotePlaybackState::MediaDeliveryConfirmed)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_delivery_survives_transient_webkit_disconnect_while_traffic_continues() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session(gid, 7, vec![remote_planned_track()])
+            .await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        for segment in 0..2 {
+            tracking
+                .observe_remote_hls_response(
+                    &gid,
+                    RemoteHlsStage::MediaSegment,
+                    RemoteRequestAttribution::RemoteNetworkCandidate,
+                    &format!("/api/v1/remote/{gid}/track/{segment}.m4s"),
+                    true,
+                )
+                .await;
+        }
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::Disconnected)
+            .await
+            .unwrap();
+
+        let uncertain = tracking.remote_playback_status(&gid, 7).await.unwrap();
+        assert_eq!(uncertain.state, RemotePlaybackState::MediaDeliveryConfirmed);
+        assert!(uncertain.route_loss_reported);
+        assert!(uncertain.delivery_evidence_remaining_ms.unwrap() > 0);
+
+        tracking
+            .observe_remote_hls_response(
+                &gid,
+                RemoteHlsStage::MediaSegment,
+                RemoteRequestAttribution::RemoteNetworkCandidate,
+                &format!("/api/v1/remote/{gid}/track/2.m4s"),
+                true,
+            )
+            .await;
+        let continued = tracking.remote_playback_status(&gid, 7).await.unwrap();
+        assert_eq!(continued.state, RemotePlaybackState::MediaDeliveryConfirmed);
+        assert!(!continued.route_loss_reported);
+        assert_eq!(continued.successful_remote_segments, 3);
+        let last_segment = format!("/api/v1/remote/{gid}/track/2.m4s");
+        assert_eq!(
+            continued.last_remote_segment_path.as_deref(),
+            Some(last_segment.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_delivery_disconnects_only_after_buffer_evidence_expires() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session(gid, 7, vec![remote_planned_track()])
+            .await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        for segment in 0..2 {
+            tracking
+                .observe_remote_hls_response(
+                    &gid,
+                    RemoteHlsStage::MediaSegment,
+                    RemoteRequestAttribution::RemoteNetworkCandidate,
+                    &format!("/api/v1/remote/{gid}/track/{segment}.m4s"),
+                    true,
+                )
+                .await;
+        }
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::Disconnected)
+            .await
+            .unwrap();
+        {
+            let mut inner = tracking.inner.write().await;
+            let session = inner.sessions.get_mut(&gid).unwrap();
+            for deadline in session.remote_delivery_coverage_until.values_mut() {
+                *deadline = Instant::now() - Duration::from_secs(10);
+            }
+        }
+
+        let status = tracking.remote_playback_status(&gid, 7).await.unwrap();
+        assert_eq!(status.state, RemotePlaybackState::Disconnected);
+        assert_eq!(status.delivery_evidence_remaining_ms, Some(0));
+    }
+
+    #[tokio::test]
+    async fn confirmed_delivery_survives_expired_coverage_without_terminal_signal() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking
+            .create_session(gid, 7, vec![remote_planned_track()])
+            .await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::WirelessRouteReported)
+            .await
+            .unwrap();
+        for segment in 0..2 {
+            tracking
+                .observe_remote_hls_response(
+                    &gid,
+                    RemoteHlsStage::MediaSegment,
+                    RemoteRequestAttribution::RemoteNetworkCandidate,
+                    &format!("/api/v1/remote/{gid}/track/{segment}.m4s"),
+                    true,
+                )
+                .await;
+        }
+        {
+            let mut inner = tracking.inner.write().await;
+            let session = inner.sessions.get_mut(&gid).unwrap();
+            for deadline in session.remote_delivery_coverage_until.values_mut() {
+                *deadline = Instant::now() - Duration::from_secs(10);
+            }
+        }
+
+        let status = tracking.remote_playback_status(&gid, 7).await.unwrap();
+        assert_eq!(status.state, RemotePlaybackState::MediaDeliveryConfirmed);
+        assert_eq!(status.delivery_evidence_remaining_ms, Some(0));
+        assert!(!status.route_loss_reported);
+    }
+
+    #[tokio::test]
     async fn route_report_without_remote_traffic_becomes_stalled() {
         let tracking = StreamTracking::with_policy(policy());
         let gid = Uuid::new_v4();
@@ -1694,6 +2034,30 @@ mod tests {
         let status = tracking.remote_playback_status(&gid, 7).await.unwrap();
         assert_eq!(status.state, RemotePlaybackState::HandoffStalled);
         assert_eq!(status.successful_remote_segments, 0);
+    }
+
+    #[tokio::test]
+    async fn picker_intent_does_not_start_the_receiver_delivery_deadline() {
+        let tracking = StreamTracking::with_policy(policy());
+        let gid = Uuid::new_v4();
+        tracking.create_session(gid, 7, vec![planned_track()]).await;
+        tracking
+            .set_remote_playback_state(&gid, 7, RemotePlaybackState::HandoffRequested)
+            .await
+            .unwrap();
+
+        let status = tracking.remote_playback_status(&gid, 7).await.unwrap();
+        assert_eq!(status.state, RemotePlaybackState::HandoffRequested);
+        assert_eq!(status.handoff_elapsed_ms, None);
+        assert!(tracking
+            .inner
+            .read()
+            .await
+            .sessions
+            .get(&gid)
+            .unwrap()
+            .handoff_started_at
+            .is_none());
     }
 
     #[tokio::test]
