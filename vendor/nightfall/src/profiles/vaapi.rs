@@ -26,7 +26,7 @@ impl VaapiTranscodeProfile {
         let hw_targets = fs::read_dir("/dev/dri")
             .ok()?
             .filter_map(Result::ok)
-            .filter(|x| x.file_name().to_string_lossy().find("render").is_some())
+            .filter(|x| x.file_name().to_string_lossy().contains("render"))
             .map(|x| x.path())
             .collect::<Vec<_>>();
 
@@ -116,7 +116,7 @@ impl TranscodingProfile for VaapiTranscodeProfile {
             )?;
 
             for feature in required_features {
-                if !&device_profile.entrypoints.contains(&feature) {
+                if !device_profile.entrypoints.contains(&feature) {
                     continue;
                 }
             }

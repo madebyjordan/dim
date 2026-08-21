@@ -1,0 +1,35 @@
+name: Nightfall FFmpeg 9 acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ffmpeg9:
+    name: Real FFmpeg 9 media profiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - name: Install build and provisioning dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libva-dev libva-drm2 libva2 sqlite3 curl xz-utils
+      - name: Provision verified FFmpeg 9 tools
+        run: bash scripts/install-ffmpeg9-linux.sh utils amd64
+      - name: Report the accepted media toolchain
+        run: |
+          utils/ffmpeg -version | head -n 1
+          utils/ffprobe -version | head -n 1
+      - name: Run the real-media Nightfall acceptance test
+        run: >-
+          cargo test --locked -p dim-core
+          streaming::compatibility_tests::ffmpeg9_profiles_produce_playable_fmp4_hls_and_subtitles
+          -- --ignored --exact

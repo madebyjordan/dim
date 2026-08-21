@@ -397,7 +397,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    #[ignore = "real FFmpeg 9 acceptance; run explicitly on provisioned release hosts"]
+    #[ignore = "real FFmpeg 9 acceptance; run via the manual Nightfall FFmpeg 9 workflow"]
     fn ffmpeg9_profiles_produce_playable_fmp4_hls_and_subtitles() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.mp4");

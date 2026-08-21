@@ -257,8 +257,7 @@ mod tests {
         ctx.output_ctx.codec = "aac".into();
         ctx.output_ctx.audio_channels = 6;
         ctx.output_ctx.audio_channel_layout = Some("5.1".into());
-        ctx.output_ctx.audio_filter =
-            Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR".into());
+        ctx.output_ctx.audio_filter = Some("pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=SL|BR=SR".into());
         ctx.output_ctx.bitrate = Some(576_000);
 
         let args = AacTranscodeProfile.build(ctx).unwrap();

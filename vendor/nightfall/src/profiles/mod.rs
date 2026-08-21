@@ -51,7 +51,7 @@ pub fn profiles_init(_ffmpeg_bin: String) {
         Some(Box::new(AmfTranscodeProfile)),
     ];
 
-    let profiles = profiles.into_iter().filter_map(|x| x).collect::<Vec<_>>();
+    let profiles = profiles.into_iter().flatten().collect::<Vec<_>>();
 
     let _ = PROFILES.set(
         profiles
@@ -300,8 +300,7 @@ impl OutputCtx {
     }
 
     pub fn segment_duration(&self) -> f64 {
-        self.hls_segment_duration
-            .unwrap_or(self.target_gop as f64)
+        self.hls_segment_duration.unwrap_or(self.target_gop as f64)
     }
 }
 

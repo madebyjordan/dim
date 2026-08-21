@@ -259,8 +259,8 @@ impl StateManager {
             let hard_seek_reason = if chunk < session.start_num() {
                 Some("backward-before-process-start")
             } else if chunk > current_chunk + 15
-                    && Instant::now() < stats.last_hard_seek + Duration::from_secs(15)
-                    && chunk > stats.hard_seeked_at
+                && Instant::now() < stats.last_hard_seek + Duration::from_secs(15)
+                && chunk > stats.hard_seeked_at
             {
                 Some("forward-after-recent-hard-seek")
             } else if eta > eta_tol {

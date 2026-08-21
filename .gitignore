@@ -7,7 +7,6 @@ utils/ffprobe*
 *.sqlite
 target
 target/*
-vendor/nightfall/Cargo.lock
 expanded.rs
 *.db
 build

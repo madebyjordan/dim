@@ -281,7 +281,7 @@ impl Session {
     pub fn current_chunk(&self) -> u32 {
         let frame_rate = self.profile_ctx.input_ctx.fps.max(1.0);
         let frame = match self.profile.stream_type() {
-            StreamType::Audio { .. } => {
+            StreamType::Audio => {
                 self.get_key("out_time_us")
                     .map(|x| x.parse::<u64>().unwrap_or(0))
                     .unwrap_or(0)
@@ -289,7 +289,7 @@ impl Session {
                     / 1000
                     * frame_rate as u64
             }
-            StreamType::Video { .. } => self
+            StreamType::Video => self
                 .get_key("frame")
                 .map(|x| x.parse::<u64>().unwrap_or(0))
                 .unwrap_or(0),
@@ -297,10 +297,10 @@ impl Session {
         } as u32;
 
         match self.profile.stream_type() {
-            StreamType::Audio { .. } => {
+            StreamType::Audio => {
                 (frame / (self.chunk_size as f64 * frame_rate) as u32).max(self.last_chunk)
             }
-            StreamType::Video { .. } => {
+            StreamType::Video => {
                 frame / (self.chunk_size as f64 * frame_rate) as u32
                     + self.profile_ctx.output_ctx.start_num
             }

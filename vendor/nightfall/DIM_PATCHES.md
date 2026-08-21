@@ -13,6 +13,13 @@ Nightfall's process-state helper calls a `psutil` status API that is not impleme
 uses the native Unix signal existence check on macOS so failed and completed FFmpeg sessions can be
 observed and cleaned up without panicking.
 
+Milestone 1 adds standalone adapter guardrails. Eclipse commits Nightfall's independent lockfile,
+pins the patched `mp4-rust` revision in the manifest, and validates formatting, unit tests, and
+Clippy on Linux, macOS, and Windows. The real FFmpeg 9 media exercise remains ignored during fast
+tests and runs only through its manual acceptance workflow. Strict linting explicitly defers the
+legacy `err-derive` generated-impl warning, the public error-size API debt, and VAAPI's existing
+single-pass profile-probing control flow to a runtime milestone.
+
 Milestone 3 treats this vendor directory as a compatibility adapter. Dim owns playback planning,
 admission, ownership, and lifecycle outside Nightfall. The adapter propagates profile-build/spawn
 failures, observes nonzero exits, ignores malformed progress lines, and removes process statistics

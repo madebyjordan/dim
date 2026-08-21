@@ -40,19 +40,17 @@ cfg_if::cfg_if! {
         use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
         use winapi::um::processthreadsapi::OpenProcess;
         use winapi::um::processthreadsapi::GetExitCodeProcess;
-        use winapi::shared::winerror::WAIT_TIMEOUT;
         use winapi::um::minwinbase::STILL_ACTIVE;
-        use winapi::shared::ntdef::NULL;
 
         pub fn pause_proc(pid: i32) {
             unsafe {
                 let process_handle = OpenProcess(PROCESS_ALL_ACCESS, 0, pid as u32);
 
-                if process_handle == NULL {
+                if process_handle.is_null() {
                     return;
                 }
 
-                NtSuspendProcess(process_handle);
+                let _ = NtSuspendProcess(process_handle);
             }
         }
 
@@ -60,11 +58,11 @@ cfg_if::cfg_if! {
             unsafe {
                 let process_handle = OpenProcess(PROCESS_ALL_ACCESS, 0, pid as u32);
 
-                if process_handle == NULL {
+                if process_handle.is_null() {
                     return;
                 }
 
-                NtResumeProcess(process_handle);
+                let _ = NtResumeProcess(process_handle);
             }
         }
 
@@ -74,7 +72,7 @@ cfg_if::cfg_if! {
                 let mut exit_code = 0;
 
                 // process probably doesnt exist at this point
-                if process_handle == NULL {
+                if process_handle.is_null() {
                     return true;
                 }
 
@@ -88,18 +86,36 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::is_process_effectively_dead;
 
+    #[cfg(unix)]
+    fn sleeping_child() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("test process should start")
+    }
+
+    #[cfg(windows)]
+    fn sleeping_child() -> std::process::Child {
+        std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .spawn()
+            .expect("test process should start")
+    }
+
     #[test]
-    fn detects_live_and_reaped_processes_without_psutil() {
+    fn detects_live_and_reaped_processes() {
         assert!(!is_process_effectively_dead(std::process::id()));
 
-        let mut child = std::process::Command::new("sleep")
-            .arg("10")
-            .spawn()
-            .expect("test process should start");
+        let mut child = sleeping_child();
         let pid = child.id();
 
         assert!(!is_process_effectively_dead(pid));

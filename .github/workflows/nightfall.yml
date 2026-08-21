@@ -1,0 +1,79 @@
+name: Nightfall
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/nightfall.yml"
+      - ".github/workflows/nightfall-ffmpeg9.yml"
+      - "vendor/nightfall/**"
+      - "dim-core/Cargo.toml"
+      - "dim-core/src/streaming/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "package.json"
+  pull_request:
+    branches: [master]
+    paths:
+      - ".github/workflows/nightfall.yml"
+      - ".github/workflows/nightfall-ffmpeg9.yml"
+      - "vendor/nightfall/**"
+      - "dim-core/Cargo.toml"
+      - "dim-core/src/streaming/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt
+      - name: Check Nightfall formatting
+        run: cargo fmt --manifest-path vendor/nightfall/Cargo.toml --all -- --check
+
+  adapter:
+    name: Unit tests and Clippy (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux (CUDA, VAAPI, SSA)
+            os: ubuntu-latest
+            feature_flags: --all-features
+          - platform: macOS (CUDA, SSA)
+            os: macos-latest
+            feature_flags: --no-default-features --features cuda,ssa_transmux
+          - platform: Windows (AMF, SSA)
+            os: windows-latest
+            feature_flags: --no-default-features --features ssa_transmux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: clippy
+      - name: Install Linux VAAPI headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libva-dev libva-drm2 libva2
+      - name: Run Nightfall unit tests
+        run: cargo test --manifest-path vendor/nightfall/Cargo.toml --locked --all-targets ${{ matrix.feature_flags }}
+      - name: Run Nightfall Clippy
+        run: cargo clippy --manifest-path vendor/nightfall/Cargo.toml --locked --all-targets ${{ matrix.feature_flags }}

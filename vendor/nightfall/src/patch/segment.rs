@@ -44,7 +44,7 @@ impl Segment {
     }
 
     pub fn from_reader(mut reader: impl BufRead + Seek, size: u64) -> Result<(Self, u64)> {
-        let start = reader.seek(SeekFrom::Current(0))?;
+        let start = reader.stream_position()?;
 
         let mut current = start;
         let mut segment = Self::default();
@@ -55,7 +55,7 @@ impl Segment {
 
             match name {
                 BoxType::SidxBox => {
-                    let start = reader.seek(SeekFrom::Current(0))? - 8;
+                    let start = reader.stream_position()? - 8;
                     reader.seek(SeekFrom::Start(start))?;
 
                     let mut raw = vec![0; s as usize];
@@ -70,7 +70,7 @@ impl Segment {
 
                     // Since mdat would be the last box in the segment, we just return the segment
                     // here as well as the leftover bytes.
-                    let leftover_bytes = reader.seek(SeekFrom::Current(0))?;
+                    let leftover_bytes = reader.stream_position()?;
                     return Ok((segment, leftover_bytes));
                 }
                 BoxType::StypBox => {
@@ -84,7 +84,7 @@ impl Segment {
                 }
             }
 
-            current = reader.seek(SeekFrom::Current(0))?;
+            current = reader.stream_position()?;
         }
 
         // NOTE: In some cases, we could get here without a complete segment existing.
@@ -105,8 +105,10 @@ impl Segment {
     /// Method will create a styp box for this segment if it doesnt exist
     pub fn gen_styp(mut self) -> Self {
         if self.styp.is_none() {
-            let mut styp = FtypBox::default();
-            styp.box_type = BoxType::StypBox;
+            let styp = FtypBox {
+                box_type: BoxType::StypBox,
+                ..Default::default()
+            };
 
             self.styp = Some(styp);
         }
@@ -254,7 +256,7 @@ pub async fn patch_segment(file: impl AsRef<Path> + Send + 'static, mut seq: u32
         let mut reader = BufReader::new(f);
 
         let mut segments = VecDeque::new();
-        let mut current = reader.seek(SeekFrom::Current(0))?;
+        let mut current = reader.stream_position()?;
 
         while current < size {
             let (segment, new_position) = Segment::from_reader(&mut reader, size)?;

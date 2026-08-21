@@ -172,10 +172,7 @@ impl TranscodingProfile for H264TranscodeProfile {
             args.push(format!("{duration:.6}"));
         }
         if ctx.output_ctx.force_cfr {
-            args.extend([
-                "-r".into(),
-                format!("{:.12}", ctx.input_ctx.fps),
-            ]);
+            args.extend(["-r".into(), format!("{:.12}", ctx.input_ctx.fps)]);
         }
 
         if let Some(filter) = browser_h264_filter(&ctx) {
@@ -437,9 +434,7 @@ fn bt709_oetf(sample: f64) -> f64 {
     }
 }
 
-pub(crate) fn hardware_h264_contract_supported(
-    ctx: &ProfileContext,
-) -> Result<(), NightfallError> {
+pub(crate) fn hardware_h264_contract_supported(ctx: &ProfileContext) -> Result<(), NightfallError> {
     if ctx.output_ctx.codec != "h264" {
         return Err(NightfallError::ProfileNotSupported(
             "Hardware browser profile only supports h264 output.".into(),
@@ -447,8 +442,7 @@ pub(crate) fn hardware_h264_contract_supported(
     }
     if ctx.output_ctx.hdr_transfer.is_some() {
         return Err(NightfallError::ProfileNotSupported(
-            "Hardware profile has no verified HDR-to-SDR filter; use the software fallback."
-                .into(),
+            "Hardware profile has no verified HDR-to-SDR filter; use the software fallback.".into(),
         ));
     }
     if !matches!(ctx.input_ctx.pix_fmt.as_str(), "yuv420p" | "nv12") {
@@ -460,18 +454,12 @@ pub(crate) fn hardware_h264_contract_supported(
     Ok(())
 }
 
-pub(crate) fn append_h264_output_signalling(
-    args: &mut Vec<String>,
-    ctx: &ProfileContext,
-) {
+pub(crate) fn append_h264_output_signalling(args: &mut Vec<String>, ctx: &ProfileContext) {
     if let Some(profile) = ctx.output_ctx.video_profile.as_ref() {
         args.extend(["-profile:v".into(), profile.clone()]);
     }
     if let Some(level) = ctx.output_ctx.video_level {
-        args.extend([
-            "-level:v".into(),
-            format!("{}.{}", level / 10, level % 10),
-        ]);
+        args.extend(["-level:v".into(), format!("{}.{}", level / 10, level % 10)]);
     }
     for (flag, value) in [
         ("-color_range", ctx.output_ctx.color_range.as_ref()),

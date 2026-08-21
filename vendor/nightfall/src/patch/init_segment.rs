@@ -26,7 +26,7 @@ pub struct InitSegment {
 impl InitSegment {
     pub fn from_reader(mut reader: impl BufRead + Seek, size: u64) -> Result<Self> {
         let mut segment = Self::default();
-        let start = reader.seek(SeekFrom::Current(0))?;
+        let start = reader.stream_position()?;
 
         let mut current = start;
         let mut current_segment = Segment::default();
@@ -37,7 +37,7 @@ impl InitSegment {
 
             match name {
                 BoxType::SidxBox => {
-                    let start = reader.seek(SeekFrom::Current(0))? - 8;
+                    let start = reader.stream_position()? - 8;
                     reader.seek(SeekFrom::Start(start))?;
 
                     let mut raw = vec![0; s as usize];
@@ -78,7 +78,7 @@ impl InitSegment {
                 }
             }
 
-            current = reader.seek(SeekFrom::Current(0))?;
+            current = reader.stream_position()?;
         }
 
         Ok(segment)

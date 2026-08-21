@@ -30,7 +30,7 @@ impl TranscodingProfile for CudaTranscodeProfile {
 
     fn is_enabled(&self) -> Result<(), NightfallError> {
         // TODO: Add runtime profile support detection.
-        return Ok(());
+        Ok(())
     }
 
     fn build(&self, ctx: ProfileContext) -> Option<Vec<String>> {
