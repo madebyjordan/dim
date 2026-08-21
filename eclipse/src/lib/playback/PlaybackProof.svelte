@@ -750,6 +750,7 @@
       element.load();
       await waitForAirPlayMetadata(element);
       airPlayState = 'ready';
+      error = null;
       logPlaybackLifecycle('airplay-resource-ready', ownership, {
         sessionId: remote.gid,
         playbackPlan: remote.playback_plan,
@@ -1418,6 +1419,7 @@
   <video bind:this={video} playsinline onclick={togglePlayback}></video>
   <div
     class="remote-airplay-host"
+    class:airplay-active={airPlayState === 'active'}
     bind:this={remoteAirPlayHost}
     aria-hidden="true"
   ></div>
@@ -1637,6 +1639,22 @@
   .remote-airplay-host :global(video) {
     width: 1px;
     height: 1px;
+  }
+  /* The remote media element is also Safari's native AirPlay status surface. Keep it tiny while
+     preparing so it cannot cover local playback, then promote that exact routed element after
+     receiver delivery is proven. WebKit supplies the icon, localized copy, and receiver name. */
+  .remote-airplay-host.airplay-active {
+    inset: 0;
+    width: auto;
+    height: auto;
+    opacity: 1;
+    background: #000;
+  }
+  .remote-airplay-host.airplay-active :global(video) {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
   }
   .controls-visible .controls {
     opacity: 1;
