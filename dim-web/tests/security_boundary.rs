@@ -218,6 +218,7 @@ async fn enforces_the_application_security_boundary() {
         (Method::POST, "/api/v1/library/1/scan", ""),
         (Method::DELETE, "/api/v1/library/1", ""),
         (Method::PATCH, "/api/v1/media/1", "{}"),
+        (Method::PATCH, "/api/v1/media/1/manual", "{}"),
         (Method::DELETE, "/api/v1/media/1", ""),
         (Method::POST, "/api/v1/media/1/rematch", "{}"),
         (Method::PATCH, "/api/v1/mediafile/match", "{}"),

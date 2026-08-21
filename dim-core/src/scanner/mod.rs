@@ -1136,6 +1136,57 @@ mod tv_metadata_candidate_tests {
         (conn, file_id)
     }
 
+    #[tokio::test]
+    async fn manual_metadata_is_not_reprocessed_during_a_rescan() {
+        let (conn, file_id) = local_work(MediaType::Movie, "Private Recording", None, None).await;
+        let (file, original_media_id) = {
+            let mut lock = conn.writer().lock_owned().await;
+            let mut tx = dim_database::write_tx(&mut lock).await.unwrap();
+            sqlx::query(
+                "UPDATE mediafile SET manual_override = 1, match_provenance = 'manual_metadata' WHERE id = ?",
+            )
+            .bind(file_id)
+            .execute(&mut tx)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            drop(lock);
+            let mut tx = conn.read().begin().await.unwrap();
+            let file = MediaFile::get_one(&mut tx, file_id).await.unwrap();
+            let media_id = file.media_id;
+            (file, media_id)
+        };
+        let mut insertables = Vec::new();
+        let mut existing_work = Vec::new();
+        handle_assessment(
+            &conn,
+            file.library_id,
+            None,
+            None,
+            &mut insertables,
+            &mut existing_work,
+            true,
+            (
+                PathBuf::from(&file.target_file),
+                Err(CreatorError::FileExists),
+                vec![Metadata {
+                    name: "A Different Parsed Name".into(),
+                    year: Some(1999),
+                    season: None,
+                    episode: None,
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(existing_work.is_empty());
+        let mut tx = conn.read().begin().await.unwrap();
+        let after = MediaFile::get_one(&mut tx, file_id).await.unwrap();
+        assert_eq!(after.media_id, original_media_id);
+        assert!(after.manual_override);
+    }
+
     #[test]
     fn uses_show_folder_identity_with_episode_numbers_from_filename() {
         let root = PathBuf::from("/media/shows");

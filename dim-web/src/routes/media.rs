@@ -19,6 +19,8 @@ use dim_core::tree;
 use dim_database::compact_mediafile::CompactMediafile;
 use dim_database::episode::Episode;
 use dim_database::genre::Genre;
+use dim_database::genre::InsertableGenre;
+use dim_database::genre::InsertableGenreMedia;
 use dim_database::library::MediaType;
 use dim_database::media::Media;
 use dim_database::media::UpdateMedia;
@@ -62,6 +64,8 @@ pub enum Error {
     Database(#[from] DatabaseError),
     /// Failed to search for tmdb_id when rematching: {0}
     ExternalSearchError(String),
+    /// Invalid manual metadata.
+    InvalidManualMetadata,
 }
 
 impl IntoResponse for Error {
@@ -84,6 +88,11 @@ impl IntoResponse for Error {
                 StatusCode::BAD_REQUEST,
                 "invalid_media_type",
                 "Choose a supported media type.",
+            ),
+            Self::InvalidManualMetadata => crate::error::api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_manual_metadata",
+                "Check the title, year, rating, and artwork URL.",
             ),
             Self::InvalidCredentials => crate::error::api_error(
                 StatusCode::UNAUTHORIZED,
@@ -212,6 +221,15 @@ pub async fn get_media_by_id(
         .into_iter()
         .map(|x| x.name)
         .collect::<Vec<String>>();
+
+    let language = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT language FROM manual_media_metadata WHERE media_id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut tx)
+    .await
+    .map_err(DatabaseError::from)?
+    .flatten();
 
     let progress = match media.media_type {
         MediaType::Episode | MediaType::Movie => Progress::get_for_media_user(&mut tx, user.id, id)
@@ -373,6 +391,7 @@ pub async fn get_media_by_id(
         "backdrop_path": media.backdrop_path,
         "media_type": media.media_type,
         "genres": genres,
+        "language": language,
         "duration": duration,
         "tags": quality_tags,
         ..?show_run,
@@ -381,6 +400,156 @@ pub async fn get_media_by_id(
         ..?progress
     }))
     .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualMediaParams {
+    title: String,
+    synopsis: String,
+    year: Option<i64>,
+    genres: Vec<String>,
+    language: String,
+    rating: Option<f64>,
+    artwork: Option<String>,
+}
+
+fn normalize_manual_metadata(mut data: ManualMediaParams) -> Result<ManualMediaParams, Error> {
+    data.title = data.title.trim().to_owned();
+    data.synopsis = data.synopsis.trim().to_owned();
+    data.language = data.language.trim().to_owned();
+    data.artwork = data
+        .artwork
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    data.genres = data
+        .genres
+        .into_iter()
+        .map(|genre| genre.trim().to_owned())
+        .filter(|genre| !genre.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let valid_year = data.year.is_none_or(|year| (1870..=3000).contains(&year));
+    let valid_rating = data
+        .rating
+        .is_none_or(|rating| rating.is_finite() && (0.0..=10.0).contains(&rating));
+    let valid_artwork = data.artwork.as_deref().is_none_or(|url| {
+        let Ok(uri) = url.parse::<http::Uri>() else {
+            return false;
+        };
+        matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some()
+    });
+    if data.title.is_empty() || !valid_year || !valid_rating || !valid_artwork {
+        return Err(Error::InvalidManualMetadata);
+    }
+    Ok(data)
+}
+
+/// Save a user-owned identity and presentation for media that cannot be represented by the
+/// external provider. The file rows remain intact and are marked as overrides so reconciliation
+/// will preserve this association on later scans.
+pub async fn update_manual_media(
+    _owner: Owner,
+    State(AppState { conn, .. }): State<AppState>,
+    Path(id): Path<i64>,
+    Json(data): Json<ManualMediaParams>,
+) -> Result<impl IntoResponse, Error> {
+    let data = normalize_manual_metadata(data)?;
+    let mut lock = conn.writer().lock_owned().await;
+    let mut tx = dim_database::write_tx(&mut lock)
+        .await
+        .map_err(DatabaseError::from)?;
+    let media = Media::get(&mut tx, id).await?;
+
+    let poster = if let Some(artwork) = data.artwork.as_deref() {
+        let asset = movie::asset_from_url(artwork)
+            .ok_or(Error::InvalidManualMetadata)?
+            .insert(&mut tx)
+            .await?;
+        asset.into_media_poster(&mut tx, id).await?;
+        Some(asset.id)
+    } else {
+        None
+    };
+
+    sqlx::query(
+        r#"UPDATE _tblmedia
+           SET name = ?, description = ?, year = ?, rating = ?,
+               poster = COALESCE(?, poster)
+           WHERE id = ?"#,
+    )
+    .bind(&data.title)
+    .bind(if data.synopsis.is_empty() {
+        None
+    } else {
+        Some(data.synopsis.as_str())
+    })
+    .bind(data.year)
+    .bind(data.rating)
+    .bind(poster)
+    .bind(id)
+    .execute(&mut tx)
+    .await
+    .map_err(DatabaseError::from)?;
+
+    Genre::decouple_all(&mut tx, id).await?;
+    for name in data.genres {
+        let genre = InsertableGenre { name }.insert(&mut tx).await?;
+        InsertableGenreMedia::insert_pair(genre, id, &mut tx).await?;
+    }
+
+    sqlx::query(
+        r#"INSERT INTO manual_media_metadata (media_id, language, artwork_source)
+           VALUES (?, ?, ?)
+           ON CONFLICT(media_id) DO UPDATE SET
+             language = excluded.language,
+             artwork_source = COALESCE(excluded.artwork_source, artwork_source)"#,
+    )
+    .bind(id)
+    .bind(if data.language.is_empty() {
+        None
+    } else {
+        Some(data.language.as_str())
+    })
+    .bind(data.artwork)
+    .execute(&mut tx)
+    .await
+    .map_err(DatabaseError::from)?;
+
+    let updated = match media.media_type {
+        MediaType::Tv => sqlx::query(
+            r#"UPDATE mediafile SET manual_override = 1, metadata_provider = 'local',
+                 provider_external_id = NULL, match_provenance = 'manual_metadata',
+                 match_confidence = 1.0
+               WHERE id IN (
+                 SELECT mediafile.id FROM mediafile
+                 JOIN episode ON episode.id = mediafile.media_id
+                 JOIN season ON season.id = episode.seasonid
+                 WHERE season.tvshowid = ?
+               )"#,
+        )
+        .bind(id)
+        .execute(&mut tx)
+        .await
+        .map_err(DatabaseError::from)?,
+        MediaType::Movie | MediaType::Episode => sqlx::query(
+            r#"UPDATE mediafile SET manual_override = 1, metadata_provider = 'local',
+                 provider_external_id = NULL, match_provenance = 'manual_metadata',
+                 match_confidence = 1.0 WHERE media_id = ?"#,
+        )
+        .bind(id)
+        .execute(&mut tx)
+        .await
+        .map_err(DatabaseError::from)?,
+    };
+    if updated.rows_affected() == 0 {
+        return Err(Error::NotFoundError);
+    }
+
+    tx.commit().await.map_err(DatabaseError::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn get_media_files(
@@ -693,7 +862,7 @@ pub async fn rematch_media_by_id(
 
 #[cfg(test)]
 mod tests {
-    use super::get_tv_progress;
+    use super::{get_tv_progress, normalize_manual_metadata, ManualMediaParams};
     use dim_database::episode::InsertableEpisode;
     use dim_database::library::{InsertableLibrary, MediaType};
     use dim_database::media::InsertableMedia;
@@ -701,6 +870,34 @@ mod tests {
     use dim_database::progress::Progress;
     use dim_database::season::InsertableSeason;
     use dim_database::user::{InsertableUser, Login, Roles, UserSettings};
+
+    #[test]
+    fn manual_metadata_is_normalized_and_validated() {
+        let normalized = normalize_manual_metadata(ManualMediaParams {
+            title: "  Family Holiday  ".into(),
+            synopsis: "  A private recording.  ".into(),
+            year: Some(2024),
+            genres: vec![" Family ".into(), "Home Video".into(), "Family".into()],
+            language: " English ".into(),
+            rating: Some(8.5),
+            artwork: Some(" https://example.com/poster.jpg ".into()),
+        })
+        .unwrap();
+        assert_eq!(normalized.title, "Family Holiday");
+        assert_eq!(normalized.genres, vec!["Family", "Home Video"]);
+        assert_eq!(normalized.language, "English");
+
+        assert!(normalize_manual_metadata(ManualMediaParams {
+            title: "Bad artwork".into(),
+            synopsis: String::new(),
+            year: None,
+            genres: vec![],
+            language: String::new(),
+            rating: None,
+            artwork: Some("file:///private/poster.jpg".into()),
+        })
+        .is_err());
+    }
 
     #[tokio::test]
     async fn completed_episode_uses_next_episodes_progress() {

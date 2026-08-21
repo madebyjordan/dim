@@ -10,18 +10,22 @@
   let {
     library,
     scanning,
+    hasselection,
     onautoscan,
     onscan,
-    ondelete
+    ondelete,
+    oneditinfo
   }: {
     library: Library;
     scanning: boolean;
+    hasselection: boolean;
     onautoscan: (enabled: boolean) => void | Promise<void>;
     onscan: () => void | Promise<void>;
     ondelete: () => void | Promise<void>;
+    oneditinfo: () => void;
   } = $props();
 
-  let pending = $state<'auto-scan' | 'scan' | 'delete' | null>(null);
+  let pending = $state<'auto-scan' | 'scan' | 'delete' | 'edit' | null>(null);
 
   async function run(
     action: NonNullable<typeof pending>,
@@ -94,6 +98,18 @@
         onclick={() => void run('delete', ondelete, popout)}
         >Delete library</button
       >
+      {#if hasselection}
+        <div class="file-settings">
+          <h2>File settings</h2>
+          <button
+            type="button"
+            data-popout-item
+            disabled={pending !== null}
+            onclick={() => void run('edit', oneditinfo, popout)}
+            >Edit Info</button
+          >
+        </div>
+      {/if}
     </div>
   {/snippet}
 </Popout>
@@ -128,6 +144,13 @@
 
   button.danger[data-popout-item] {
     color: var(--color-danger);
+  }
+
+  .file-settings {
+    display: grid;
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--color-stroke);
   }
 
   svg {

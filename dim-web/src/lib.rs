@@ -161,6 +161,10 @@ fn media_routes(AppState { .. }: AppState) -> Router<AppState> {
             get(routes::media::get_media_files),
         )
         .route(
+            "/api/v1/media/:id/manual",
+            patch(routes::media::update_manual_media),
+        )
+        .route(
             "/api/v1/media/:id/tree",
             get(routes::media::get_mediafile_tree),
         )

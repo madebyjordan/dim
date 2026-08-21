@@ -74,6 +74,7 @@ export type Media = {
   duration: number;
   progress?: number;
   description?: string | null;
+  language?: string | null;
   added?: string | null;
   backdrop_path?: string | null;
   poster_path?: string | null;
@@ -111,6 +112,9 @@ export type MediaFile = {
   channels?: number | null;
   profile?: string | null;
   audio_language?: string | null;
+  metadata_provider?: string | null;
+  provider_external_id?: string | null;
+  match_provenance?: string | null;
   manual_override: boolean;
 };
 
@@ -162,6 +166,16 @@ export type ScanStatus = {
 };
 
 export type RematchMedia = { external_id: string; media_type: 'movie' | 'tv' };
+
+export type ManualMedia = {
+  title: string;
+  synopsis: string;
+  year?: number | null;
+  genres: Array<string>;
+  language: string;
+  rating?: number | null;
+  artwork?: string | null;
+};
 
 export type ExternalMedia = Record<string, unknown>;
 
@@ -333,6 +347,7 @@ export interface ApiOperations {
   retryLibraryScan: '/library/{id}/scan';
   getMedia: '/media/{id}';
   getMediaFiles: '/media/{id}/files';
+  saveManualMedia: '/media/{id}/manual';
   rematchMedia: '/media/{id}/rematch';
   saveProgress: '/media/{id}/progress';
   searchMedia: '/search';

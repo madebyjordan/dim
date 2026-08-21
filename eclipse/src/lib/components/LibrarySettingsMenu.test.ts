@@ -13,9 +13,11 @@ const library = {
 };
 type TestProps = {
   scanning: boolean;
+  hasselection: boolean;
   onautoscan: (enabled: boolean) => void | Promise<void>;
   onscan: () => void | Promise<void>;
   ondelete: () => void | Promise<void>;
+  oneditinfo: () => void;
 };
 
 afterEach(async () => {
@@ -29,7 +31,8 @@ function render(props: Partial<TestProps> = {}) {
   const callbacks = {
     onautoscan: vi.fn(),
     onscan: vi.fn(),
-    ondelete: vi.fn()
+    ondelete: vi.fn(),
+    oneditinfo: vi.fn()
   };
   components.push(
     mount(LibrarySettingsMenu, {
@@ -37,6 +40,7 @@ function render(props: Partial<TestProps> = {}) {
       props: {
         library,
         scanning: false,
+        hasselection: false,
         ...callbacks,
         ...props
       }
@@ -69,6 +73,7 @@ describe('LibrarySettingsMenu', () => {
     expect(dialog.textContent).toContain('Library settings');
     expect(dialog.textContent).toContain('Manual scan');
     expect(dialog.textContent).toContain('Delete library');
+    expect(dialog.textContent).not.toContain('File settings');
     expect(control?.getAttribute('aria-checked')).toBe('true');
     expect(document.activeElement).toBe(control);
   });
@@ -109,5 +114,19 @@ describe('LibrarySettingsMenu', () => {
     await tick();
     expect(ondelete).toHaveBeenCalledOnce();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('shows contextual file settings only while media is selected', async () => {
+    const oneditinfo = vi.fn();
+    render({ hasselection: true, oneditinfo });
+    const { dialog } = await open();
+
+    expect(dialog.textContent).toContain('File settings');
+    const edit = Array.from(dialog.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Edit Info'
+    ) as HTMLButtonElement;
+    edit.click();
+    await tick();
+    expect(oneditinfo).toHaveBeenCalledOnce();
   });
 });

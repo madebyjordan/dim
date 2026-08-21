@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { HTMLButtonAttributes } from 'svelte/elements';
-  import type { Library, User } from '$lib/api/generated';
+  import type { Library, Media, User } from '$lib/api/generated';
   import { imageUrl } from '$lib/catalog/catalog';
   import IconButton from '$lib/primitives/IconButton.svelte';
   import DropdownMenu from '$lib/primitives/DropdownMenu.svelte';
@@ -14,9 +14,11 @@
     user,
     scanText,
     activeLibraryScanning,
+    selectedMedia,
     onlibraryautoscan,
     onlibraryscan,
     onlibrarydelete,
+    onmediaedit,
     onlibrary,
     onsearch,
     onsearchclose,
@@ -28,12 +30,14 @@
     user: User | null;
     scanText: string | null;
     activeLibraryScanning: boolean;
+    selectedMedia: Media | null;
     onlibraryautoscan: (
       library: Library,
       enabled: boolean
     ) => void | Promise<void>;
     onlibraryscan: (library: Library) => void | Promise<void>;
     onlibrarydelete: (library: Library) => void | Promise<void>;
+    onmediaedit: () => void;
     onlibrary: (library: Library) => void;
     onsearch: (query: string) => void;
     onsearchclose: () => void;
@@ -142,9 +146,11 @@
       <LibrarySettingsMenu
         library={activeLibrary}
         scanning={activeLibraryScanning}
+        hasselection={selectedMedia !== null}
         onautoscan={(enabled) => onlibraryautoscan(activeLibrary, enabled)}
         onscan={() => onlibraryscan(activeLibrary)}
         ondelete={() => onlibrarydelete(activeLibrary)}
+        oneditinfo={onmediaedit}
       />
     {/if}
     <DropdownMenu

@@ -26,6 +26,7 @@
   } from '$lib/catalog/catalog';
   import AddLibraryDialog from '$lib/components/AddLibraryDialog.svelte';
   import AppHeader from '$lib/components/AppHeader.svelte';
+  import EditMediaDialog from '$lib/components/EditMediaDialog.svelte';
   import MediaBackdrop from '$lib/components/MediaBackdrop.svelte';
   import MediaCarousel from '$lib/components/MediaCarousel.svelte';
   import MediaPresentation from '$lib/components/MediaPresentation.svelte';
@@ -79,6 +80,7 @@
   let detailLoading = $state(false);
   let searching = $state(false);
   let addLibraryOpen = $state(false);
+  let editMediaOpen = $state(false);
   let error = $state<string | null>(null);
   let playbackError = $state<string | null>(null);
   let PlaybackSurface = $state<PlaybackComponent | null>(null);
@@ -263,6 +265,17 @@
           : 'The library could not be deleted';
       throw cause;
     }
+  }
+
+  async function handleMetadataSaved(title: string) {
+    if (activeLibraryId === null) return;
+    const libraryId = activeLibraryId;
+    clearSelection();
+    await loadLibraryMedia(libraryId);
+    const updated = libraryItems.find(
+      (item) => item.name.toLocaleLowerCase() === title.toLocaleLowerCase()
+    );
+    if (updated) await selectItem(updated);
   }
 
   async function disposePreparedPlayback(
@@ -755,9 +768,11 @@
     user={session.user}
     {scanText}
     {activeLibraryScanning}
+    {selectedMedia}
     onlibraryautoscan={updateLibraryAutoScan}
     onlibraryscan={scanLibrary}
     onlibrarydelete={deleteLibrary}
+    onmediaedit={() => (editMediaOpen = true)}
     onlibrary={(library) => void chooseLibrary(library)}
     onsearch={(query) => void search(query)}
     onsearchclose={closeSearch}
@@ -855,6 +870,15 @@
   open={addLibraryOpen}
   onclose={() => (addLibraryOpen = false)}
   oncreated={(id) => void refreshLibraries(id)}
+/>
+
+<EditMediaDialog
+  open={editMediaOpen}
+  media={selectedMedia}
+  file={selectedFile}
+  library={libraries.find((library) => library.id === activeLibraryId) ?? null}
+  onclose={() => (editMediaOpen = false)}
+  onsaved={handleMetadataSaved}
 />
 
 <style>
